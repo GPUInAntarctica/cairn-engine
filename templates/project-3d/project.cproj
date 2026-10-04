@@ -1,0 +1,8 @@
+{
+  "format": "cairn-project",
+  "version": 1,
+  "name": "New Project",
+  "template": "project-3d",
+  "engineVersion": "0.1.0",
+  "createdAt": ""
+}

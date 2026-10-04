@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+build/
+engine/build/
+engine/build-asan/
+engine/build-dbg/
+editor/renderer/dist/
+*.node
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exp
+*.lib
+*.obj
+*.o
+*.a
+
+# User project state
+*.cproj.user
+.cairn-home/
+
+# Logs & temp
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp

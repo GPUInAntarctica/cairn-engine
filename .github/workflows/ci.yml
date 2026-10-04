@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libnss3 libasound2t64
+      - name: Install npm dependencies
+        run: npm ci
+      - name: Build engine, addon and renderer
+        run: npm run build
+      - name: Engine unit tests
+        run: ./engine/build/cairn_engine_test
+      - name: End-to-end smoke test
+        run: npm test
+      - name: Editor boots (headless autotest)
+        run: |
+          CAIRN_AUTOTEST=1 CAIRN_AUTOTEST_MS=8000 CAIRN_TEST_PROJECT= \
+          xvfb-run -a ./node_modules/.bin/electron . --no-sandbox > electron.log 2>&1 || true
+          ! grep -q "renderer-error" electron.log || (cat electron.log && exit 1)
+
+  windows:
+    runs-on: windows-latest
+    continue-on-error: true   # engine + tests; addon linking tracked separately
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Configure and build engine (MSVC)
+        run: |
+          cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build engine/build --config Release
+      - name: Engine unit tests
+        run: ./engine/build/Release/cairn_engine_test.exe

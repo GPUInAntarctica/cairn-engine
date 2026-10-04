@@ -1,0 +1,772 @@
+#include "cairn/engine.h"
+
+#include "cairn/physics.h"
+#include "scene_internal.h"
+#include "script_host.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdarg>
+#include <cstring>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb/stb_image_write.h"
+
+namespace Cairn {
+
+// ---------------------------------------------------------------------------
+// Global engine pointer (single engine per process, owned by the host).
+// ---------------------------------------------------------------------------
+static Engine* g_engine = nullptr;
+
+Scene* EngineActiveScene() { return g_engine ? &g_engine->scene() : nullptr; }
+MeshLibrary& EngineMeshLibrary() {
+    static MeshLibrary lib;
+    return lib;
+}
+TextureLibrary& EngineTextureLibrary() {
+    static TextureLibrary lib;
+    return lib;
+}
+std::string EngineResolvePath(const std::string& projectPath) {
+    if (!g_engine) return projectPath;
+    if (!projectPath.empty() && (projectPath[0] == '/' || projectPath[1] == ':')) return projectPath;
+    if (projectPath.empty()) return g_engine->projectRoot();
+    return g_engine->projectRoot() + "/" + projectPath;
+}
+void EngineQueueDebugLine(const Vec3& a, const Vec3& b, Color color) {
+    if (g_engine) g_engine->debugLines_.push_back({a, b, color});
+}
+void EngineQueueAudio(const std::string& clip, float volume, float pitch) {
+    if (g_engine) g_engine->audioEvents_.push_back({clip, volume, pitch});
+}
+InputState* EngineInputState() { return g_engine ? &g_engine->input_ : nullptr; }
+float EngineTimeScale() { return g_engine ? g_engine->timeScale_ : 1.0f; }
+void EngineSetTimeScale(float s) {
+    if (g_engine) g_engine->timeScale_ = std::clamp(s, 0.0f, 100.0f);
+}
+
+// ---------------------------------------------------------------------------
+// Scripting API implementations (bound to the active engine).
+// ---------------------------------------------------------------------------
+namespace Input {
+static InputState* S() { return EngineInputState(); }
+bool GetKey(KeyCode key) {
+    InputState* s = S();
+    return s && s->keyDown[(int)key & 511];
+}
+bool GetKeyDown(KeyCode key) {
+    InputState* s = S();
+    int i = (int)key & 511;
+    return s && s->keyDown[i] && !s->keyWasDown[i];
+}
+bool GetKeyUp(KeyCode key) {
+    InputState* s = S();
+    int i = (int)key & 511;
+    return s && !s->keyDown[i] && s->keyWasDown[i];
+}
+static float AxisValue(const InputState::Axis& axis, InputState* s) {
+    float v = 0;
+    if (s->keyDown[(uint32_t)axis.negative & 511]) v -= 1.0f;
+    if (s->keyDown[(uint32_t)axis.positive & 511]) v += 1.0f;
+    if (s->keyDown[(uint32_t)axis.altNegative & 511]) v -= 1.0f;
+    if (s->keyDown[(uint32_t)axis.altPositive & 511]) v += 1.0f;
+    return v;
+}
+float GetAxis(const std::string& axisName) {
+    InputState* s = S();
+    if (!s) return 0;
+    for (const auto& axis : s->axes) {
+        if (axis.name == axisName) return AxisValue(axis, s);
+    }
+    return 0;
+}
+Vec2 GetMousePosition() {
+    InputState* s = S();
+    return s ? Vec2(s->mouseX, s->mouseY) : Vec2();
+}
+bool GetMouseButton(int button) {
+    InputState* s = S();
+    return s && button >= 0 && button < 8 && s->mouseDown[button];
+}
+bool GetMouseButtonDown(int button) {
+    InputState* s = S();
+    return s && button >= 0 && button < 8 && s->mouseDown[button] && !s->mouseWasDown[button];
+}
+bool GetMouseButtonUp(int button) {
+    InputState* s = S();
+    return s && button >= 0 && button < 8 && !s->mouseDown[button] && s->mouseWasDown[button];
+}
+}  // namespace Input
+
+static float g_lastDt = 0.0f;
+
+namespace Time {
+float DeltaTime() { return g_lastDt; }
+float FixedDeltaTime() { return 1.0f / 60.0f; }
+float Time() { return g_engine ? g_engine->playTime() : 0.0f; }
+uint64_t FrameCount() { return g_engine ? g_engine->frameCount() : 0; }
+float TimeScale() { return EngineTimeScale(); }
+void SetTimeScale(float scale) { EngineSetTimeScale(scale); }
+}  // namespace Time
+
+namespace Audio {
+void Play(const std::string& clipPath, float volume, float pitch) {
+    EngineQueueAudio(clipPath, volume, pitch);
+}
+}  // namespace Audio
+
+namespace Debug {
+void Log(const char* fmt, ...) {
+    char buf[1024];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    Cairn::Log::Info("%s", buf);
+}
+void LogWarning(const char* fmt, ...) {
+    char buf[1024];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    Cairn::Log::Warning("%s", buf);
+}
+void LogError(const char* fmt, ...) {
+    char buf[1024];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    Cairn::Log::Error("%s", buf);
+}
+void DrawLine(const Vec3& from, const Vec3& to, Color color, float duration) {
+    (void)duration;  // one-frame lines; duration handled by the host later
+    EngineQueueDebugLine(from, to, color);
+}
+}  // namespace Debug
+
+// ---------------------------------------------------------------------------
+// ViewportCamera.
+// ---------------------------------------------------------------------------
+Mat4 ViewportCamera::ViewMatrix() const {
+    Vec3 dir = Quat::FromEulerDegrees(Vec3(pitch, yaw, 0)) * Vec3::Forward;
+    return Mat4::LookAt(position, position + dir, Vec3::Up);
+}
+
+Mat4 ViewportCamera::ProjectionMatrix(float aspect) const {
+    if (orthographic) {
+        float hh = orthoSize, hw = orthoSize * aspect;
+        return Mat4::Ortho(-hw, hw, -hh, hh, nearPlane, farPlane);
+    }
+    return Mat4::Perspective(Radians(fov), aspect, nearPlane, farPlane);
+}
+
+// ---------------------------------------------------------------------------
+// Engine.
+// ---------------------------------------------------------------------------
+Engine::Engine() {
+    g_engine = this;
+    scene_ = std::make_shared<Scene>();
+    SetViewportSize(960, 540);
+}
+
+Engine::~Engine() {
+    StopScripts();
+    if (g_engine == this) g_engine = nullptr;
+}
+
+void Engine::SetProjectRoot(const std::string& absolutePath) { projectRoot_ = absolutePath; }
+
+void Engine::SetViewportSize(int w, int h) { renderer_.Resize(w, h); }
+
+void Engine::NewScene(const std::string& name) {
+    StopScripts();
+    scene_ = std::make_shared<Scene>();
+    scene_->name = name;
+    PhysicsReset();
+}
+
+bool Engine::LoadSceneFile(const std::string& path, std::string* error) {
+    auto loaded = Scene::LoadFromFile(path, error);
+    if (!loaded) return false;
+    StopScripts();
+    scene_ = loaded;
+    PhysicsReset();
+    return true;
+}
+
+bool Engine::SaveSceneFile(const std::string& path, std::string* error) {
+    return scene_->SaveToFile(path, error);
+}
+
+std::string Engine::SerializeSceneJson() const { return scene_->Serialize().Dump(-1); }
+
+bool Engine::RestoreSceneJson(const std::string& json, std::string* error) {
+    Json doc;
+    if (!Json::Parse(json, &doc, error)) return false;
+    auto restored = Scene::Deserialize(doc, error);
+    if (!restored) return false;
+    StopScripts();
+    scene_ = restored;
+    PhysicsReset();
+    return true;
+}
+
+EntityId Engine::CreateEntity(const std::string& name, EntityId parent) {
+    GameObject* p = parent ? FindEntity(parent) : nullptr;
+    GameObject* go = scene_->CreateEntity(name, p);
+    return go ? go->m_id : kInvalidEntity;
+}
+
+EntityId Engine::CreatePrimitive(PrimitiveMesh mesh, const std::string& name, EntityId parent) {
+    EntityId id = CreateEntity(name, parent);
+    GameObject* go = FindEntity(id);
+    if (!go) return kInvalidEntity;
+    if (auto* mr = go->AddComponent<MeshRenderer>()) {
+        mr->mesh = (MeshRenderer::MeshSource)(int)mesh;
+    }
+    return id;
+}
+
+EntityId Engine::CreateSpriteEntity(const std::string& name, EntityId parent) {
+    EntityId id = CreateEntity(name, parent);
+    GameObject* go = FindEntity(id);
+    if (!go) return kInvalidEntity;
+    go->AddComponent<SpriteRenderer>();
+    return id;
+}
+
+void Engine::DestroyEntity(EntityId id) {
+    GameObject* go = FindEntity(id);
+    if (go) scene_->DestroyEntityNow(go);
+}
+
+EntityId Engine::DuplicateEntity(EntityId id) {
+    GameObject* src = FindEntity(id);
+    if (!src) return kInvalidEntity;
+    Json subtree = scene_->SerializeEntity(src);
+    GameObject* copy = scene_->DeserializeEntitySubtree(subtree, src->GetParent());
+    if (copy) copy->name = src->name;  // identical copy, editor may rename
+    return copy ? copy->m_id : kInvalidEntity;
+}
+
+GameObject* Engine::FindEntity(EntityId id) { return scene_->FindEntity(id); }
+
+bool Engine::AddComponent(EntityId id, const std::string& typeName) {
+    GameObject* go = FindEntity(id);
+    if (!go) return false;
+    if (go->GetComponentByName(typeName)) return false;
+    return go->AddComponentByName(typeName);
+}
+
+bool Engine::RemoveComponent(EntityId id, const std::string& typeName) {
+    GameObject* go = FindEntity(id);
+    if (!go) return false;
+    return go->RemoveComponentByName(typeName);
+}
+
+bool Engine::SetComponentProp(EntityId id, const std::string& typeName, const std::string& prop,
+                              const Json& value) {
+    GameObject* go = FindEntity(id);
+    if (!go) return false;
+    if (typeName == "Transform") {
+        Transform& t = go->transform();
+        if (prop == "position" && value.isArray() && value.size() >= 3) {
+            t.position = {value[0].asFloat(), value[1].asFloat(), value[2].asFloat()};
+            t.m_worldDirty = true;
+            return true;
+        }
+        if (prop == "rotation" && value.isArray() && value.size() >= 3) {
+            t.SetEulerDegrees({value[0].asFloat(), value[1].asFloat(), value[2].asFloat()});
+            t.m_worldDirty = true;
+            return true;
+        }
+        if (prop == "scale" && value.isArray() && value.size() >= 3) {
+            t.scale = {value[0].asFloat(), value[1].asFloat(), value[2].asFloat()};
+            t.m_worldDirty = true;
+            return true;
+        }
+        return false;
+    }
+    Component* c = go->GetComponentByName(typeName);
+    if (!c) return false;
+    if (typeName == "Script") {
+        auto* sc = static_cast<ScriptComponent*>(c);
+        if (prop == "class") {
+            sc->scriptClass = value.asString();
+            // Fill inspector defaults for newly attached scripts.
+            for (const ScriptClassInfo& info : ScriptClasses()) {
+                if (info.name != sc->scriptClass) continue;
+                for (const auto& p : info.props) {
+                    if (!sc->properties.has(p.name)) sc->properties.set(p.name, p.defaultValue);
+                }
+                break;
+            }
+            return true;
+        }
+        if (prop == "enabled") {
+            sc->enabled = value.asBool(true);
+            return true;
+        }
+        sc->properties.set(prop, value);
+        return true;
+    }
+    if (prop == "enabled") {
+        c->enabled = value.asBool(true);
+        return true;
+    }
+    return ComponentSetProperty(c, prop, value);
+}
+
+bool Engine::GetComponentProp(EntityId id, const std::string& typeName, const std::string& prop, Json* out) {
+    GameObject* go = FindEntity(id);
+    if (!go) return false;
+    if (typeName == "Transform") {
+        const Transform& t = go->transform();
+        if (prop == "position") {
+            *out = Json::MakeArray({t.position.x, t.position.y, t.position.z});
+            return true;
+        }
+        if (prop == "rotation") {
+            Vec3 e = t.GetEulerDegrees();
+            *out = Json::MakeArray({e.x, e.y, e.z});
+            return true;
+        }
+        if (prop == "scale") {
+            *out = Json::MakeArray({t.scale.x, t.scale.y, t.scale.z});
+            return true;
+        }
+        return false;
+    }
+    Component* c = go->GetComponentByName(typeName);
+    if (!c) return false;
+    if (typeName == "Script") {
+        auto* sc = static_cast<ScriptComponent*>(c);
+        if (prop == "class") { *out = sc->scriptClass; return true; }
+        if (prop == "enabled") { *out = sc->enabled; return true; }
+        const Json* v = sc->properties.find(prop);
+        if (v) { *out = *v; return true; }
+        return false;
+    }
+    if (prop == "enabled") { *out = c->enabled; return true; }
+    return ComponentGetProperty(c, prop, out);
+}
+
+void Engine::ReloadAssets() {
+    EngineTextureLibrary().Clear();
+    EngineMeshLibrary().ClearObj();
+}
+
+void Engine::ReloadScriptLibraries() {
+    if (scriptLibPath_.empty()) return;
+    std::string err;
+    LoadScriptLibrary(scriptLibPath_, &err);
+}
+
+bool Engine::LoadScriptLibrary(const std::string& absolutePath, std::string* error) {
+    // Release everything owned by the previously loaded library BEFORE it is
+    // unloaded: script instances hold code in it, and cached default values
+    // hold shared_ptr control blocks whose deleters live in it.
+    StopScripts();
+    scriptClasses_.clear();
+    if (!scriptHost_) scriptHost_.reset(new ScriptHost());
+    if (!scriptHost_->Load(absolutePath, error)) {
+        Log::Error("script library load failed: %s", error ? error->c_str() : "?");
+        return false;
+    }
+    scriptLibPath_ = absolutePath;
+    scriptClasses_.clear();
+    for (const ScriptClassRecord& r : scriptHost_->Records()) {
+        ScriptClassInfo info;
+        info.name = r.name ? r.name : "";
+        if (Component* probe = r.create()) {
+            ScriptMeta meta;
+            probe->DescribeProps(meta);
+            for (const ScriptProperty& p : meta.properties) {
+                info.props.push_back({p.name, (int)p.type, p.defaultValue});
+            }
+            delete probe;
+        }
+        scriptClasses_.push_back(std::move(info));
+    }
+    Log::Info("loaded %d script class(es) from %s", (int)scriptClasses_.size(), absolutePath.c_str());
+    return true;
+}
+
+std::vector<ScriptClassInfo> Engine::ScriptClasses() const { return scriptClasses_; }
+
+bool Engine::HasScriptClass(const std::string& name) const {
+    for (const auto& c : scriptClasses_)
+        if (c.name == name) return true;
+    return false;
+}
+
+void Engine::StartScripts() {
+    gameScriptsStarted_ = true;
+    // Creation pass: instantiate every script class before OnStart so scripts
+    // can look each other up during startup.
+    for (const auto& go : scene_->objects) {
+        if (!go->active) continue;
+        for (Component* c : go->GetComponentList()) {
+            if (c->TypeId() != ComponentTypeId::Script) continue;
+            auto* sc = static_cast<ScriptComponent*>(c);
+            if (sc->scriptClass.empty()) continue;
+            Component* inst = scriptHost_ ? scriptHost_->Create(sc->scriptClass) : nullptr;
+            if (!inst) {
+                Log::Error("script class not found: %s (build scripts first)", sc->scriptClass.c_str());
+                continue;
+            }
+            inst->m_go = go.get();
+            inst->m_propSource = &sc->properties;
+            sc->instance = inst;
+        }
+    }
+    // OnStart pass after all instances exist.
+    for (const auto& go : scene_->objects) {
+        if (!go->active) continue;
+        for (Component* c : go->GetComponentList()) {
+            if (c->TypeId() != ComponentTypeId::Script) continue;
+            auto* sc = static_cast<ScriptComponent*>(c);
+            if (sc->instance && sc->enabled) sc->instance->OnStart();
+        }
+    }
+}
+
+void Engine::StopScripts() {
+    if (!gameScriptsStarted_) return;
+    for (const auto& go : scene_->objects) {
+        for (Component* c : go->GetComponentList()) {
+            if (c->TypeId() != ComponentTypeId::Script) continue;
+            auto* sc = static_cast<ScriptComponent*>(c);
+            if (sc->instance) {
+                sc->instance->OnDestroy();
+                delete sc->instance;
+                sc->instance = nullptr;
+            }
+        }
+    }
+    gameScriptsStarted_ = false;
+}
+
+bool Engine::Play() {
+    if (playing_) return true;
+    playSnapshot_ = SerializeSceneJson();
+    playing_ = true;
+    paused_ = false;
+    accumulator_ = 0;
+    time_ = 0;
+    frameCount_ = 0;
+    PhysicsReset();
+    audioEvents_.clear();
+    StartScripts();
+    Log::Info("entered play mode");
+    return true;
+}
+
+void Engine::Pause() {
+    if (playing_) paused_ = true;
+}
+
+void Engine::Resume() {
+    if (playing_) paused_ = false;
+}
+
+void Engine::Step() {
+    if (!playing_) return;
+    paused_ = false;
+    Update(1.0f / 60.0f);
+    EndFrameInput();
+    paused_ = true;
+}
+
+void Engine::Stop() {
+    if (!playing_) return;
+    StopScripts();
+    std::string err;
+    RestoreSceneJson(playSnapshot_, &err);
+    playing_ = false;
+    paused_ = false;
+    time_ = 0;
+    PhysicsReset();
+    audioEvents_.clear();
+    Log::Info("stopped play mode");
+}
+
+void Engine::Update(float dt) {
+    frameCount_++;
+    g_lastDt = dt;
+    float scaled = dt * timeScale_;
+    if (playing_ && !paused_) {
+        time_ += scaled;
+        const float fixed = 1.0f / 60.0f;
+        accumulator_ += scaled;
+        int steps = 0;
+        while (accumulator_ >= fixed && steps < 5) {
+            // FixedUpdate scripts.
+            for (const auto& go : scene_->objects) {
+                if (!go->ActiveInHierarchy()) continue;
+                for (Component* c : go->GetComponentList()) {
+                    if (c->TypeId() != ComponentTypeId::Script) continue;
+                    auto* sc = static_cast<ScriptComponent*>(c);
+                    if (sc->instance && sc->enabled) sc->instance->FixedUpdate(fixed);
+                }
+            }
+            PhysicsStep(*scene_, fixed);
+            accumulator_ -= fixed;
+            steps++;
+        }
+        // Variable-rate update.
+        for (const auto& go : scene_->objects) {
+            if (!go->ActiveInHierarchy()) continue;
+            for (Component* c : go->GetComponentList()) {
+                if (c->TypeId() != ComponentTypeId::Script) continue;
+                auto* sc = static_cast<ScriptComponent*>(c);
+                if (sc->instance && sc->enabled) sc->instance->OnUpdate(scaled);
+            }
+        }
+        scene_->ProcessDeferred();
+    }
+    // Expire debug lines quickly (they render for the following frame).
+    debugLines_.clear();
+}
+
+void Engine::EndFrameInput() {
+    std::memcpy(input_.keyWasDown, input_.keyDown, sizeof(input_.keyDown));
+    std::memcpy(input_.mouseWasDown, input_.mouseDown, sizeof(input_.mouseDown));
+}
+
+bool Engine::BuildCameraView(CameraView* out) const {
+    CameraComponent* cam = playing_ ? scene_->MainCamera() : nullptr;
+    float aspect = (float)renderer_.target().width / std::max(1, renderer_.target().height);
+    if (cam && cam->m_go && cam->m_go->ActiveInHierarchy()) {
+        Transform& t = cam->m_go->transform();
+        out->position = t.WorldPosition();
+        Quat rot = t.WorldRotation();
+        Vec3 forward = rot * Vec3::Forward;
+        out->view = Mat4::LookAt(out->position, out->position + forward, rot * Vec3::Up);
+        out->orthographic = cam->orthographic;
+        out->fov = cam->fov;
+        out->nearPlane = cam->nearPlane;
+        out->farPlane = cam->farPlane;
+        out->orthoSize = cam->orthographicSize;
+        out->clearColor = cam->clearColor;
+        out->skyEnabled = cam->skyEnabled;
+        out->skyTop = cam->skyTop;
+        out->skyBottom = cam->skyBottom;
+    } else {
+        out->position = viewCam_.position;
+        out->view = viewCam_.ViewMatrix();
+        out->orthographic = viewCam_.orthographic;
+        out->fov = viewCam_.fov;
+        out->nearPlane = viewCam_.nearPlane;
+        out->farPlane = viewCam_.farPlane;
+        out->orthoSize = viewCam_.orthoSize;
+        out->clearColor = Color::FromHex(0x14141a);
+        out->skyEnabled = true;
+        out->skyTop = Color::FromHex(0x232833);
+        out->skyBottom = Color::FromHex(0x4a5261);
+    }
+    out->projection = out->orthographic
+                          ? Mat4::Ortho(-out->orthoSize * aspect, out->orthoSize * aspect,
+                                        -out->orthoSize, out->orthoSize, out->nearPlane, out->farPlane)
+                          : Mat4::Perspective(Radians(out->fov), aspect, out->nearPlane, out->farPlane);
+    out->fogEnabled = scene_->fogEnabled;
+    out->fogColor = scene_->fogColor;
+    out->fogDensity = scene_->fogDensity;
+    out->ambient = scene_->ambient;
+    return cam != nullptr;
+}
+
+void Engine::BuildOverlayLines(std::vector<DebugLine>* out) {
+    *out = debugLines_;
+}
+
+RenderStats Engine::RenderEditorFrame() {
+    CameraView cam;
+    BuildCameraView(&cam);
+    std::vector<DebugLine> lines;
+    BuildOverlayLines(&lines);
+
+    // Editor grid on the XZ plane.
+    const float extent = 40.0f;
+    const Color gridMinor = Color::FromHex(0x33363e);
+    const Color gridMajor = Color::FromHex(0x464a55);
+    for (int i = -(int)extent; i <= (int)extent; ++i) {
+        Color c = (i % 10 == 0) ? gridMajor : gridMinor;
+        if (i == 0) continue;
+        lines.push_back({Vec3((float)i, 0.001f, -extent), Vec3((float)i, 0.001f, extent), c});
+        lines.push_back({Vec3(-extent, 0.001f, (float)i), Vec3(extent, 0.001f, (float)i), c});
+    }
+    lines.push_back({Vec3(-extent, 0.001f, 0), Vec3(extent, 0.001f, 0), Color::FromHex(0x7a4a52)});
+    lines.push_back({Vec3(0, 0.001f, -extent), Vec3(0, 0.001f, extent), Color::FromHex(0x47607a)});
+
+    // Selection outline.
+    if (highlightEntity_) {
+        if (GameObject* go = FindEntity(highlightEntity_)) {
+            AABB box;
+            bool has = false;
+            if (auto* mr = go->GetComponent<MeshRenderer>()) {
+                std::shared_ptr<Mesh> mesh;
+                if (mr->mesh == MeshRenderer::MeshSource::Custom && !mr->meshPath.empty())
+                    mesh = EngineMeshLibrary().GetObj(EngineResolvePath(mr->meshPath));
+                else
+                    mesh = EngineMeshLibrary().Get((PrimitiveMesh)(int)mr->mesh);
+                if (mesh) {
+                    box = mesh->Bounds().Transformed(go->transform().WorldMatrix());
+                    has = true;
+                }
+            }
+            if (!has && go->GetComponent<SpriteRenderer>()) {
+                Vec3 s = go->transform().WorldScale();
+                box = AABB(go->transform().WorldPosition() - s * 0.5f,
+                           go->transform().WorldPosition() + s * 0.5f);
+                has = true;
+            }
+            if (!has) {
+                Vec3 p = go->transform().WorldPosition();
+                box = AABB(p - Vec3(0.1f), p + Vec3(0.1f));
+                has = true;
+            }
+            const Color sel(0.95f, 0.62f, 0.13f);
+            Vec3 mn = box.min - Vec3(0.01f), mx = box.max + Vec3(0.01f);
+            Vec3 c[8] = {
+                {mn.x, mn.y, mn.z}, {mx.x, mn.y, mn.z}, {mx.x, mn.y, mx.z}, {mn.x, mn.y, mx.z},
+                {mn.x, mx.y, mn.z}, {mx.x, mx.y, mn.z}, {mx.x, mx.y, mx.z}, {mn.x, mx.y, mx.z},
+            };
+            static const int edges[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6},
+                                             {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+            for (auto& e : edges) lines.push_back({c[e[0]], c[e[1]], sel});
+        }
+    }
+
+    lastStats_ = renderer_.RenderScene(*scene_, cam, lines);
+    return lastStats_;
+}
+
+RenderStats Engine::RenderGameFrame() {
+    CameraView cam;
+    bool usingGameCam = BuildCameraView(&cam);
+    if (!usingGameCam) return RenderEditorFrame();
+    std::vector<DebugLine> lines;
+    BuildOverlayLines(&lines);
+    lastStats_ = renderer_.RenderScene(*scene_, cam, lines);
+    return lastStats_;
+}
+
+Json Engine::DebugCollectStats() {
+    Json out = Json::MakeObject();
+    int objects = 0, active = 0, meshRenderers = 0, meshNull = 0, emitted = 0;
+    Json names = Json::MakeArray();
+    for (const auto& go : scene_->objects) {
+        objects++;
+        if (!go->ActiveInHierarchy()) continue;
+        active++;
+        auto* mr = go->GetComponent<MeshRenderer>();
+        if (!mr) continue;
+        meshRenderers++;
+        std::shared_ptr<Mesh> m = (mr->mesh == MeshRenderer::MeshSource::Custom && !mr->meshPath.empty())
+                                      ? EngineMeshLibrary().GetObj(EngineResolvePath(mr->meshPath))
+                                      : EngineMeshLibrary().Get((PrimitiveMesh)(int)mr->mesh);
+        if (!m) meshNull++;
+        else {
+            emitted++;
+            names.push(go->name);
+        }
+    }
+    out.set("objects", objects);
+    out.set("activeInHierarchy", active);
+    out.set("meshRenderers", meshRenderers);
+    out.set("meshNull", meshNull);
+    out.set("emitted", emitted);
+    out.set("emittedNames", std::move(names));
+    out.set("viewport", Json::MakeArray({(double)renderer_.target().width, (double)renderer_.target().height}));
+    return out;
+}
+
+bool Engine::SaveFramePNG(const std::string& path) const {    const FrameTarget& t = renderer_.target();
+    if (t.width <= 0 || t.height <= 0) return false;
+    // stb expects top-down rows; our buffer already is.
+    return stbi_write_png(path.c_str(), t.width, t.height, 4, t.color.data(), t.width * 4) != 0;
+}
+
+EntityId Engine::Pick(int pixelX, int pixelY) {    CameraView cam;
+    BuildCameraView(&cam);
+    Vec3 dir = ScreenRayDir(pixelX, pixelY);
+    Vec3 origin = ScreenRayOrigin(pixelX, pixelY);
+    float best = 1e30f;
+    EntityId bestId = kInvalidEntity;
+    MeshLibrary& meshes = EngineMeshLibrary();
+    for (const auto& go : scene_->objects) {
+        if (!go->ActiveInHierarchy()) continue;
+        AABB box;
+        bool has = false;
+        if (auto* mr = go->GetComponent<MeshRenderer>()) {
+            std::shared_ptr<Mesh> mesh;
+            if (mr->mesh == MeshRenderer::MeshSource::Custom && !mr->meshPath.empty())
+                mesh = meshes.GetObj(EngineResolvePath(mr->meshPath));
+            else
+                mesh = meshes.Get((PrimitiveMesh)(int)mr->mesh);
+            if (mesh) {
+                box = mesh->Bounds().Transformed(go->transform().WorldMatrix());
+                has = true;
+            }
+        }
+        if (!has && go->GetComponent<SpriteRenderer>()) {
+            Vec3 s = go->transform().WorldScale();
+            box = AABB(go->transform().WorldPosition() - s * 0.5f, go->transform().WorldPosition() + s * 0.5f);
+            has = true;
+        }
+        if (!has) continue;
+        float t = box.RayIntersect(origin, dir);
+        if (t >= 0 && t < best) {
+            best = t;
+            bestId = go->m_id;
+        }
+    }
+    return bestId;
+}
+
+Vec2 Engine::WorldToScreen(const Vec3& world, bool* ok) {
+    CameraView cam;
+    BuildCameraView(&cam);
+    Mat4 vp = cam.projection * cam.view;
+    Vec4 c = vp * Vec4(world, 1.0f);
+    if (ok) *ok = c.w > 1e-6f;
+    if (c.w <= 1e-6f) return Vec2();
+    float ndcX = c.x / c.w, ndcY = c.y / c.w;
+    return Vec2((ndcX * 0.5f + 0.5f) * renderer_.target().width,
+                (1.0f - (ndcY * 0.5f + 0.5f)) * renderer_.target().height);
+}
+
+Vec3 Engine::ScreenRayDir(int pixelX, int pixelY) {
+    CameraView cam;
+    BuildCameraView(&cam);
+    float ndcX = 2.0f * ((pixelX + 0.5f) / renderer_.target().width) - 1.0f;
+    float ndcY = 1.0f - 2.0f * ((pixelY + 0.5f) / renderer_.target().height);
+    float aspect = (float)renderer_.target().width / std::max(1, renderer_.target().height);
+    Mat4 invView = cam.view.Inverted();
+    Vec3 right = invView.TransformDirection(Vec3::Right);
+    Vec3 up = invView.TransformDirection(Vec3::Up);
+    Vec3 forward = invView.TransformDirection(Vec3::Forward);  // camera forward in world
+    if (cam.orthographic) return forward.Normalized();
+    float tanHalf = std::tan(Radians(cam.fov) * 0.5f);
+    Vec3 dir = forward + right * (ndcX * tanHalf * aspect) + up * (ndcY * tanHalf);
+    return dir.Normalized();
+}
+
+Vec3 Engine::ScreenRayOrigin(int pixelX, int pixelY) {
+    CameraView cam;
+    BuildCameraView(&cam);
+    if (!cam.orthographic) return cam.position;
+    float ndcX = 2.0f * ((pixelX + 0.5f) / renderer_.target().width) - 1.0f;
+    float ndcY = 1.0f - 2.0f * ((pixelY + 0.5f) / renderer_.target().height);
+    float aspect = (float)renderer_.target().width / std::max(1, renderer_.target().height);
+    Mat4 invView = cam.view.Inverted();
+    Vec3 right = invView.TransformDirection(Vec3::Right);
+    Vec3 up = invView.TransformDirection(Vec3::Up);
+    return cam.position + right * (ndcX * cam.orthoSize * aspect) + up * (ndcY * cam.orthoSize);
+}
+
+}  // namespace Cairn

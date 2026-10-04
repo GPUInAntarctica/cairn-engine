@@ -1,0 +1,40 @@
+{
+  "name": "cairn-engine",
+  "productName": "Cairn Engine",
+  "version": "0.1.0",
+  "description": "A compact C++ game engine with a focused editor for 2D and 3D projects.",
+  "license": "MIT",
+  "author": "Cairn Engine Contributors",
+  "homepage": "https://github.com/cairn-engine/cairn-engine#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cairn-engine/cairn-engine.git"
+  },
+  "keywords": [
+    "game-engine",
+    "cpp",
+    "2d",
+    "3d",
+    "editor",
+    "electron"
+  ],
+  "main": "editor/main/main.js",
+  "scripts": {
+    "build:engine": "node scripts/build.js engine",
+    "build:addon": "node scripts/build.js addon",
+    "build": "node scripts/build.js",
+    "rebuild": "node scripts/build.js --force",
+    "prestart": "node scripts/build.js renderer",
+    "test": "node test/smoke.js",
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "dependencies": {
+    "monaco-editor": "^0.52.2"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "esbuild": "^0.28.2",
+    "node-addon-api": "^8.3.0"
+  }
+}
