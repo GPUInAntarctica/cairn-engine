@@ -29,6 +29,7 @@ public:
     // holds the most recent 1024 entries regardless of polling.
     static std::vector<LogEntry> Poll(uint64_t afterId, uint32_t maxCount = 512);
     static void SetEchoStdout(bool on);
+    static bool EchoStdout();
 
 private:
     static void Push(LogLevel level, const std::string& text);

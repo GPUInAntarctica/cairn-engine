@@ -6,6 +6,8 @@ import { t } from '../i18n.js';
 import { icon } from '../icons.js';
 
 const LEVELS = ['info', 'warning', 'error'];
+const MARKS = { error: '✕', warning: '!', info: '·' };
+const MAX_ENTRIES = 2000;
 
 export class ConsolePanel {
     constructor(pageEl) {
@@ -14,16 +16,14 @@ export class ConsolePanel {
         this.filters = { info: true, warning: true, error: true };
         pageEl.innerHTML = `
             <div class="console-toolbar">
-                <div class="console-filter">
-                    <span style="display:flex; align-items:center; gap:4px;">${icon('console', 12)} ${t('panel.console')}</span>
-                </div>
-                <div class="console-filter">
-                    ${LEVELS.map(l => `<label><input type="checkbox" data-f="${l}" ${this.filters[l] ? 'checked' : ''}> ${t('console.filter.' + l)}</label>`).join('')}
-                </div>
-                <div style="flex:1;"></div>
-                <button class="btn" style="height:20px; padding:0 8px; font-size:11px;">${t('console.clear')}</button>
+                <span class="console-title">${icon('console')}<span>${escapeHtml(t('panel.console'))}</span></span>
+                <span class="console-filter">
+                    ${LEVELS.map(l => `<label><input type="checkbox" data-f="${l}" ${this.filters[l] ? 'checked' : ''}>${escapeHtml(t('console.filter.' + l))}</label>`).join('')}
+                </span>
+                <span class="console-spacer"></span>
+                <button class="btn btn-sm">${escapeHtml(t('console.clear'))}</button>
             </div>
-            <div class="console-list"><div class="muted" style="padding:12px;">${t('console.empty')}</div></div>`;
+            <div class="console-list" role="log"></div>`;
         this.list = pageEl.querySelector('.console-list');
         pageEl.querySelectorAll('input[data-f]').forEach(cb => {
             cb.addEventListener('change', () => {
@@ -31,50 +31,67 @@ export class ConsolePanel {
                 this.render();
             });
         });
-        pageEl.querySelector('button').addEventListener('click', () => {
-            this.entries = [];
-            this.render();
-        });
+        pageEl.querySelector('button').addEventListener('click', () => this.clear());
         this.autoScroll = true;
         this.list.addEventListener('scroll', () => {
-            this.autoScroll = this.list.scrollTop + this.list.clientHeight >= this.list.scrollHeight - 30;
+            // Re-arm from either edge: scrolling back to the bottom turns
+            // auto-scroll back on, which the previous one-way test could not do.
+            const gap = this.list.scrollHeight - this.list.scrollTop - this.list.clientHeight;
+            this.autoScroll = gap < 24;
         });
+        this.render();
     }
 
     pump() {
         const logs = engineInstance().pollLogs();
-        if (logs.length) {
-            for (const l of logs) {
-                this.entries.push({ level: LEVELS[l.level] || 'info', text: l.text, time: new Date() });
+        if (!logs.length) return;
+        for (const l of logs) {
+            const last = this.entries[this.entries.length - 1];
+            const text = l.text;
+            // Collapse at push time. Counting during render stored the tally on
+            // the previous row, so a run of identical lines printed x2, x3, x4
+            // down the list instead of one row reading x5.
+            if (last && last.text === text && last.level === l.level && last.count) {
+                last.count++;
+                last.time = new Date();
+                continue;
             }
-            if (this.entries.length > 2000) this.entries.splice(0, this.entries.length - 2000);
-            this.render();
+            this.entries.push({ level: LEVELS[l.level] || 'info', text, time: new Date(), count: 0 });
         }
+        if (this.entries.length > MAX_ENTRIES) this.entries.splice(0, this.entries.length - MAX_ENTRIES);
+        this.render();
     }
 
     render() {
-        this.list.innerHTML = '';
+        const rows = [];
         let last = null;
         for (const e of this.entries) {
-            if (!this.filters[e.level]) continue;
-            const row = document.createElement('div');
-            row.className = `log-row log-${e.level}`;
-            const mark = e.level === 'error' ? '✕' : e.level === 'warning' ? '!' : '·';
-            const time = `${String(e.time.getHours()).padStart(2, '0')}:${String(e.time.getMinutes()).padStart(2, '0')}:${String(e.time.getSeconds()).padStart(2, '0')}`;
-            const dup = last && last.text === e.text && last.level === e.level ? (last.count = (last.count || 1) + 1) : null;
-            row.innerHTML = `<span class="lvl">${mark}</span><span class="time">${time}</span><span class="msg">${escapeHtml(e.text)}</span>`
-                + (dup ? `<span class="muted">×${dup}</span>` : '');
-            this.list.appendChild(row);
+            if (!this.filters[e.level]) { last = null; continue; }
+            const repeat = last && last.text === e.text && last.level === e.level;
+            rows.push(
+                '<div class="log-row log-' + e.level + '">' +
+                    '<span class="lvl">' + MARKS[e.level] + '</span>' +
+                    '<span class="time">' + hhmss(e.time) + '</span>' +
+                    '<span class="msg">' + escapeHtml(e.text) + '</span>' +
+                    (repeat ? '<span class="count">×' + e.count + '</span>' : '') +
+                '</div>');
             last = e;
         }
-        if (!this.list.children.length) {
-            this.list.innerHTML = `<div class="muted" style="padding:12px;">${t('console.empty')}</div>`;
-        } else if (this.autoScroll) {
-            this.list.scrollTop = this.list.scrollHeight;
+        if (!rows.length) {
+            this.list.innerHTML = '<div class="empty-line">' + escapeHtml(t('console.empty')) + '</div>';
+            return;
         }
+        // One innerHTML write instead of createElement + innerHTML per row.
+        this.list.innerHTML = rows.join('');
+        if (this.autoScroll) this.list.scrollTop = this.list.scrollHeight;
     }
 
     clear() { this.entries = []; this.render(); }
+}
+
+function hhmss(d) {
+    return [d.getHours(), d.getMinutes(), d.getSeconds()]
+        .map(v => String(v).padStart(2, '0')).join(':');
 }
 
 function escapeHtml(s) {

@@ -71,7 +71,7 @@ constexpr PropertyDef AssetField(const char* name, const char* label, const char
 }
 
 const char* const kMeshSources[] = {"Cube", "Sphere", "Plane", "Quad", "Cylinder", "Cone", "Torus", "Custom (OBJ)"};
-const char* const kLightTypes[] = {"Directional", "Point"};
+const char* const kLightTypes[] = {"Directional", "Point", "Spot"};
 const char* const kAlignments[] = {"Left", "Center", "Right"};
 
 // ---------------------------------------------------------------------------
@@ -94,13 +94,19 @@ const std::vector<PropertyDef>& CameraDefs() {
 
 const std::vector<PropertyDef>& LightDefs() {
     static const std::vector<PropertyDef> defs = {
-        EnumField<LightComponent, &LightComponent::type>("type", "Type", kLightTypes, 2),
+        EnumField<LightComponent, &LightComponent::type>("type", "Type", kLightTypes, 3),
         Field<LightComponent, &LightComponent::color>("color", "Color", EditorPropKind::Color),
         Field<LightComponent, &LightComponent::intensity>("intensity", "Intensity", EditorPropKind::Float),
         Field<LightComponent, &LightComponent::range>("range", "Range", EditorPropKind::Float),
+        Field<LightComponent, &LightComponent::spotAngle>("spotAngle", "Spot Angle", EditorPropKind::Float),
+        Field<LightComponent, &LightComponent::spotInnerAngle>("spotInnerAngle", "Spot Inner Angle", EditorPropKind::Float),
+        Field<LightComponent, &LightComponent::castShadows>("castShadows", "Cast Shadows", EditorPropKind::Bool),
+        Field<LightComponent, &LightComponent::shadowBias>("shadowBias", "Shadow Bias", EditorPropKind::Float),
     };
     return defs;
 }
+
+static const char* const kCullModes[] = {"Off", "Back", "Front"};
 
 const std::vector<PropertyDef>& MeshRendererDefs() {
     static const std::vector<PropertyDef> defs = {
@@ -111,7 +117,16 @@ const std::vector<PropertyDef>& MeshRendererDefs() {
         Field<MeshRenderer, &MeshRenderer::tiling>("tiling", "Tiling", EditorPropKind::Vec2),
         Field<MeshRenderer, &MeshRenderer::specular>("specular", "Specular", EditorPropKind::Float),
         Field<MeshRenderer, &MeshRenderer::shininess>("shininess", "Shininess", EditorPropKind::Float),
+        Field<MeshRenderer, &MeshRenderer::metallic>("metallic", "Metallic", EditorPropKind::Float),
+        Field<MeshRenderer, &MeshRenderer::roughness>("roughness", "Roughness (-1 = from shininess)", EditorPropKind::Float),
+        AssetField<MeshRenderer, &MeshRenderer::normalMapPath>("normalMapPath", "Normal Map", "texture"),
+        Field<MeshRenderer, &MeshRenderer::normalStrength>("normalStrength", "Normal Strength", EditorPropKind::Float),
+        Field<MeshRenderer, &MeshRenderer::emissiveColor>("emissiveColor", "Emissive", EditorPropKind::Color),
         Field<MeshRenderer, &MeshRenderer::unlit>("unlit", "Unlit", EditorPropKind::Bool),
+        EnumField<MeshRenderer, &MeshRenderer::cullMode>("cullMode", "Cull Mode", kCullModes, 3),
+        Field<MeshRenderer, &MeshRenderer::antialias>("antialias", "Antialias", EditorPropKind::Bool),
+        Field<MeshRenderer, &MeshRenderer::castShadows>("castShadows", "Cast Shadows", EditorPropKind::Bool),
+        Field<MeshRenderer, &MeshRenderer::receiveShadows>("receiveShadows", "Receive Shadows", EditorPropKind::Bool),
     };
     return defs;
 }
@@ -121,6 +136,7 @@ const std::vector<PropertyDef>& SpriteRendererDefs() {
         AssetField<SpriteRenderer, &SpriteRenderer::texturePath>("texturePath", "Texture", "texture"),
         Field<SpriteRenderer, &SpriteRenderer::color>("color", "Color", EditorPropKind::Color),
         Field<SpriteRenderer, &SpriteRenderer::pixelsPerUnit>("pixelsPerUnit", "Pixels Per Unit", EditorPropKind::Float),
+        Field<SpriteRenderer, &SpriteRenderer::sortingLayer>("sortingLayer", "Sorting Layer", EditorPropKind::Int),
         Field<SpriteRenderer, &SpriteRenderer::orderInLayer>("orderInLayer", "Order in Layer", EditorPropKind::Int),
         Field<SpriteRenderer, &SpriteRenderer::flipX>("flipX", "Flip X", EditorPropKind::Bool),
         Field<SpriteRenderer, &SpriteRenderer::flipY>("flipY", "Flip Y", EditorPropKind::Bool),
@@ -135,6 +151,7 @@ const std::vector<PropertyDef>& TextRendererDefs() {
         Field<TextRenderer, &TextRenderer::text>("text", "Text", EditorPropKind::String),
         Field<TextRenderer, &TextRenderer::fontSize>("fontSize", "Font Size", EditorPropKind::Float),
         Field<TextRenderer, &TextRenderer::color>("color", "Color", EditorPropKind::Color),
+        Field<TextRenderer, &TextRenderer::sortingLayer>("sortingLayer", "Sorting Layer", EditorPropKind::Int),
         Field<TextRenderer, &TextRenderer::orderInLayer>("orderInLayer", "Order in Layer", EditorPropKind::Int),
         EnumField<TextRenderer, &TextRenderer::alignment>("alignment", "Alignment", kAlignments, 3),
     };

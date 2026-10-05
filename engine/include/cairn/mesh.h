@@ -15,6 +15,11 @@ struct MeshVertex {
     Vec3 position;
     Vec3 normal{0, 1, 0};
     Vec2 uv;
+    // Tangent-space frame handedness: xyz = unit tangent (orthonormal to the
+    // normal), w = +1/-1 bitangent handedness (B = cross(N, T) * w).
+    // w == 0 marks "no tangent computed" (the default), which the renderer
+    // treats as "normal mapping unavailable".
+    Vec4 tangent{1, 0, 0, 0};
 };
 
 class Mesh {
@@ -23,8 +28,15 @@ public:
     std::vector<uint32_t> indices;
 
     bool IsValid() const { return !indices.empty(); }
-    AABB Bounds() const;  // over vertex positions
+    // Cached bounding box over vertex positions; recomputed lazily after any
+    // change to `vertices` (call InvalidateBounds() if you mutate them).
+    AABB Bounds() const;
+    void InvalidateBounds() const { m_boundsValid = false; }
     void RecomputeNormals();
+    // Builds tangents from the UV layout (Lengyel's method). Requires valid
+    // normals; call RecomputeNormalsAndTangents() for meshes without any.
+    void RecomputeTangents();
+    void RecomputeNormalsAndTangents();
 
     // Procedural generators (unit sized, centered at origin).
     static std::shared_ptr<Mesh> Cube();
@@ -34,6 +46,10 @@ public:
     static std::shared_ptr<Mesh> Cylinder(int slices = 24);
     static std::shared_ptr<Mesh> Cone(int slices = 24);
     static std::shared_ptr<Mesh> Torus(float radius = 0.6f, float tube = 0.25f, int segments = 32, int rings = 16);
+
+private:
+    mutable AABB m_bounds;
+    mutable bool m_boundsValid = false;
 };
 
 enum class PrimitiveMesh : int { Cube = 0, Sphere, Plane, Quad, Cylinder, Cone, Torus };

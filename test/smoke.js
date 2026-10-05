@@ -67,6 +67,22 @@ public:
 CAIRN_SCRIPT(Rotator)
 `);
 
+const lifecycleSrc = writeScript('Lifecycle.cpp', `
+#include <cairn/cairn.h>
+using namespace Cairn;
+
+class Lifecycle : public Component {
+public:
+    void OnStart() override { Debug::Log("Lifecycle::start %s", gameObject().name.c_str()); }
+    void OnUpdate(float dt) override { (void)dt; }
+    void OnDestroy() override { Debug::Log("Lifecycle::destroy %s", gameObject().name.c_str()); }
+    void DescribeProps(ScriptMeta& m) override {
+        m.Add("addedLater", PropType::Float, 12.5f);
+    }
+};
+CAIRN_SCRIPT(Lifecycle)
+`);
+
 const playerSrc = writeScript('PlayerController.cpp', `
 #include <cairn/cairn.h>
 using namespace Cairn;
@@ -220,6 +236,91 @@ const finalPos = engine.getComponentProp(ball, 'Transform', 'position');
 check(minY > -1.0 && finalPos[1] < 1.2,
     `physics + script: ball falls and settles (minY=${minY.toFixed(2)}, y=${finalPos[1].toFixed(2)})`);
 engine.stop();
+
+// ---------------------------------------------------------------------------
+// 4. Script lifecycle: OnDestroy on runtime destroy, hot reload while playing,
+//    defaults applied on load, hierarchies and component enable flags.
+// ---------------------------------------------------------------------------
+const subtree = engine.createEntity('Parent', 0);
+const kid = engine.createEntity('Child', subtree);
+engine.setComponentProp(kid, 'Transform', 'position', [1, 2, 3]);
+const subtreeCopy = engine.duplicateEntity(subtree);
+const copyTree = engine.getEntityJSON(subtreeCopy);
+check(copyTree && copyTree.name === 'Parent', 'duplicates an entity');
+const copyChildren = engine.getEntityTree ? null : null;
+const allEntities = engine.getSceneTree().entities.filter(e => e.parent === subtreeCopy);
+check(allEntities.length === 1 && allEntities[0].name === 'Child',
+    `duplicate keeps children (${allEntities.length} child(ren))`);
+const copyChild = allEntities[0];
+const copyChildPos = copyChild && copyChild.transform.position;
+check(copyChildPos && Math.abs(copyChildPos[1] - 2) < 1e-4, 'duplicated child keeps its transform');
+
+// OnDestroy must fire when a script entity is destroyed at runtime.
+build = compileScripts([rotatorSrc2, lifecycleSrc], libPath);
+check(build.ok, 'compiles lifecycle script\n' + (build.ok ? '' : build.error));
+load = engine.loadScriptLibrary(libPath);
+check(load.ok && load.classes.some(c => c.name === 'Lifecycle'), 'loads lifecycle script');
+
+const lifeEntity = engine.createEntity('LifeTarget', 0);
+engine.addComponent(lifeEntity, 'Script');
+engine.setComponentProp(lifeEntity, 'Script', 'class', 'Lifecycle');
+engine.pollLogs();
+engine.play();
+check(engine.pollLogs().some(l => l.text.includes('Lifecycle::start LifeTarget')), 'OnStart logs the entity name');
+
+// Destroy at runtime: OnDestroy must run exactly once and the instance must go.
+engine.destroyEntity(lifeEntity);
+engine.update(1 / 60);
+const destroyLogs = engine.pollLogs().filter(l => l.text.includes('Lifecycle::destroy'));
+check(destroyLogs.length === 1, `OnDestroy fires on runtime destroy (${destroyLogs.length} events)`);
+
+// Hot reload while playing must keep the game alive (scripts restart).
+const lifeEntity2 = engine.createEntity('LifeTarget2', 0);
+engine.addComponent(lifeEntity2, 'Script');
+engine.setComponentProp(lifeEntity2, 'Script', 'class', 'Lifecycle');
+engine.loadScriptLibrary(libPath);
+check(engine.isPlaying(), 'reload keeps play mode active');
+engine.update(1 / 60);
+const reloadLogs = engine.pollLogs();
+check(reloadLogs.some(l => l.text.includes('Lifecycle::start LifeTarget2')),
+    'reload during play restarts scripts');
+
+// Script fields declared after authoring get their default on scene load.
+const beforeSave = engine.sceneJSON();
+const saved = path.join(projectDir, 'LifecycleScene.cscene');
+check(engine.saveScene(saved).ok, 'saves scene for prop-default check');
+engine.stop();
+engine.restoreSceneJSON(beforeSave);
+engine.newScene('Defaults');
+const defaultsEntity = engine.createEntity('Defaults', 0);
+engine.addComponent(defaultsEntity, 'Script');
+engine.setComponentProp(defaultsEntity, 'Script', 'class', 'Lifecycle');
+const snapshot = engine.sceneJSON();
+engine.newScene('Reloaded');
+engine.restoreSceneJSON(snapshot);   // properties lack "addedLater"
+const loadedValue = engine.getComponentProp(defaultsEntity === 0 ? 0 : 1, 'Script', 'addedLater');
+check(Math.abs(loadedValue - 12.5) < 1e-4, `script prop defaults applied on load (${loadedValue})`);
+
+// Disabling a MeshRenderer hides the mesh from rendering and picking.
+engine.newScene('Enable');
+const visCube = engine.createPrimitive('Cube', 'Visible', 0);
+const before = engine.debugCollect();
+engine.setComponentProp(visCube, 'MeshRenderer', 'enabled', false);
+const after = engine.debugCollect();
+check(after.meshRenderers === before.meshRenderers - 1 && after.emitted === before.emitted - 1,
+    `disabled MeshRenderer stops rendering (${before.meshRenderers} -> ${after.meshRenderers})`);
+engine.setComponentProp(visCube, 'MeshRenderer', 'enabled', true);
+check(engine.debugCollect().meshRenderers === before.meshRenderers, 're-enabled MeshRenderer renders again');
+
+// Hierarchy writes from raw script-style field assignment must reach the view.
+engine.newScene('Hierarchy');
+const parent = engine.createEntity('Parent', 0);
+const child = engine.createEntity('Child', parent);
+engine.setComponentProp(child, 'Transform', 'position', [0, 0, 0]);
+engine.setComponentProp(parent, 'Transform', 'position', [0, 5, 0]);
+engine.renderEditorFrame();
+const childWorld = engine.getEntityJSON(child).transform.position;  // local space stays local
+check(Math.abs(childWorld[1]) < 1e-4, 'local transform stays local under a parent');
 
 fs.rmSync(projectDir, { recursive: true, force: true });
 

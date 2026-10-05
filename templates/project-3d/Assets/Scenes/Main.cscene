@@ -3,12 +3,31 @@
   "version": 1,
   "name": "Sandbox",
   "settings": {
-    "gravity": [0, -9.81, 0],
-    "ambient": [0.26, 0.28, 0.33, 1],
+    "gravity": [
+      0,
+      -9.81,
+      0
+    ],
+    "ambient": [
+      0.3,
+      0.305,
+      0.32,
+      1
+    ],
     "fogEnabled": false,
-    "fogColor": [0.62, 0.66, 0.72, 1],
+    "fogColor": [
+      0.62,
+      0.66,
+      0.72,
+      1
+    ],
     "fogDensity": 0.02,
-    "background": [0.09, 0.09, 0.12, 1]
+    "background": [
+      0.055,
+      0.055,
+      0.065,
+      1
+    ]
   },
   "entities": [
     {
@@ -16,8 +35,39 @@
       "name": "Directional Light",
       "active": true,
       "components": [
-        { "type": "Transform", "position": [0, 0, 0], "rotation": [35, -130, 0], "scale": [1, 1, 1] },
-        { "type": "Light", "properties": { "type": 0, "color": [1, 1, 1, 1], "intensity": 1, "range": 15 }, "enabled": true }
+        {
+          "type": "Transform",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            -55,
+            -130,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "type": "Light",
+          "properties": {
+            "type": 0,
+            "color": [
+              1,
+              1,
+              1,
+              1
+            ],
+            "intensity": 1.2,
+            "range": 15
+          },
+          "enabled": true
+        }
       ]
     },
     {
@@ -26,8 +76,54 @@
       "active": true,
       "tag": "MainCamera",
       "components": [
-        { "type": "Transform", "position": [0, 2, 8], "rotation": [-8, 0, 0], "scale": [1, 1, 1] },
-        { "type": "Camera", "properties": { "fov": 60, "nearPlane": 0.1, "farPlane": 500, "orthographic": false, "orthoSize": 5, "clearColor": [0.063, 0.063, 0.094, 1], "skyEnabled": true, "skyTop": [0.18, 0.208, 0.278, 1], "skyBottom": [0.545, 0.592, 0.671, 1] }, "enabled": true }
+        {
+          "type": "Transform",
+          "position": [
+            0,
+            2.2,
+            8
+          ],
+          "rotation": [
+            -8,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        {
+          "type": "Camera",
+          "properties": {
+            "fov": 60,
+            "nearPlane": 0.1,
+            "farPlane": 500,
+            "orthographic": false,
+            "orthoSize": 5,
+            "clearColor": [
+              0.05,
+              0.05,
+              0.06,
+              1
+            ],
+            "skyEnabled": true,
+            "skyTop": [
+              0.045,
+              0.045,
+              0.055,
+              1
+            ],
+            "skyBottom": [
+              0.16,
+              0.165,
+              0.18,
+              1
+            ]
+          },
+          "enabled": true
+        }
       ]
     },
     {
@@ -35,39 +131,120 @@
       "name": "Ground",
       "active": true,
       "components": [
-        { "type": "Transform", "position": [0, -0.5, 0], "rotation": [0, 0, 0], "scale": [24, 1, 24] },
-        { "type": "MeshRenderer", "properties": { "mesh": 0, "meshPath": "", "albedoColor": [0.42, 0.45, 0.42, 1], "albedoTexturePath": "Assets/Textures/checker.png", "tiling": [12, 12], "specular": 0.2, "shininess": 24, "unlit": false }, "enabled": true },
-        { "type": "BoxCollider", "properties": { "center": [0, 0, 0], "size": [1, 1, 1], "isTrigger": false }, "enabled": true }
+        {
+          "type": "Transform",
+          "position": [
+            0,
+            -0.5,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            24,
+            1,
+            24
+          ]
+        },
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "mesh": 0,
+            "meshPath": "",
+            "albedoColor": [
+              0.82,
+              0.825,
+              0.835,
+              1
+            ],
+            "albedoTexturePath": "",
+            "tiling": [
+              1,
+              1
+            ],
+            "specular": 0.1,
+            "shininess": 40,
+            "unlit": false,
+            "castShadows": false,
+            "receiveShadows": true
+          },
+          "enabled": true
+        },
+        {
+          "type": "BoxCollider",
+          "properties": {
+            "center": [
+              0,
+              0,
+              0
+            ],
+            "size": [
+              1,
+              1,
+              1
+            ],
+            "isTrigger": false
+          },
+          "enabled": true
+        }
       ]
     },
     {
       "id": 4,
-      "name": "Spinning Cube",
+      "name": "Cube",
       "active": true,
       "components": [
-        { "type": "Transform", "position": [0, 1.6, 0], "rotation": [0, 0, 0], "scale": [1.4, 1.4, 1.4] },
-        { "type": "MeshRenderer", "properties": { "mesh": 0, "meshPath": "", "albedoColor": [0.85, 0.55, 0.3, 1], "albedoTexturePath": "Assets/Textures/uvgrid.png", "tiling": [1, 1], "specular": 0.6, "shininess": 40, "unlit": false }, "enabled": true },
-        { "type": "Script", "class": "Rotator", "properties": { "speed": 90.0 }, "enabled": true }
-      ]
-    },
-    {
-      "id": 5,
-      "name": "Ball",
-      "active": true,
-      "components": [
-        { "type": "Transform", "position": [2.5, 6, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
-        { "type": "MeshRenderer", "properties": { "mesh": 1, "meshPath": "", "albedoColor": [0.8, 0.82, 0.9, 1], "albedoTexturePath": "", "tiling": [1, 1], "specular": 0.7, "shininess": 48, "unlit": false }, "enabled": true },
-        { "type": "RigidBody", "properties": { "mass": 1, "useGravity": true, "gravityScale": 1, "isKinematic": false, "drag": 0.05, "restitution": 0.55, "freezeZ": false }, "enabled": true },
-        { "type": "SphereCollider", "properties": { "center": [0, 0, 0], "radius": 0.5, "isTrigger": false }, "enabled": true }
-      ]
-    },
-    {
-      "id": 6,
-      "name": "Torus",
-      "active": true,
-      "components": [
-        { "type": "Transform", "position": [-2.5, 1, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1] },
-        { "type": "MeshRenderer", "properties": { "mesh": 6, "meshPath": "", "albedoColor": [0.4, 0.55, 0.8, 1], "albedoTexturePath": "", "tiling": [1, 1], "specular": 0.5, "shininess": 32, "unlit": false }, "enabled": true }
+        {
+          "type": "Transform",
+          "position": [
+            0,
+            1.2,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1.4,
+            1.4,
+            1.4
+          ]
+        },
+        {
+          "type": "MeshRenderer",
+          "properties": {
+            "mesh": 0,
+            "meshPath": "",
+            "albedoColor": [
+              0.95,
+              0.95,
+              0.95,
+              1
+            ],
+            "albedoTexturePath": "",
+            "tiling": [
+              1,
+              1
+            ],
+            "specular": 0.5,
+            "shininess": 48,
+            "unlit": false
+          },
+          "enabled": true
+        },
+        {
+          "type": "Script",
+          "class": "Rotator",
+          "properties": {
+            "speed": 90
+          },
+          "enabled": true
+        }
       ]
     }
   ]

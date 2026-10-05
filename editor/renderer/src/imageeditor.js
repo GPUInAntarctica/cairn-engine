@@ -10,6 +10,9 @@ import { editor } from './state.js';
 import { t } from './i18n.js';
 import { icon } from './icons.js';
 import { ipc } from './ipc.js';
+import imaging from '../../main/imaging.js';
+
+const { hexToRgba, rgbToHsv, hsvToRgb, normalMapFromHeight } = imaging;
 
 const MAX_HISTORY = 40;
 const SWATCHES = ['#1b1b21', '#ffffff', '#d05a5a', '#d8a04a', '#e8d75a', '#6fbf73', '#5a8fd0', '#8a6fd0', '#d06fa8', '#8b8b97'];
@@ -754,40 +757,14 @@ export class ImageEditor {
             sctx.globalAlpha = l.opacity;
             sctx.drawImage(l.canvas, 0, 0);
         }
-        const data = sctx.getImageData(0, 0, w, h).data;
-        const height = new Float32Array(w * h);
-        for (let i = 0; i < w * h; ++i) {
-            const o = i * 4;
-            height[i] = source === 'alpha'
-                ? data[o + 3] / 255
-                : (0.2126 * data[o] + 0.7152 * data[o + 1] + 0.0722 * data[o + 2]) / 255;
-        }
+        const data = Buffer.from(sctx.getImageData(0, 0, w, h).data.buffer);
+        const rgba = normalMapFromHeight(data, w, h, { source, strength, invertX, invertY });
 
         const out = document.createElement('canvas');
         out.width = w; out.height = h;
         const octx = out.getContext('2d');
         const img = octx.createImageData(w, h);
-        const at = (x, y) => height[((y + h) % h) * w + ((x + w) % w)];
-        for (let y = 0; y < h; ++y) {
-            for (let x = 0; x < w; ++x) {
-                // Sobel.
-                const dx =
-                    (at(x + 1, y - 1) + 2 * at(x + 1, y) + at(x + 1, y + 1)) -
-                    (at(x - 1, y - 1) + 2 * at(x - 1, y) + at(x - 1, y + 1));
-                const dy =
-                    (at(x - 1, y + 1) + 2 * at(x, y + 1) + at(x + 1, y + 1)) -
-                    (at(x - 1, y - 1) + 2 * at(x, y - 1) + at(x + 1, y - 1));
-                let nx = -dx * strength * 0.25, ny = -dy * strength * 0.25, nz = 1;
-                if (invertX) nx = -nx;
-                if (invertY) ny = -ny;
-                const len = Math.hypot(nx, ny, nz) || 1;
-                const o = (y * w + x) * 4;
-                img.data[o] = Math.round((nx / len * 0.5 + 0.5) * 255);
-                img.data[o + 1] = Math.round((ny / len * 0.5 + 0.5) * 255);
-                img.data[o + 2] = Math.round((nz / len * 0.5 + 0.5) * 255);
-                img.data[o + 3] = 255;
-            }
-        }
+        img.data.set(rgba);
         octx.putImageData(img, 0, 0);
         this.pushHistory();
         this.doc.layers.push({ name: 'Normal Map', canvas: out, visible: true, opacity: 1 });
@@ -837,34 +814,6 @@ function floodFill(ctx, w, h, start, rgba, opacity) {
     ctx.putImageData(img, 0, 0);
 }
 
-function hexToRgba(hex) {
-    const v = parseInt(hex.slice(1), 16);
-    return [(v >> 16 & 255) / 255, (v >> 8 & 255) / 255, (v & 255) / 255, 1];
-}
-function rgbToHsv(r, g, b) {
-    r /= 255; g /= 255; b /= 255;
-    const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
-    let h = 0;
-    if (d > 0) {
-        if (max === r) h = ((g - b) / d) % 6;
-        else if (max === g) h = (b - r) / d + 2;
-        else h = (r - g) / d + 4;
-        h /= 6;
-        if (h < 0) h += 1;
-    }
-    return { h, s: max === 0 ? 0 : d / max, v: max };
-}
-function hsvToRgb(h, s, v) {
-    const c = v * s, x = c * (1 - Math.abs((h * 6) % 2 - 1)), m = v - c;
-    let r = 0, g = 0, b = 0;
-    if (h < 1 / 6) { r = c; g = x; }
-    else if (h < 2 / 6) { r = x; g = c; }
-    else if (h < 3 / 6) { g = c; b = x; }
-    else if (h < 4 / 6) { g = x; b = c; }
-    else if (h < 5 / 6) { r = x; b = c; }
-    else { r = c; b = x; }
-    return [r + m, g + m, b + m];
-}
 function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

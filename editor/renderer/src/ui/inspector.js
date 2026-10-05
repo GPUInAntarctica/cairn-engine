@@ -1,14 +1,37 @@
 // Cairn Engine editor - inspector panel.
 // Entity properties, components (reflection-driven) and scene settings.
+//
+// Layout contract, and the reason this file is shaped the way it is: every
+// property row is a two-column CSS grid with a fixed label column, so values
+// start at the same x on every row of every block. Numbers are monospace and
+// tabular (see .num-field in theme.css) so a value cannot shift the column it
+// sits in while it is being dragged.
 'use strict';
 
 import path from 'path';
 import fs from 'fs';
 
-import { editor, engineInstance, entityList, selectedEntity, markDirty, pushUndo, scriptClassMeta } from '../state.js';
+import { editor, engineInstance, selectedEntity, markDirty, pushUndo, scriptClassMeta } from '../state.js';
 import { on, emit } from '../events.js';
 import { t } from '../i18n.js';
 import { icon } from '../icons.js';
+
+// Component type -> i18n key. A `.toLowerCase()` lookup cannot work here:
+// MeshRenderer would resolve to 'comp.meshrenderer', which is not a key, and
+// the raw key would be rendered as the block title.
+const COMP_TITLE = {
+    Transform: 'comp.transform',
+    Camera: 'comp.camera',
+    Light: 'comp.light',
+    MeshRenderer: 'comp.meshRenderer',
+    SpriteRenderer: 'comp.spriteRenderer',
+    TextRenderer: 'comp.textRenderer',
+    RigidBody: 'comp.rigidBody',
+    BoxCollider: 'comp.boxCollider',
+    SphereCollider: 'comp.sphereCollider',
+    Collider2D: 'comp.collider2d',
+    Script: 'comp.script',
+};
 
 export class Inspector {
     constructor(bodyEl) {
@@ -21,16 +44,15 @@ export class Inspector {
         this.render();
     }
 
-    refresh() { this.render(); }
+    refresh() { invalidateAssetList(); this.render(); }
 
+    // Value-only refresh. Rebuilding the panel on every drag step would drop
+    // the caret out of any focused field and re-run every control factory, so
+    // rows that can be driven externally register a _refresh closure instead.
     renderLight() {
-        // Re-read values without rebuilding DOM (keeps focus in text fields).
-        const ent = selectedEntity();
-        if (!ent) return;
-        this.bodyEl.querySelectorAll('[data-prop]').forEach(input => {
-            const [compType, prop] = input.dataset.prop.split('|');
-            if (compType === 'Transform') return;
-        });
+        for (const row of this.bodyEl.querySelectorAll('.prop-row')) {
+            if (row._refresh) row._refresh();
+        }
     }
 
     render() {
@@ -39,22 +61,21 @@ export class Inspector {
         el.innerHTML = '';
 
         if (!ent) {
-            el.innerHTML = `<div class="muted" style="padding:14px 12px; font-size:11.5px;">${t('comp.none')}</div>`;
+            el.appendChild(emptyLine(t('comp.none')));
             this.renderSceneSettings(el);
             return;
         }
 
-        // Entity header.
         const header = document.createElement('div');
         header.className = 'insp-entity-header';
         header.innerHTML = `
             <div class="insp-name-row">
-                <input type="checkbox" id="insp-active" ${ent.active ? 'checked' : ''} title="Active">
-                <input type="text" id="insp-name" value="${escapeHtml(ent.name)}" spellcheck="false">
+                <input type="checkbox" id="insp-active" ${ent.active ? 'checked' : ''} title="${escapeAttr(t('insp.active'))}">
+                <input type="text" id="insp-name" value="${escapeHtml(ent.name)}" spellcheck="false" title="${escapeAttr(t('insp.name'))}">
             </div>
             <div class="insp-name-row">
-                <label class="muted" style="font-size:11px;">${t('entity.tag')}</label>
-                <input type="text" id="insp-tag" value="${escapeHtml(ent.tag)}" spellcheck="false" placeholder="">
+                <label for="insp-tag">${escapeHtml(t('entity.tag'))}</label>
+                <input type="text" id="insp-tag" value="${escapeHtml(ent.tag)}" spellcheck="false">
             </div>`;
         el.appendChild(header);
 
@@ -72,18 +93,15 @@ export class Inspector {
             emit('scene-changed');
         });
 
-        // Components.
-        for (const comp of ent.components) {
-            el.appendChild(this.componentBlock(ent, comp));
-        }
+        for (const comp of ent.components) el.appendChild(this.componentBlock(ent, comp));
 
-        // Add component.
         const addRow = document.createElement('div');
         addRow.className = 'add-component-row';
-        addRow.innerHTML = `<button class="btn" style="width:100%;">${t('comp.add')}</button>`;
-        addRow.querySelector('button').addEventListener('click', ev => {
-            this.addComponentMenu(ev, ent);
-        });
+        const addBtn = document.createElement('button');
+        addBtn.className = 'btn';
+        addBtn.textContent = t('comp.add');
+        addBtn.addEventListener('click', ev => this.addComponentMenu(ev, ent));
+        addRow.appendChild(addBtn);
         el.appendChild(addRow);
 
         this.renderSceneSettings(el);
@@ -92,87 +110,84 @@ export class Inspector {
     renderSceneSettings(el) {
         const eng = engineInstance();
         const s = eng.getSceneSettings();
-        const block = document.createElement('div');
-        block.className = 'comp-block';
-        block.innerHTML = `
-            <div class="comp-header"><span class="toggle-arrow">▾</span>${t('insp.sceneSettings')}</div>
-            <div class="comp-body"></div>`;
+        const block = section(t('insp.sceneSettings'), 'scene');
         const body = block.querySelector('.comp-body');
-        body.appendChild(vectorRow(t('insp.gravity'), 'gravity', s.gravity, v => {
-            eng.setSceneSetting('gravity', v);
-        }, false));
-        body.appendChild(colorRow(t('insp.ambient'), s.ambient, v => eng.setSceneSetting('ambient', v)));
-        body.appendChild(colorRow(t('insp.background'), s.background, v => eng.setSceneSetting('background', v)));
-        const fogRow = document.createElement('div');
-        fogRow.className = 'prop-row';
-        fogRow.innerHTML = `<label class="no-drag">${t('insp.fog')}</label><input type="checkbox" ${s.fogEnabled ? 'checked' : ''}>`;
-        fogRow.querySelector('input').addEventListener('change', ev => {
-            eng.setSceneSetting('fogEnabled', ev.target.checked);
-            markDirty();
-        });
-        body.appendChild(fogRow);
-        body.appendChild(colorRow(t('insp.fogColor'), s.fogColor, v => eng.setSceneSetting('fogColor', v)));
-        body.appendChild(numberRow(t('insp.fogDensity'), s.fogDensity, 0.001, v => eng.setSceneSetting('fogDensity', v)));
+        const set = (key, v) => { eng.setSceneSetting(key, v); };
+
+        body.appendChild(vectorRow(t('insp.gravity'), () => s.gravity, v => set('gravity', v), false, 3));
+        body.appendChild(colorRow(t('insp.ambient'), () => s.ambient, v => set('ambient', v)));
+        body.appendChild(colorRow(t('insp.background'), () => s.background, v => set('background', v)));
+        body.appendChild(boolRow(t('insp.fog'), () => s.fogEnabled, v => { set('fogEnabled', v); markDirty(); }));
+        body.appendChild(colorRow(t('insp.fogColor'), () => s.fogColor, v => set('fogColor', v)));
+        body.appendChild(numberRow(t('insp.fogDensity'), () => s.fogDensity, 0.001, v => set('fogDensity', v)));
+        body.appendChild(numberRow(t('insp.exposure'), () => s.exposure, 0.01, v => set('exposure', v)));
+        body.appendChild(enumRow(t('insp.tonemap'), () => s.tonemap,
+            ['none', 'reinhard', 'aces', 'filmic'].map(k => t('insp.tonemap.' + k)),
+            v => { set('tonemap', v); markDirty(); }));
+
+        body.appendChild(boolRow(t('insp.postFxaa'), () => s.postFxaa, v => { set('postFxaa', v); markDirty(); }));
+        body.appendChild(numberRow(t('insp.postContrast'), () => s.postContrast, 0.01, v => set('postContrast', v)));
+        body.appendChild(numberRow(t('insp.postSaturation'), () => s.postSaturation, 0.01, v => set('postSaturation', v)));
+        body.appendChild(numberRow(t('insp.postBloomStrength'), () => s.postBloomStrength, 0.01, v => set('postBloomStrength', v)));
+        body.appendChild(numberRow(t('insp.postBloomThreshold'), () => s.postBloomThreshold, 0.01, v => set('postBloomThreshold', v)));
+        body.appendChild(numberRow(t('insp.postVignette'), () => s.postVignette, 0.01, v => set('postVignette', v)));
+        body.appendChild(numberRow(t('insp.postVignetteRadius'), () => s.postVignetteRadius, 0.01, v => set('postVignetteRadius', v)));
+        body.appendChild(numberRow(t('insp.postVignetteSoftness'), () => s.postVignetteSoftness, 0.01, v => set('postVignetteSoftness', v)));
+        body.appendChild(numberRow(t('insp.textureMemory'), () => s.textureMemoryMB, 8, v => set('textureMemoryMB', v)));
         el.appendChild(block);
     }
 
     componentBlock(ent, comp) {
         const eng = engineInstance();
-        const block = document.createElement('div');
-        block.className = 'comp-block';
         const isTransform = comp.type === 'Transform';
         const collapsed = this.collapsed.has(comp.type);
-        const title = isTransform ? t('comp.transform') : comp.type === 'Script' ? t('comp.script') : t('comp.' + comp.type.toLowerCase());
+        const titleKey = COMP_TITLE[comp.type];
+        const block = section(titleKey ? t(titleKey) : comp.type, comp.type);
 
-        block.innerHTML = `
-            <div class="comp-header">
-                <span class="toggle-arrow">${collapsed ? '▸' : '▾'}</span>
-                <span>${title}</span>
-                ${!isTransform ? `<span class="remove" title="Remove">${icon('close', 11)}</span>` : ''}
-            </div>
-            <div class="comp-body" style="${collapsed ? 'display:none;' : ''}"></div>`;
-
-        block.querySelector('.comp-header').addEventListener('click', ev => {
-            if (ev.target.closest('.remove')) return;
-            if (collapsed) this.collapsed.delete(comp.type); else this.collapsed.add(comp.type);
-            this.render();
-        });
-        const removeBtn = block.querySelector('.remove');
-        if (removeBtn) removeBtn.addEventListener('click', () => {
-            pushUndo();
-            eng.removeComponent(ent.id, comp.type);
-            markDirty();
-            this.render();
-        });
-
+        const head = block.querySelector('.comp-header');
+        head.querySelector('.toggle-arrow').textContent = collapsed ? '▸' : '▾';
         const body = block.querySelector('.comp-body');
+        if (collapsed) body.style.display = 'none';
+
+        if (!isTransform) {
+            const remove = document.createElement('span');
+            remove.className = 'remove';
+            remove.title = t('insp.removeComponent');
+            remove.innerHTML = icon('close');
+            remove.addEventListener('click', () => {
+                pushUndo();
+                eng.removeComponent(ent.id, comp.type);
+                markDirty();
+                this.render();
+            });
+            head.appendChild(remove);
+        }
+
+        head.addEventListener('click', () => {
+            if (this.collapsed.has(comp.type)) this.collapsed.delete(comp.type);
+            else this.collapsed.add(comp.type);
+            this.render();
+        });
 
         if (isTransform) {
-            body.appendChild(vectorRow('Position', 'position', ent.transform.position,
-                v => eng.setComponentProp(ent.id, 'Transform', 'position', v), true));
-            body.appendChild(vectorRow('Rotation', 'rotation', ent.transform.rotation,
-                v => eng.setComponentProp(ent.id, 'Transform', 'rotation', v), true));
-            body.appendChild(vectorRow('Scale', 'scale', ent.transform.scale,
-                v => eng.setComponentProp(ent.id, 'Transform', 'scale', v), true));
+            const read = key => () => ent.transform[key];
+            body.appendChild(vectorRow(t('insp.position'), read('position'), v => eng.setComponentProp(ent.id, 'Transform', 'position', v), true, 3));
+            body.appendChild(vectorRow(t('insp.rotation'), read('rotation'), v => eng.setComponentProp(ent.id, 'Transform', 'rotation', v), true, 3));
+            body.appendChild(vectorRow(t('insp.scale'), read('scale'), v => eng.setComponentProp(ent.id, 'Transform', 'scale', v), true, 3));
         } else if (comp.type === 'Script') {
             this.scriptBody(body, ent, comp);
         } else if (comp.meta) {
             for (const md of comp.meta) {
-                const value = comp.props[md.name];
                 const commit = v => {
                     eng.setComponentProp(ent.id, comp.type, md.name, v);
                     markDirty();
                 };
-                body.appendChild(this.propControl(md, value, commit));
+                body.appendChild(this.propControl(md, () => comp.props[md.name], commit));
             }
-            const enabledRow = document.createElement('div');
-            enabledRow.className = 'prop-row';
-            enabledRow.innerHTML = `<label class="no-drag">Enabled</label><input type="checkbox" ${comp.enabled ? 'checked' : ''}>`;
-            enabledRow.querySelector('input').addEventListener('change', ev => {
-                eng.setComponentProp(ent.id, comp.type, 'enabled', ev.target.checked);
+            body.appendChild(boolRow(t('insp.enabled'), () => comp.enabled, v => {
+                eng.setComponentProp(ent.id, comp.type, 'enabled', v);
                 markDirty();
-            });
-            body.appendChild(enabledRow);
+            }));
         }
         return block;
     }
@@ -180,53 +195,51 @@ export class Inspector {
     scriptBody(body, ent, comp) {
         const eng = engineInstance();
         if (!editor.scriptClasses.length) {
-            body.innerHTML = `<div class="form-hint">${t('comp.script.noClass')}</div>`;
+            body.innerHTML = `<div class="form-hint">${escapeHtml(t('comp.script.noClass'))}</div>`;
             if (comp.scriptClass) {
-                body.insertAdjacentHTML('beforeend', `<div class="prop-row"><label class="no-drag">Class</label><span class="muted">${escapeHtml(comp.scriptClass)}</span></div>`);
+                const row = readOnlyRow(t('insp.class'), comp.scriptClass);
+                body.appendChild(row);
             }
             return;
         }
-        const row = document.createElement('div');
-        row.className = 'prop-row';
-        row.innerHTML = `<label class="no-drag">${t('comp.script.pickClass')}</label>
-            <select><option value="">—</option>${editor.scriptClasses.map(c => `
-                <option value="${escapeHtml(c.name)}" ${c.name === comp.scriptClass ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
-            </select>`;
-        row.querySelector('select').addEventListener('change', ev => {
+        const select = document.createElement('select');
+        select.innerHTML = `<option value=""></option>${editor.scriptClasses.map(c => `
+            <option value="${escapeHtml(c.name)}" ${c.name === comp.scriptClass ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}`;
+        select.addEventListener('change', ev => {
             pushUndo();
             eng.setComponentProp(ent.id, 'Script', 'class', ev.target.value);
             markDirty();
             this.render();
         });
-        body.appendChild(row);
+        body.appendChild(labelRow(t('comp.script.pickClass'), select));
 
         const meta = scriptClassMeta(comp.scriptClass);
         if (meta) {
             for (const p of meta.props) {
-                const value = comp.props[p.name];
                 const commit = v => {
                     eng.setComponentProp(ent.id, 'Script', p.name, v);
                     markDirty();
                 };
                 body.appendChild(this.propControl(
                     { name: p.name, label: p.name, kind: p.type },
-                    value === undefined ? p.default : value, commit));
+                    () => comp.props[p.name] === undefined ? p.default : comp.props[p.name],
+                    commit));
             }
         }
     }
 
-    propControl(md, value, commit) {
+    propControl(md, read, commit) {
         switch (md.kind) {
-            case 'float': return numberRow(md.label, value, null, commit);
-            case 'int': return numberRow(md.label, value, 1, commit, true);
-            case 'bool': return boolRow(md.label, value, commit);
-            case 'string': return textRow(md.label, value, commit);
-            case 'vec2': return vectorRow(md.label, md.name, value, commit, false, 2);
-            case 'vec3': return vectorRow(md.label, md.name, value, commit, false, 3);
-            case 'color': return colorRow(md.label, value, commit);
-            case 'enum': return enumRow(md.label, value, md.options, commit);
-            case 'asset': return assetRow(md.label, value, md.assetKind, commit);
-            default: return textRow(md.label, value, commit);
+            case 'float': return numberRow(md.label, read, null, commit);
+            case 'int': return numberRow(md.label, read, 1, commit, true);
+            case 'bool': return boolRow(md.label, read, commit);
+            case 'string': return textRow(md.label, read, commit);
+            case 'vec2': return vectorRow(md.label, read, commit, false, 2);
+            case 'vec3': return vectorRow(md.label, read, commit, false, 3);
+            case 'color': return colorRow(md.label, read, commit);
+            case 'enum': return enumRow(md.label, read, md.options, commit);
+            case 'asset': return assetRow(md.label, read, md.assetKind, commit);
+            default: return textRow(md.label, read, commit);
         }
     }
 
@@ -235,7 +248,7 @@ export class Inspector {
             const names = ['Camera', 'Light', 'MeshRenderer', 'SpriteRenderer', 'TextRenderer',
                 'RigidBody', 'BoxCollider', 'SphereCollider', 'Collider2D', 'Script'];
             showContextMenu(ev.clientX, ev.clientY, names.map(n => ({
-                label: 'comp.' + n.toLowerCase(),
+                label: t(COMP_TITLE[n] || 'comp.script'),
                 run: () => {
                     pushUndo();
                     engineInstance().addComponent(ent.id, n);
@@ -248,153 +261,216 @@ export class Inspector {
 }
 
 // ---------------------------------------------------------------------------
-// Property controls.
+// Blocks and rows.
 // ---------------------------------------------------------------------------
-function makeNumField(value, cls, onCommit, step, integer) {
+
+function section(title, key) {
+    const block = document.createElement('div');
+    block.className = 'comp-block';
+    block.dataset.block = key;
+    block.innerHTML = `
+        <div class="comp-header" role="button" tabindex="0">
+            <span class="toggle-arrow"></span><span class="comp-title">${escapeHtml(title)}</span>
+        </div>
+        <div class="comp-body"></div>`;
+    // Enter/Space parity with the click that folds the block.
+    block.querySelector('.comp-header').addEventListener('keydown', ev => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); ev.currentTarget.click(); }
+    });
+    return block;
+}
+
+// Labels carry a title unconditionally. The label column is fixed, so a long
+// prop name is going to be ellipsised at some panel width; a truncated label
+// with no tooltip is a dead end.
+function labelEl(text, draggable) {
+    const l = document.createElement('label');
+    l.textContent = text;
+    l.title = text;
+    if (!draggable) l.className = 'no-drag';
+    return l;
+}
+
+function propRow(labelText, field, draggable) {
+    const row = document.createElement('div');
+    row.className = 'prop-row';
+    row.appendChild(labelEl(labelText, draggable));
+    row.appendChild(field);
+    return row;
+}
+
+function labelRow(labelText, field) {
+    return propRow(labelText, field, false);
+}
+
+function readOnlyRow(labelText, value) {
+    const span = document.createElement('span');
+    span.className = 'muted';
+    span.textContent = value;
+    span.title = value;
+    return propRow(labelText, span, false);
+}
+
+function emptyLine(text) {
+    const d = document.createElement('div');
+    d.className = 'empty-line';
+    d.textContent = text;
+    return d;
+}
+
+// ---------------------------------------------------------------------------
+// Property controls. Every factory takes `read()` rather than a value so the
+// row can be refreshed in place, and every one of them fills the value column
+// so controls line up down the panel regardless of kind.
+// ---------------------------------------------------------------------------
+
+function makeNumField(read, cls, commit, step, integer) {
     const wrap = document.createElement('div');
-    wrap.className = 'num-field ' + (cls || '');
-    wrap.innerHTML = `<span class="prefix"></span><input type="text" spellcheck="false">`;
+    wrap.className = 'num-field' + (cls ? ' ' + cls : '');
+    wrap.innerHTML = '<span class="prefix"></span><input type="text" spellcheck="false">';
     const input = wrap.querySelector('input');
     const fmt = v => (integer ? String(Math.round(v)) : String(round(v, 4)));
-    input.value = fmt(value ?? 0);
+    const paint = () => { input.value = fmt(Number(read()) || 0); };
+    paint();
     input.addEventListener('change', () => {
         let v = parseFloat(input.value);
-        if (isNaN(v)) { input.value = fmt(value ?? 0); return; }
+        if (isNaN(v)) { paint(); return; }
         if (integer) v = Math.round(v);
-        onCommit(v);
-        input.value = fmt(v);
+        commit(v);
+        paint();
     });
     input.addEventListener('keydown', ev => {
         if (ev.key === 'Enter') input.blur();
-        if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
-            ev.preventDefault();
-            const delta = (ev.key === 'ArrowUp' ? 1 : -1) * (step || (ev.shiftKey ? 0.5 : 0.1));
-            let v = parseFloat(input.value) || 0;
-            v += delta;
-            if (integer) v = Math.round(v);
-            onCommit(v);
-            input.value = fmt(v);
-        }
+        if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
+        ev.preventDefault();
+        // Shift is coarse, matching the drag-scrub modifier. Previously the
+        // arrow keys treated Shift as the finer step while the scrub treated
+        // it as coarser, so the same chord meant opposite things.
+        const base = step || 0.1;
+        const delta = (ev.key === 'ArrowUp' ? 1 : -1) * base * (ev.shiftKey ? 10 : 1);
+        let v = (parseFloat(input.value) || 0) + delta;
+        if (integer) v = Math.round(v);
+        commit(v);
+        paint();
     });
+    wrap._paint = paint;
     return wrap;
 }
 
-function numberRow(label, value, step, commit, integer) {
-    const row = document.createElement('div');
-    row.className = 'prop-row';
-    row.innerHTML = `<label>${escapeHtml(label)}</label>`;
-    const field = makeNumField(value, '', commit, step, integer);
-    field.style.gridColumn = '2';
-    row.appendChild(field);
-    dragScrub(row.querySelector('label'), value, commit, step || 0.05);
+function numberRow(label, read, step, commit, integer) {
+    const field = makeNumField(read, '', commit, step, integer);
+    const row = propRow(label, field, true);
+    row._refresh = () => field._paint();
+    dragScrub(row.querySelector('label'), read, commit, step || 0.05);
     return row;
 }
 
-function boolRow(label, value, commit) {
-    const row = document.createElement('div');
-    row.className = 'prop-row';
-    row.innerHTML = `<label class="no-drag">${escapeHtml(label)}</label><input type="checkbox" ${value ? 'checked' : ''}>`;
-    row.querySelector('input').addEventListener('change', ev => commit(ev.target.checked));
+function boolRow(label, read, commit) {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = !!read();
+    input.addEventListener('change', () => commit(input.checked));
+    const row = propRow(label, input, false);
+    row._refresh = () => { input.checked = !!read(); };
     return row;
 }
 
-function textRow(label, value, commit) {
-    const row = document.createElement('div');
-    row.className = 'prop-row';
-    row.innerHTML = `<label class="no-drag">${escapeHtml(label)}</label>`;
+function textRow(label, read, commit) {
     const input = document.createElement('input');
     input.type = 'text';
     input.spellcheck = false;
-    input.value = value ?? '';
+    input.value = read() ?? '';
     input.addEventListener('change', () => commit(input.value));
-    row.appendChild(input);
+    const row = propRow(label, input, false);
+    row._refresh = () => { input.value = read() ?? ''; };
     return row;
 }
 
-function vectorRow(label, key, value, commit, axes, n = 3) {
-    const row = document.createElement('div');
-    row.className = 'prop-row';
-    row.innerHTML = `<label>${escapeHtml(label)}</label>`;
+function vectorRow(label, read, commit, axes, n = 3) {
     const holder = document.createElement('div');
     holder.className = 'prop-vector';
-    holder.style.gridColumn = '2';
-    const vals = Array.isArray(value) ? value : [0, 0, 0];
-    const classes = axes ? ['ax', 'ay', 'az'] : ['', '', ''];
-    const inputs = [];
+    const fields = [];
     for (let i = 0; i < n; ++i) {
-        const field = makeNumField(vals[i] || 0, classes[i], v => {
-            const out = [...vals];
-            out[i] = v;
-            commit(out);
+        const f = makeNumField(() => {
+            const v = read();
+            return Array.isArray(v) ? v[i] : 0;
+        }, axes ? ['ax', 'ay', 'az'][i] : '', v => {
+            const cur = Array.isArray(read()) ? [...read()] : new Array(n).fill(0);
+            cur[i] = v;
+            commit(cur);
         });
-        inputs.push(field);
-        holder.appendChild(field);
+        fields.push(f);
+        holder.appendChild(f);
     }
-    row.appendChild(holder);
-    dragScrub(row.querySelector('label'), vals[0], v => {
-        const out = [...vals];
-        out.fill(v);
-        commit(out);
-    }, 0.05);
+    const row = propRow(label, holder, true);
+    row._refresh = () => fields.forEach(f => f._paint());
+    // Scrubbing a vector label drives every axis. That is the documented
+    // behaviour; the row repaints because three values just changed.
+    dragScrub(row.querySelector('label'), () => {
+        const v = read();
+        return Array.isArray(v) ? v[0] : 0;
+    }, v => commit(new Array(n).fill(v)), 0.05);
+    row.querySelector('label').addEventListener('mouseup', () => row._refresh());
     return row;
 }
 
-function colorRow(label, value, commit) {
-    const arr = Array.isArray(value) ? value : [1, 1, 1, 1];
-    const row = document.createElement('div');
-    row.className = 'prop-row';
-    row.innerHTML = `<label class="no-drag">${escapeHtml(label)}</label>`;
+function colorRow(label, read, commit) {
     const holder = document.createElement('div');
-    holder.style.cssText = 'grid-column:2; display:flex; gap:6px; align-items:center;';
-    const rgb = document.createElement('input');
-    rgb.type = 'color';
-    rgb.value = rgbaToHex(arr);
+    holder.className = 'prop-color';
+    const swatch = document.createElement('input');
+    swatch.type = 'color';
     const alpha = document.createElement('input');
     alpha.type = 'range';
     alpha.min = 0; alpha.max = 1; alpha.step = 0.01;
-    alpha.value = arr[3] ?? 1;
-    alpha.style.flex = '1';
-    const emitColor = () => {
-        const [r, g, b] = hexToRgb(rgb.value);
-        commit([r, g, b, parseFloat(alpha.value)]);
+    const paint = () => {
+        const arr = Array.isArray(read()) ? read() : [1, 1, 1, 1];
+        swatch.value = rgbaToHex(arr);
+        alpha.value = arr[3] ?? 1;
+        alpha.title = t('insp.alpha');
     };
-    rgb.addEventListener('input', emitColor);
+    paint();
+    const emitColor = () => {
+        const [r, g, b] = hexToRgb(swatch.value);
+        commit([r, g, b, parseFloat(alpha.value)]);
+        swatch.title = swatch.value;
+    };
+    swatch.addEventListener('input', emitColor);
     alpha.addEventListener('input', emitColor);
-    holder.append(rgb, alpha);
-    row.appendChild(holder);
+    holder.append(swatch, alpha);
+    const row = propRow(label, holder, false);
+    row._refresh = paint;
     return row;
 }
 
-function enumRow(label, value, options, commit) {
-    const row = document.createElement('div');
-    row.className = 'prop-row';
-    row.innerHTML = `<label class="no-drag">${escapeHtml(label)}</label>
-        <select>${(options || []).map((o, i) => `<option value="${i}" ${i === value ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('')}</select>`;
-    row.querySelector('select').addEventListener('change', ev => commit(parseInt(ev.target.value)));
-    return row;
-}
-
-function assetRow(label, value, kind, commit) {
-    const row = document.createElement('div');
-    row.className = 'prop-row';
-    row.innerHTML = `<label class="no-drag">${escapeHtml(label)}</label>`;
-    const holder = document.createElement('div');
-    holder.style.cssText = 'grid-column:2; display:flex; gap:6px; min-width:0;';
+function enumRow(label, read, options, commit) {
     const select = document.createElement('select');
-    select.style.flex = '1';
+    select.innerHTML = (options || []).map((o, i) =>
+        `<option value="${i}" ${i === read() ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('');
+    select.addEventListener('change', ev => commit(parseInt(ev.target.value, 10)));
+    const row = propRow(label, select, false);
+    row._refresh = () => { select.value = String(read()); };
+    return row;
+}
+
+function assetRow(label, read, kind, commit) {
+    const select = document.createElement('select');
     const exts = kind === 'model' ? ['.obj'] : ['.png', '.jpg', '.jpeg', '.bmp'];
     const assets = listAssets(exts);
-    select.innerHTML = `<option value="">—</option>${assets.map(a =>
-        `<option value="${escapeHtml(a)}" ${a === value ? 'selected' : ''}>${escapeHtml(a)}</option>`).join('')}`;
+    select.innerHTML = `<option value=""></option>${assets.map(a =>
+        `<option value="${escapeHtml(a)}" ${a === read() ? 'selected' : ''}>${escapeHtml(a)}</option>`).join('')}`;
     select.addEventListener('change', () => commit(select.value));
-    holder.appendChild(select);
-    row.appendChild(holder);
-    return row;
+    return propRow(label, select, false);
 }
 
+// Walks <project>/Assets on every asset-typed property, on every render.
+// Cached per inspector lifetime and invalidated by refresh(), which every
+// structural change in the app routes through.
+let assetListCache = null;
 function listAssets(exts) {
     const root = editor.project?.path;
     if (!root) return [];
+    const key = root + '|' + exts.join(',');
+    if (assetListCache && assetListCache.key === key) return assetListCache.list;
     const out = [];
     const walk = (dir, rel) => {
         let entries;
@@ -410,23 +486,30 @@ function listAssets(exts) {
         }
     };
     walk(path.join(root, 'Assets'), '');
-    return out.sort();
+    const list = out.sort();
+    assetListCache = { key, list };
+    return list;
 }
+export function invalidateAssetList() { assetListCache = null; }
 
-// Drag-to-scrub on a label (Unreal-style).
-function dragScrub(labelEl, startValue, commit, step) {
+// Drag-to-scrub on a label. The start value is read at mousedown, not at
+// render: capturing it at render time meant a second drag on the same label
+// jumped, because nothing re-rendered in between to update the capture.
+function dragScrub(labelEl, read, commit, step) {
     if (!labelEl) return;
     labelEl.addEventListener('mousedown', ev => {
+        if (ev.button !== 0) return;
         ev.preventDefault();
         const startX = ev.clientX;
-        const start = typeof startValue === 'number' ? startValue : 0;
-        const move = me => {
-            const delta = (me.clientX - startX) * step * (me.shiftKey ? 10 : 1);
-            commit(start + delta);
-        };
+        const start = Number(read()) || 0;
+        // Hold the scrub cursor for the whole gesture so the affordance does
+        // not flicker when the pointer outruns the 88px label.
+        document.body.style.cursor = 'ew-resize';
+        const move = me => commit(start + (me.clientX - startX) * step * (me.shiftKey ? 10 : 1));
         const up = () => {
             window.removeEventListener('mousemove', move);
             window.removeEventListener('mouseup', up);
+            document.body.style.cursor = '';
         };
         window.addEventListener('mousemove', move);
         window.addEventListener('mouseup', up);
@@ -446,3 +529,4 @@ function round(v, d) { const p = Math.pow(10, d); return Math.round(v * p) / p; 
 function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+function escapeAttr(s) { return escapeHtml(s); }

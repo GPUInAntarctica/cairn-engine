@@ -34,17 +34,19 @@ export function mountEditor(root, prefs) {
         <div id="menubar"></div>
         <div id="toolbar"></div>
         <div class="panel" id="hierarchy">
-            <div class="panel-header">${t('panel.hierarchy')}<span class="spacer"></span></div>
+            <div class="panel-header"><span>${escapeHtml(t('panel.hierarchy'))}</span><span class="spacer"></span></div>
+            <div class="panel-body panel-split" id="hier-body"></div>
         </div>
-        <div class="vsplit" id="split-v"></div>
+        <div class="vsplit" id="split-v" role="separator" aria-orientation="vertical" tabindex="0"></div>
         <div id="center"></div>
-        <div class="hsplit" id="split-h"></div>
+        <div class="hsplit" id="split-h" role="separator" aria-orientation="vertical" tabindex="0"></div>
         <div class="panel" id="inspector">
-            <div class="panel-header">${t('panel.inspector')}</div>
+            <div class="panel-header">${escapeHtml(t('panel.inspector'))}</div>
+            <div class="panel-body" id="insp-body"></div>
         </div>
         <div class="panel" id="bottom">
-            <div class="tab-strip" id="bottom-tabs"></div>
-            <div style="flex:1; min-height:0; display:flex; flex-direction:column;">
+            <div class="tab-strip" id="bottom-tabs" role="tablist"></div>
+            <div class="dock-body">
                 <div class="tab-page" id="page-content"></div>
                 <div class="tab-page" id="page-console"></div>
             </div>
@@ -56,8 +58,8 @@ export function mountEditor(root, prefs) {
     const tabHost = new TabHost(document.getElementById('center'));
 
     // ---- panels -------------------------------------------------------------
-    const hierarchy = new Hierarchy(document.getElementById('hierarchy'));
-    const inspector = new Inspector(document.getElementById('inspector'));
+    const hierarchy = new Hierarchy(document.getElementById('hier-body'));
+    const inspector = new Inspector(document.getElementById('insp-body'));
     const consolePanel = new ConsolePanel(document.getElementById('page-console'));
     const statusbar = new StatusBar(document.getElementById('statusbar'));
 
@@ -67,6 +69,7 @@ export function mountEditor(root, prefs) {
         closeable: false,
     });
     const viewport = new Viewport(viewportPage.pageEl);
+    tabHost.onActivate = () => viewport.resize();
 
     const contentBrowser = new ContentBrowser(document.getElementById('page-content'), absPath => {
         const ext = path.extname(absPath).toLowerCase();
@@ -86,13 +89,21 @@ export function mountEditor(root, prefs) {
     function renderBottomTabs() {
         bottomStrip.innerHTML = '';
         for (const [id, page] of Object.entries(bottomPages)) {
-            const tab = document.createElement('div');
+            const tab = document.createElement('button');
+            tab.type = 'button';
             tab.className = 'tab' + (editor.activeBottom === id ? ' active' : '');
-            tab.innerHTML = `${icon(id === 'console' ? 'console' : 'folder', 12)}<span>${t(id === 'console' ? 'panel.console' : 'panel.content')}</span>`;
-            tab.addEventListener('click', () => activateBottom(id));
+            tab.dataset.id = id;
+            tab.setAttribute('role', 'tab');
+            tab.setAttribute('aria-selected', editor.activeBottom === id ? 'true' : 'false');
+            tab.innerHTML = `<span class="tab-icon">${icon(id === 'console' ? 'console' : 'folder')}</span>` +
+                `<span class="tab-label">${escapeHtml(t(id === 'console' ? 'panel.console' : 'panel.content'))}</span>`;
             bottomStrip.appendChild(tab);
         }
     }
+    bottomStrip.addEventListener('click', ev => {
+        const tab = ev.target.closest('.tab');
+        if (tab) activateBottom(tab.dataset.id);
+    });
     activateBottom('content');
 
     // ---- toolbar & menubar ---------------------------------------------------
@@ -171,7 +182,7 @@ export function mountEditor(root, prefs) {
                     import('../codeeditor.js').then(({ CodeEditor }) => {
                         if (!tabHost.pages.has(id)) return;
                         const ed = new CodeEditor(pageEl, filePath, {
-                            onDirty: () => { tabHost.renderStrip(); },
+                            onDirty: () => tabHost.setDirty(id, true),
                         });
                         page.codeEditor = ed;
                         requestAnimationFrame(() => ed.editor.layout());
@@ -245,7 +256,7 @@ export function mountEditor(root, prefs) {
                     settingsDialog(await ipc.getPrefs(), async patch => {
                         await ipc.setPrefs(patch);
                         if (patch.language && patch.language !== language()) setLanguage(patch.language);
-                        if (patch.showStats !== undefined) viewport.showStats = patch.showStats;
+                        if (patch.showStats !== undefined) { viewport.showStats = patch.showStats; viewport.drawOverlay(); toolbar.refresh(); }
                         if (patch.compiler !== undefined) detectCompilerStatus();
                     });
                 } },
@@ -294,7 +305,7 @@ export function mountEditor(root, prefs) {
             items: [
                 { label: 'menu.window.content', run: () => activateBottom('content') },
                 { label: 'menu.window.console', run: () => activateBottom('console') },
-                { label: 'menu.window.stats', run: () => { viewport.showStats = !viewport.showStats; } },
+                { label: 'menu.window.stats', run: () => { viewport.showStats = !viewport.showStats; viewport.drawOverlay(); toolbar.refresh(); } },
             ],
         },
         {
@@ -320,8 +331,10 @@ export function mountEditor(root, prefs) {
 
     async function detectCompilerStatus() {
         const compiler = await ipc.detectCompiler();
+        statusbar.setCompiler(compiler || '');
+        // Only the failure is worth a transient message; a successful probe is
+        // not an event the user needs to be told about.
         if (!compiler) status(t('status.noCompiler'));
-        else status(`${t('status.ready')} — ${compiler}`);
         return compiler;
     }
     detectCompilerStatus();
@@ -381,29 +394,32 @@ export function mountEditor(root, prefs) {
 
     // ---- frame loop -----------------------------------------------------------------
     on('scene-changed', () => {
-        tabHost.pages.get('scene').label = `${t('panel.scene')} — ${sceneName()}`;
-        tabHost.renderStrip();
-        statusbar.update({
+        tabHost.setLabel('scene', `${t('panel.scene')} — ${sceneName()}`);
+        statusbar.update(statusState());
+    });
+    on('scene-dirty', () => { statusbar.update(statusState()); });
+
+    let lastFps = 60;
+    let lastStats = { drawCalls: 0, triangles: 0 };
+    let lastSelection = null;
+
+    function statusState() {
+        // Only re-scan the entity list when the selection actually changed.
+        if (editor.selection !== lastSelection) {
+            lastSelection = editor.selection;
+            selectedEntityCache = entityList().find(e => e.id === editor.selection) || null;
+        }
+        return {
             sceneLabel: `${sceneName()}.cscene`,
             dirty: editor.sceneDirty,
             playing: editor.playing,
             paused: editor.paused,
             fps: lastFps,
             stats: lastStats,
-            selection: entityList().find(e => e.id === editor.selection) || null,
-        });
-    });
-    on('scene-dirty', () => {
-        statusbar.update({
-            sceneLabel: `${sceneName()}.cscene`,
-            dirty: true, playing: editor.playing, paused: editor.paused,
-            fps: lastFps, stats: lastStats,
-            selection: entityList().find(e => e.id === editor.selection) || null,
-        });
-    });
-
-    let lastFps = 60;
-    let lastStats = { drawCalls: 0, triangles: 0 };
+            selection: selectedEntityCache,
+        };
+    }
+    let selectedEntityCache = null;
     let last = performance.now();
     let fpsAccum = 0, fpsFrames = 0;
 
@@ -440,21 +456,17 @@ export function mountEditor(root, prefs) {
         if (editor.playing && !editor.paused) engineInstance().update(dt);
         if (editor.playing) consolePanel.pump();
         lastStats = viewport.lastRenderStats || lastStats;
-
-        statusbar.update({
-            sceneLabel: `${sceneName()}.cscene`,
-            dirty: editor.sceneDirty,
-            playing: editor.playing,
-            paused: editor.paused,
-            fps: lastFps,
-            stats: lastStats,
-            selection: entityList().find(e => e.id === editor.selection) || null,
-        });
+        viewport.updateStats(lastStats, lastFps);
+        statusbar.update(statusState());
         requestAnimationFrame(frame);
     }
     requestAnimationFrame(frame);
 
     return { viewport, tabHost, buildScripts, playControl };
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 function isMac() { return process.platform === 'darwin'; }

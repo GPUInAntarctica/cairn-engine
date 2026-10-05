@@ -7,10 +7,14 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <tuple>
 
 namespace Cairn {
 
 AABB Mesh::Bounds() const {
+    // Cached: culling, picking and selection all ask for this every frame, and
+    // the answer only changes when the vertex buffer does.
+    if (m_boundsValid) return m_bounds;
     AABB bounds;
     bool first = true;
     for (const auto& v : vertices) {
@@ -21,10 +25,13 @@ AABB Mesh::Bounds() const {
             bounds.Expand(v.position);
         }
     }
+    m_bounds = bounds;
+    m_boundsValid = true;
     return bounds;
 }
 
 void Mesh::RecomputeNormals() {
+    InvalidateBounds();
     for (auto& v : vertices) v.normal = Vec3(0, 0, 0);
     for (size_t i = 0; i + 2 < indices.size(); i += 3) {
         MeshVertex& a = vertices[indices[i]];
@@ -36,6 +43,57 @@ void Mesh::RecomputeNormals() {
         c.normal += n;
     }
     for (auto& v : vertices) v.normal = v.normal.Normalized();
+    // Existing callers expect a usable tangent frame, not stale data.
+    RecomputeTangents();
+}
+
+// Lengyel's method: accumulate per-triangle tangent/bitangent from the UV
+// gradient, then orthonormalize against the vertex normal. Handedness records
+// which side the bitangent falls on so shading can rebuild B = cross(N,T)*w.
+void Mesh::RecomputeTangents() {
+    for (auto& v : vertices) v.tangent = Vec4(0, 0, 0, 0);
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        MeshVertex& a = vertices[indices[i]];
+        MeshVertex& b = vertices[indices[i + 1]];
+        MeshVertex& c = vertices[indices[i + 2]];
+        const Vec3 e1 = b.position - a.position;
+        const Vec3 e2 = c.position - a.position;
+        const float du1 = b.uv.x - a.uv.x, dv1 = b.uv.y - a.uv.y;
+        const float du2 = c.uv.x - a.uv.x, dv2 = c.uv.y - a.uv.y;
+        const float det = du1 * dv2 - du2 * dv1;
+        if (std::fabs(det) < 1e-12f) continue;  // degenerate UV layout: skip
+        const float r = 1.0f / det;
+        const Vec3 t = (e1 * dv2 - e2 * dv1) * r;
+        const Vec3 bt = (e2 * du1 - e1 * du2) * r;
+        a.tangent.x += t.x; a.tangent.y += t.y; a.tangent.z += t.z;
+        b.tangent.x += t.x; b.tangent.y += t.y; b.tangent.z += t.z;
+        c.tangent.x += t.x; c.tangent.y += t.y; c.tangent.z += t.z;
+        const Vec3 n = (a.normal + b.normal + c.normal);
+        const float hand = Vec3::Dot(Vec3::Cross(n, t), bt) >= 0.0f ? 1.0f : -1.0f;
+        a.tangent.w += hand;
+        b.tangent.w += hand;
+        c.tangent.w += hand;
+    }
+    for (auto& v : vertices) {
+        Vec3 t(v.tangent.x, v.tangent.y, v.tangent.z);
+        const Vec3 n = v.normal.Normalized();  // custom meshes may have non-unit normals
+        const float along = Vec3::Dot(n, t);
+        t = t - n * along;                      // orthonormal to the normal
+        if (t.LengthSq() > 1e-12f) {
+            t = t.Normalized();
+            v.tangent = Vec4(t, v.tangent.w >= 0.0f ? 1.0f : -1.0f);
+        } else {
+            // No usable UV gradient at this vertex; fall back to any vector
+            // perpendicular to the normal so the frame stays valid.
+            Vec3 up = std::fabs(n.y) > 0.95f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
+            t = Vec3::Cross(n, up).Normalized();
+            v.tangent = Vec4(t, 1.0f);
+        }
+    }
+}
+
+void Mesh::RecomputeNormalsAndTangents() {
+    RecomputeNormals();  // recomputes tangents as well
 }
 
 std::shared_ptr<Mesh> Mesh::Cube() {
@@ -65,8 +123,11 @@ std::shared_ptr<Mesh> Mesh::Cube() {
             vert.uv = {cornerU[i], cornerV[i]};
             m->vertices.push_back(vert);
         }
-        m->indices.insert(m->indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+        // Winding matches the outward face normals (counter-clockwise seen
+        // from outside), so back-face culling keeps the visible faces.
+        m->indices.insert(m->indices.end(), {base, base + 2, base + 1, base, base + 3, base + 2});
     }
+    m->RecomputeTangents();
     return m;
 }
 
@@ -94,6 +155,7 @@ std::shared_ptr<Mesh> Mesh::Sphere(int slices, int stacks) {
             m->indices.insert(m->indices.end(), {a, d, c, a, b, d});
         }
     }
+    m->RecomputeTangents();
     return m;
 }
 
@@ -116,6 +178,7 @@ std::shared_ptr<Mesh> Mesh::Plane(int subdivisions) {
             m->indices.insert(m->indices.end(), {a, c, d, a, d, b});
         }
     }
+    m->RecomputeTangents();
     return m;
 }
 
@@ -130,6 +193,7 @@ std::shared_ptr<Mesh> Mesh::Quad() {
         {{-0.5f, -0.5f, 0}, Vec3(0, 0, -1), {0, 1}},
     };
     m->indices = {0, 1, 2, 0, 2, 3};
+    m->RecomputeTangents();
     return m;
 }
 
@@ -147,7 +211,8 @@ std::shared_ptr<Mesh> Mesh::Cylinder(int slices) {
     }
     for (int i = 0; i < slices; ++i) {
         uint32_t a = (uint32_t)(i * 2);
-        m->indices.insert(m->indices.end(), {a, a + 1, a + 3, a, a + 3, a + 2});
+        // Outward winding: seen from outside, top_i -> bottom_{i+1} -> bottom_i.
+        m->indices.insert(m->indices.end(), {a, a + 3, a + 1, a, a + 2, a + 3});
     }
     // Caps.
     for (int cap = 0; cap < 2; ++cap) {
@@ -163,10 +228,12 @@ std::shared_ptr<Mesh> Mesh::Cylinder(int slices) {
         }
         for (int i = 0; i < slices; ++i) {
             uint32_t a = center + 1 + (uint32_t)i;
-            if (cap == 0) m->indices.insert(m->indices.end(), {center, a, a + 1});
-            else m->indices.insert(m->indices.end(), {center, a + 1, a});
+            // Counter-clockwise seen from outside the cap.
+            if (cap == 0) m->indices.insert(m->indices.end(), {center, a + 1, a});
+            else m->indices.insert(m->indices.end(), {center, a, a + 1});
         }
     }
+    m->RecomputeTangents();
     return m;
 }
 
@@ -184,7 +251,8 @@ std::shared_ptr<Mesh> Mesh::Cone(int slices) {
     }
     for (int i = 0; i < slices; ++i) {
         uint32_t a = (uint32_t)(i * 2);
-        m->indices.insert(m->indices.end(), {a, a + 1, a + 3});
+        // Outward winding on the slope: apex -> base_{i+1} -> base_i.
+        m->indices.insert(m->indices.end(), {a, a + 3, a + 1});
     }
     // Base cap.
     Vec3 n(0, -1, 0);
@@ -200,6 +268,7 @@ std::shared_ptr<Mesh> Mesh::Cone(int slices) {
         uint32_t a = center + 1 + (uint32_t)i;
         m->indices.insert(m->indices.end(), {center, a, a + 1});
     }
+    m->RecomputeTangents();
     return m;
 }
 
@@ -213,7 +282,10 @@ std::shared_ptr<Mesh> Mesh::Torus(float radius, float tube, int segments, int ri
             float u = (float)i / segments;
             float theta = u * kTwoPi;
             float ct = std::cos(theta), st = std::sin(theta);
-            Vec3 n(cp * ct, st, cp * st);
+            // Tube normal: from the ring center to the surface point, i.e.
+            // (ct*cp, st, ct*sp) — unit length by construction. (This used to
+            // mix the ring angle into the z term, which skewed shading.)
+            Vec3 n(cp * ct, st, sp * ct);
             Vec3 p((radius + tube * ct) * cp, tube * st, (radius + tube * ct) * sp);
             m->vertices.push_back({p, n, {u, v}});
         }
@@ -228,6 +300,7 @@ std::shared_ptr<Mesh> Mesh::Torus(float radius, float tube, int segments, int ri
             m->indices.insert(m->indices.end(), {a, b, d, a, d, c});
         }
     }
+    m->RecomputeTangents();
     return m;
 }
 
@@ -265,6 +338,10 @@ std::shared_ptr<Mesh> LoadObjFile(const std::string& absolutePath) {
     std::vector<Vec3> positions;
     std::vector<Vec2> uvs;
     std::vector<Vec3> normals;
+    // Index sharing: OBJ corners repeat (position, uv, normal) triples across
+    // faces; hashing the triple keeps one vertex per unique combination, which
+    // is what smooth shading and tangent computation both need.
+    std::map<std::tuple<int, int, int>, uint32_t> cornerToVertex;
     std::string line;
     while (std::getline(file, line)) {
         std::istringstream ss(line);
@@ -293,20 +370,25 @@ std::shared_ptr<Mesh> LoadObjFile(const std::string& absolutePath) {
                         if (idx > 0) return idx - 1;
                         return (int)count + idx;
                     };
-                    MeshVertex vert;
                     int p = resolve(pi, positions.size());
                     if (p < 0 || p >= (int)positions.size()) continue;
+                    int t = 0, n = 0;
+                    MeshVertex vert;
                     vert.position = positions[p];
                     if (ti != 0) {
-                        int t = resolve(ti, uvs.size());
+                        t = resolve(ti, uvs.size());
                         if (t >= 0 && t < (int)uvs.size()) vert.uv = uvs[t];
+                        else t = 0;
                     }
                     if (ni != 0) {
-                        int n = resolve(ni, normals.size());
+                        n = resolve(ni, normals.size());
                         if (n >= 0 && n < (int)normals.size()) vert.normal = normals[n];
+                        else n = 0;
                     }
-                    face.push_back((uint32_t)mesh->vertices.size());
-                    mesh->vertices.push_back(vert);
+                    auto [it, inserted] =
+                        cornerToVertex.try_emplace(std::make_tuple(p, t, n), (uint32_t)mesh->vertices.size());
+                    if (inserted) mesh->vertices.push_back(vert);
+                    face.push_back(it->second);
                 }
             }
             // Fan triangulation.
@@ -314,11 +396,16 @@ std::shared_ptr<Mesh> LoadObjFile(const std::string& absolutePath) {
                 mesh->indices.insert(mesh->indices.end(), {face[0], face[i], face[i + 1]});
         }
     }
-    // Missing normals -> recompute.
+    // Missing normals -> recompute (which also builds tangents); otherwise the
+    // tangent frame is all that is missing.
     bool hasNormals = false;
     for (const auto& v : mesh->vertices)
         if (v.normal.LengthSq() > 1e-9f) { hasNormals = true; break; }
-    if (!hasNormals) mesh->RecomputeNormals();
+    if (hasNormals) {
+        mesh->RecomputeTangents();
+    } else {
+        mesh->RecomputeNormalsAndTangents();
+    }
     if (mesh->indices.empty()) {
         Log::Warning("obj has no usable faces: %s", absolutePath.c_str());
         return nullptr;

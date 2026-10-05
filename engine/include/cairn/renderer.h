@@ -23,6 +23,10 @@ struct FrameTarget {
     std::vector<float> depth;    // [0, 1], 1 = far, sized w*h
 };
 
+// Display transform applied to shaded pixels (all math happens in linear
+// space; these run once per shaded pixel before the RGBA8 store).
+enum class Tonemap : int { None = 0, Reinhard = 1, ACES = 2, Filmic = 3 };
+
 struct CameraView {
     Vec3 position;
     Mat4 view;
@@ -41,13 +45,47 @@ struct CameraView {
     Color fogColor{0.62f, 0.66f, 0.72f};
     float fogDensity = 0.02f;
     Color ambient{0.26f, 0.28f, 0.33f};
+    Tonemap tonemap = Tonemap::ACES;
+    float exposure = 1.0f;
+    // Directional shadow mapping: 0 disables, 1-4 cascades.
+    int shadowCascades = 2;
+    int shadowResolution = 1024;   // per cascade
+    float shadowStrength = 0.85f;  // 0 = fully black shadows, 1 = unshadowed
+    float shadowDistance = 60.0f;  // cascades cover this far, not the whole far plane
+    // Post-processing on the display-referred sRGB frame, applied in the
+    // order bloom -> color grading -> vignette -> FXAA. Neutral defaults keep
+    // the framebuffer byte-identical to the un-post-processed render.
+    float postVignette = 0.0f;         // 0..1 radial darkening strength
+    float postVignetteRadius = 0.75f;  // 0..1 where darkening starts (half-height units)
+    float postVignetteSoftness = 0.5f; // 0..1 falloff width past the radius
+    float postContrast = 1.0f;         // 0..2 around the 0.5 display pivot, 1 = neutral
+    float postSaturation = 1.0f;       // 0..2 around Rec.709 luma, 1 = neutral
+    float postBloomStrength = 0.0f;    // 0..2 additive glow, 0 = off
+    float postBloomThreshold = 0.85f;  // 0..1 bright-pass cutoff (display luma)
+    bool postFxaa = false;             // luma-edge AA over the final image
+    int textureMemoryMB = 256;         // texture cache budget (LRU above it)
 };
 
 struct RenderStats {
-    int drawCalls = 0;
-    int triangles = 0;
-    int meshesSeen = 0;   // diagnostic
-    int clipRejected = 0; // diagnostic
+    int drawCalls = 0;    // rasterized triangles + 2D items + one sky pass
+    int triangles = 0;    // triangles that survived clipping
+    int meshesSeen = 0;   // mesh renderers submitted (after culling)
+    int clipRejected = 0; // triangles fully clipped away (diagnostic)
+    int frustumCulled = 0;  // mesh renderers skipped by frustum culling
+    int drawCalls2D = 0;    // sprites + text items drawn
+    int lightCount = 0;     // lights collected this frame
+    int shadowedPixels = 0; // pixels darkened by the shadow map
+    int postPasses = 0;     // post-processing effects applied this frame (0-4)
+};
+
+// The six planes of a view frustum, extracted from a view-projection matrix.
+// Planes point inwards; `Distance()` is positive inside the frustum.
+struct Frustum {
+    Vec4 planes[6];
+
+    static Frustum FromViewProj(const Mat4& viewProj);
+    // Conservative AABB test: false when the box is entirely outside.
+    bool IntersectsAABB(const AABB& box) const;
 };
 
 struct DebugLine {

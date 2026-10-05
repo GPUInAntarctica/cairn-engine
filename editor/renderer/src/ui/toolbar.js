@@ -3,45 +3,53 @@
 
 import { t } from '../i18n.js';
 import { icon } from '../icons.js';
-import { editor, selectEntity, entityList } from '../state.js';
-import { emit } from '../events.js';
+import { editor } from '../state.js';
+import { on } from '../events.js';
 
 export class Toolbar {
     constructor(hostEl, viewport, handlers) {
+        this.hostEl = hostEl;
         this.viewport = viewport;
         this.handlers = handlers;
         hostEl.innerHTML = `
-            <div class="tb-group" id="tb-tools">
-                <button class="tb-btn" data-tool="select" title="${t('tool.select')}">${icon('select')}</button>
-                <button class="tb-btn" data-tool="move" title="${t('tool.move')}">${icon('move')}</button>
-                <button class="tb-btn" data-tool="rotate" title="${t('tool.rotate')}">${icon('rotate')}</button>
-                <button class="tb-btn" data-tool="scale" title="${t('tool.scale')}">${icon('scale')}</button>
+            <div class="tb-group" id="tb-tools" role="group">
+                <button class="tb-btn" data-tool="select" title="${escapeAttr(t('tool.select'))}" aria-pressed="false">${icon('select', 16)}</button>
+                <button class="tb-btn" data-tool="move" title="${escapeAttr(t('tool.move'))}" aria-pressed="false">${icon('move', 16)}</button>
+                <button class="tb-btn" data-tool="rotate" title="${escapeAttr(t('tool.rotate'))}" aria-pressed="false">${icon('rotate', 16)}</button>
+                <button class="tb-btn" data-tool="scale" title="${escapeAttr(t('tool.scale'))}" aria-pressed="false">${icon('scale', 16)}</button>
             </div>
             <div class="tb-sep"></div>
-            <div class="tb-group" id="tb-play">
-                <button class="tb-btn" data-play="play" title="${t('tool.play')}">${icon('play')}</button>
-                <button class="tb-btn" data-play="pause" title="${t('tool.pause')}">${icon('pause')}</button>
-                <button class="tb-btn" data-play="step" title="${t('tool.step')}">${icon('step')}</button>
-                <button class="tb-btn" data-play="stop" title="${t('tool.stop')}">${icon('stop')}</button>
+            <div class="tb-group" id="tb-play" role="group">
+                <button class="tb-btn" data-play="play" title="${escapeAttr(t('tool.play'))}">${icon('play', 16)}</button>
+                <button class="tb-btn" data-play="pause" title="${escapeAttr(t('tool.pause'))}">${icon('pause', 16)}</button>
+                <button class="tb-btn" data-play="step" title="${escapeAttr(t('tool.step'))}">${icon('step', 16)}</button>
+                <button class="tb-btn" data-play="stop" title="${escapeAttr(t('tool.stop'))}">${icon('stop', 16)}</button>
             </div>
             <div class="tb-sep"></div>
             <div class="tb-group">
-                <button class="tb-btn" id="tb-ortho" title="${t('tool.ortho')}">${icon('cube')}</button>
-                <button class="tb-btn" id="tb-stats" title="${t('menu.window.stats')}">${icon('console')}</button>
+                <button class="tb-btn" id="tb-ortho" title="${escapeAttr(t('tool.ortho'))}" aria-pressed="false">${icon('cube', 16)}</button>
+                <button class="tb-btn" id="tb-stats" title="${escapeAttr(t('menu.window.stats'))}" aria-pressed="false">${icon('console', 16)}</button>
             </div>`;
 
-        hostEl.querySelectorAll('[data-tool]').forEach(btn => {
-            btn.addEventListener('click', () => this.setTool(btn.dataset.tool));
-        });
+        // Bound once, against this toolbar's own subtree: the previous version
+        // queried the whole document, so a second toolbar anywhere in the app
+        // would have driven these buttons.
+        this.toolBtns = [...hostEl.querySelectorAll('[data-tool]')];
+        this.playBtns = {};
         hostEl.querySelectorAll('[data-play]').forEach(btn => {
+            this.playBtns[btn.dataset.play] = btn;
             btn.addEventListener('click', () => handlers.playControl(btn.dataset.play));
         });
-        hostEl.querySelector('#tb-ortho').addEventListener('click', () => {
+        this.orthoBtn = hostEl.querySelector('#tb-ortho');
+        this.statsBtn = hostEl.querySelector('#tb-stats');
+        this.toolBtns.forEach(btn => btn.addEventListener('click', () => this.setTool(btn.dataset.tool)));
+        this.orthoBtn.addEventListener('click', () => {
             viewport.cam.ortho = !viewport.cam.ortho;
             this.refresh();
         });
-        hostEl.querySelector('#tb-stats').addEventListener('click', () => {
+        this.statsBtn.addEventListener('click', () => {
             viewport.showStats = !viewport.showStats;
+            viewport.drawOverlay();
             this.refresh();
         });
 
@@ -56,21 +64,25 @@ export class Toolbar {
     }
 
     refresh() {
-        const el = this.hostEl || this;
-        document.querySelectorAll('#tb-tools .tb-btn').forEach(b =>
-            b.classList.toggle('active', b.dataset.tool === editor.tool));
-        const playBtns = document.querySelectorAll('#tb-play .tb-btn');
-        playBtns.forEach(b => b.classList.remove('active', 'playing'));
-        if (editor.playing) {
-            const map = { play: 'play', pause: 'pause' };
-            playBtns[0].classList.add('playing');
-            if (editor.paused) playBtns[1].classList.add('active');
+        for (const btn of this.toolBtns) {
+            const on_ = btn.dataset.tool === editor.tool;
+            btn.classList.toggle('active', on_);
+            btn.setAttribute('aria-pressed', on_ ? 'true' : 'false');
         }
-        const orthoBtn = document.querySelector('#tb-ortho');
-        if (orthoBtn) orthoBtn.classList.toggle('active', this.viewport.cam.ortho);
-        const statsBtn = document.querySelector('#tb-stats');
-        if (statsBtn) statsBtn.classList.toggle('active', this.viewport.showStats);
+        for (const btn of Object.values(this.playBtns)) btn.classList.remove('active', 'playing');
+        // Keyed by data-play rather than by position, so reordering the
+        // controls cannot silently highlight the wrong one.
+        if (editor.playing) {
+            this.playBtns.play?.classList.add('playing');
+            if (editor.paused) this.playBtns.pause?.classList.add('active');
+        }
+        this.orthoBtn.classList.toggle('active', this.viewport.cam.ortho);
+        this.orthoBtn.setAttribute('aria-pressed', this.viewport.cam.ortho ? 'true' : 'false');
+        this.statsBtn.classList.toggle('active', this.viewport.showStats);
+        this.statsBtn.setAttribute('aria-pressed', this.viewport.showStats ? 'true' : 'false');
     }
 }
 
-import { on } from '../events.js';
+function escapeAttr(s) {
+    return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}

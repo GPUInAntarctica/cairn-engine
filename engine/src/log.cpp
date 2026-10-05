@@ -17,6 +17,11 @@ void Log::SetEchoStdout(bool on) {
     g_echoStdout = on;
 }
 
+bool Log::EchoStdout() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_echoStdout;
+}
+
 void Log::Push(LogLevel level, const std::string& text) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_buffer.push_back({g_nextId++, level, text});

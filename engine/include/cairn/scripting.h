@@ -144,8 +144,13 @@ public:
     // Trigger callbacks fire when a collider marked isTrigger overlaps.
     virtual void OnTriggerEnter(Component* other) { (void)other; }
     virtual void OnTriggerExit(Component* other) { (void)other; }
+    // Collision callbacks fire for solid contacts (Enter once per touching
+    // pair, Stay every step while touching, Exit when the contact ends).
+    virtual void OnCollisionEnter(Component* other) { (void)other; }
+    virtual void OnCollisionStay(Component* other) { (void)other; }
+    virtual void OnCollisionExit(Component* other) { (void)other; }
 
-    bool enabled = true;  // disabled components skip lifecycle callbacks
+    bool enabled = true;  // disabled components skip lifecycle and callbacks
 
     GameObject& gameObject() const { return *m_go; }
     Transform& transform() const;
@@ -231,6 +236,18 @@ public:
     std::vector<GameObject*> m_children;
     bool m_worldDirty = true;
     Mat4 m_world;
+
+    // Change tracking. Position/rotation/scale stay public fields so gameplay
+    // code can assign them directly; the world matrix is refreshed lazily by
+    // comparing the cached local matrix and the parent's world version, so a
+    // raw field write can never leave a stale world matrix behind.
+    Mat4 m_localCache = Mat4::Identity();
+    uint32_t m_worldVersion = 0;
+    uint32_t m_seenParentVersion = 0;
+    bool m_worldValid = false;
+
+    // Marks this object and its descendants as needing a world-matrix rebuild.
+    void MarkWorldDirty();
 };
 
 // ---------------------------------------------------------------------------
@@ -257,11 +274,15 @@ public:
 // ---------------------------------------------------------------------------
 class LightComponent : public Component {
 public:
-    enum class LightType : int { Directional = 0, Point };
+    enum class LightType : int { Directional = 0, Point, Spot };
     LightType type = LightType::Directional;
     Color color = Color(1, 1, 1);
     float intensity = 1.0f;
-    float range = 15.0f;  // point lights
+    float range = 15.0f;        // point and spot lights
+    float spotAngle = 45.0f;    // outer cone, degrees
+    float spotInnerAngle = 25.0f;  // inner (full intensity) cone, degrees
+    bool castShadows = true;    // directional lights only
+    float shadowBias = 0.02f;   // depth offset, fraction of the cascade depth
 
     const char* TypeName() const override { return "Light"; }
     ComponentTypeId TypeId() const override { return ComponentTypeId::Light; }
@@ -273,6 +294,8 @@ public:
 class MeshRenderer : public Component {
 public:
     enum class MeshSource : int { Cube = 0, Sphere, Plane, Quad, Cylinder, Cone, Torus, Custom };
+    // Which faces are discarded before rasterization.
+    enum class CullMode : int { Off = 0, Back = 1, Front = 2 };
     MeshSource mesh = MeshSource::Cube;
     std::string meshPath;            // project-relative .obj when mesh == Custom
     Color albedoColor = Color(0.78f, 0.78f, 0.80f);
@@ -280,7 +303,19 @@ public:
     Vec2 tiling{1, 1};
     float specular = 0.5f;
     float shininess = 32.0f;
+    // PBR-ish surface response. metallic: 0 = dielectric, 1 = metal.
+    // roughness < 0 means "derive from shininess" so scenes authored before
+    // PBR keep their Blinn-Phong look; explicit values in [0,1] override it.
+    float metallic = 0.0f;
+    float roughness = -1.0f;
+    std::string normalMapPath;       // project-relative tangent-space normal map
+    float normalStrength = 1.0f;
+    Color emissiveColor{0, 0, 0, 1}; // added in linear space, unaffected by lights
     bool unlit = false;
+    CullMode cullMode = CullMode::Back;
+    bool antialias = true;   // edge coverage antialiasing
+    bool castShadows = true;
+    bool receiveShadows = true;
 
     const char* TypeName() const override { return "MeshRenderer"; }
     ComponentTypeId TypeId() const override { return ComponentTypeId::MeshRenderer; }
@@ -295,7 +330,8 @@ public:
     std::string texturePath;        // project-relative (png/jpg/bmp)
     Color color = Color::White;
     float pixelsPerUnit = 100.0f;
-    int orderInLayer = 0;
+    int sortingLayer = 0;     // coarse group, drawn low to high
+    int orderInLayer = 0;     // fine order inside a sorting layer
     bool flipX = false;
     bool flipY = false;
     std::string normalMapPath;      // optional tangent-space normal map (2D lighting)
@@ -311,6 +347,7 @@ public:
 class TextRenderer : public Component {
 public:
     std::string text = "Text";
+    int sortingLayer = 0;     // coarse group, drawn low to high
     float fontSize = 24.0f;         // pixels of glyph height per world unit
     Color color = Color::White;
     int orderInLayer = 0;
@@ -391,6 +428,11 @@ public:
     ComponentTypeId TypeId() const override { return ComponentTypeId::Script; }
 
     Component* instance = nullptr;  // engine-internal: the live script instance
+
+    // Calls OnDestroy (when the instance is running) and frees it. Safe to call
+    // more than once; the engine calls this whenever a Script component or its
+    // GameObject leaves the scene so instances never leak.
+    void DestroyInstance();
 };
 
 // ---------------------------------------------------------------------------

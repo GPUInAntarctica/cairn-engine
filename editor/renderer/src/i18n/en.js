@@ -2,6 +2,7 @@
 'use strict';
 
 export const dict = {
+    'common.product': 'Cairn Engine',
     // menus
     'menu.file': 'File',
     'menu.file.newProject': 'New Project...',
@@ -92,7 +93,31 @@ export const dict = {
     'insp.background': 'Background',
     'insp.fog': 'Fog',
     'insp.fogDensity': 'Fog Density',
+    'insp.exposure': 'Exposure',
+    'insp.tonemap': 'Tone Mapping',
+    'insp.tonemap.none': 'None',
+    'insp.tonemap.reinhard': 'Reinhard',
+    'insp.tonemap.aces': 'ACES',
+    'insp.tonemap.filmic': 'Filmic',
+    'insp.postFxaa': 'FXAA',
+    'insp.postContrast': 'Contrast',
+    'insp.postSaturation': 'Saturation',
+    'insp.postBloomStrength': 'Bloom Strength',
+    'insp.postBloomThreshold': 'Bloom Threshold',
+    'insp.postVignette': 'Vignette',
+    'insp.postVignetteRadius': 'Vignette Radius',
+    'insp.postVignetteSoftness': 'Vignette Softness',
+    'insp.textureMemory': 'Texture Memory (MB)',
     'insp.fogColor': 'Fog Color',
+    'insp.position': 'Position',
+    'insp.rotation': 'Rotation',
+    'insp.scale': 'Scale',
+    'insp.enabled': 'Enabled',
+    'insp.class': 'Class',
+    'insp.active': 'Active',
+    'insp.name': 'Entity Name',
+    'insp.removeComponent': 'Remove Component',
+    'insp.alpha': 'Alpha',
 
     // dialogs
     'dialog.newProject.title': 'New Project',
@@ -107,6 +132,7 @@ export const dict = {
     'dialog.about.title': 'About Cairn Engine',
     'dialog.about.tagline': 'A compact C++ game engine with a focused editor for 2D and 3D projects.',
     'dialog.about.license': 'Released under the MIT License.',
+    'dialog.about.stack': 'C++ · Electron · Software renderer',
     'dialog.settings.title': 'Preferences',
     'dialog.settings.language': 'Language',
     'dialog.settings.compiler': 'C++ Compiler',
@@ -118,6 +144,9 @@ export const dict = {
     'dialog.newScript.title': 'New C++ Script',
     'dialog.newScript.name': 'Class Name',
     'dialog.newScript.hint': 'A .cpp file with a matching class skeleton will be created in Assets/Scripts.',
+    'dialog.newScript.placeholder': 'PlayerController',
+    'dialog.newScript.invalid': 'Class name must start with a letter and contain only letters, digits and underscores.',
+    'dialog.newProject.defaultName': 'MyGame',
     'dialog.export.title': 'Export Player',
     'dialog.export.folder': 'Export To',
     'dialog.export.hint': 'Packages the project with the runtime player. Requires Electron to run.',
@@ -131,6 +160,17 @@ export const dict = {
     'dialog.overwriteScene': 'The current scene has unsaved changes. Save before opening another scene?',
     'dialog.save': 'Save',
     'dialog.dontSave': "Don't Save",
+
+    // project browser
+    'projectBrowser.select': 'Select a project or create a new one.',
+    'projectBrowser.first': 'Create your first project to get started.',
+    'projectBrowser.hint': 'Recent projects are listed on the left.',
+    'projectBrowser.none': 'No recent projects.',
+
+    // content browser defaults
+    'content.newFolder': 'New Folder',
+    'content.newScene': 'Scene',
+    'content.imageFilter': 'Images',
 
     // status / messages
     'status.ready': 'Ready',
@@ -151,6 +191,14 @@ export const dict = {
     'status.entityCreated': '{name} created',
     'status.scriptCreated': 'Script {name} created',
     'status.playerFocus': 'Click the viewport to control the game. Esc releases the mouse.',
+    'status.fps': 'FPS',
+    'status.draw': 'Draw',
+    'status.tris': 'Tris',
+    'status.failed': 'Failed',
+
+    // viewport overlay
+    'viewport.draw': 'draw',
+    'viewport.tris': 'tri',
 
     // context menus
     'ctx.create': 'Create',

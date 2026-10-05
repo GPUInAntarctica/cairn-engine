@@ -1,8 +1,16 @@
 #include "scene_internal.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace Cairn {
+namespace {
+// Exact comparison: recomputing the same TRS must produce identical bits, so a
+// plain memcmp is both correct and the cheapest way to detect "did it change".
+bool Mat4Equals(const Mat4& a, const Mat4& b) {
+    return std::memcmp(a.m, b.m, sizeof(a.m)) == 0;
+}
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // Component base helpers declared in scripting.h.
@@ -28,7 +36,13 @@ void Transform::SetParent(GameObject* parent) {
     }
     m_parent = parent;
     if (m_parent) m_parent->transform().m_children.push_back(m_go);
+    MarkWorldDirty();
+}
+
+void Transform::MarkWorldDirty() {
     m_worldDirty = true;
+    m_worldValid = false;
+    for (GameObject* child : m_children) child->transform().MarkWorldDirty();
 }
 
 Mat4 Transform::LocalMatrix() const {
@@ -36,11 +50,24 @@ Mat4 Transform::LocalMatrix() const {
 }
 
 Mat4 Transform::WorldMatrix() {
-    if (m_parent && m_parent->transform().m_worldDirty) m_parent->transform().WorldMatrix();
-    if (m_worldDirty) {
-        Mat4 local = LocalMatrix();
+    // A parent's world matrix changing invalidates this subtree.
+    if (m_parent) {
+        m_parent->transform().WorldMatrix();
+        if (m_parent->transform().m_worldVersion != m_seenParentVersion) {
+            m_worldDirty = true;
+            m_worldValid = false;
+        }
+    }
+    Mat4 local = LocalMatrix();
+    // Recompute when explicitly invalidated, when the parent moved, or when the
+    // local fields were written directly (raw field assignment is allowed).
+    if (m_worldDirty || !m_worldValid || !Mat4Equals(m_localCache, local)) {
         m_world = m_parent ? m_parent->transform().WorldMatrix() * local : local;
+        m_localCache = local;
         m_worldDirty = false;
+        m_worldValid = true;
+        ++m_worldVersion;
+        m_seenParentVersion = m_parent ? m_parent->transform().m_worldVersion : 0;
     }
     return m_world;
 }
@@ -122,11 +149,19 @@ bool GameObject::RemoveComponentByName(const std::string& typeName) {
     if (typeName == "Transform") return false;
     for (auto it = m_components.begin(); it != m_components.end(); ++it) {
         if (typeName == (*it)->TypeName()) {
+            if (typeName == "Script") static_cast<ScriptComponent*>(it->get())->DestroyInstance();
             m_components.erase(it);
             return true;
         }
     }
     return false;
+}
+
+void ScriptComponent::DestroyInstance() {
+    if (!instance) return;
+    instance->OnDestroy();
+    delete instance;
+    instance = nullptr;
 }
 
 std::vector<Component*> GameObject::GetComponentList() const {
@@ -158,6 +193,11 @@ GameObject* Scene::CreateEntity(const std::string& name, GameObject* parent) {
 
 void Scene::DestroyEntityNow(GameObject* go) {
     if (!go) return;
+    // Release gameplay script instances before the components go away so
+    // OnDestroy runs and nothing leaks.
+    for (Component* c : go->GetComponentList()) {
+        if (c->TypeId() == ComponentTypeId::Script) static_cast<ScriptComponent*>(c)->DestroyInstance();
+    }
     // Detach from parent.
     if (go->transform().m_parent) {
         auto& siblings = go->transform().m_parent->transform().m_children;
@@ -271,6 +311,21 @@ Json Scene::SerializeEntity(const GameObject* go) const {
     return e;
 }
 
+Json Scene::SerializeSubtree(const GameObject* go) const {
+    Json e = SerializeEntity(go);
+    const auto& children = go->transform().m_children;
+    if (children.empty()) return e;
+    Json arr = Json::MakeArray();
+    for (const GameObject* child : children) arr.push(SerializeSubtree(child));
+    e.set("children", std::move(arr));
+    return e;
+}
+
+GameObject* Scene::InstantiateCopy(const GameObject* go, GameObject* parent) {
+    if (!go) return nullptr;
+    return DeserializeEntitySubtree(SerializeSubtree(go), parent, nullptr);
+}
+
 GameObject* Scene::DeserializeEntitySubtree(const Json& entityJson, GameObject* parent, std::string* error) {
     if (!entityJson.isObject()) {
         if (error) *error = "entity is not an object";
@@ -333,6 +388,20 @@ Json Scene::Serialize() const {
     settings.set("fogColor", ColorToJson(fogColor));
     settings.set("fogDensity", fogDensity);
     settings.set("background", ColorToJson(background));
+    settings.set("tonemap", (double)tonemap);
+    settings.set("exposure", (double)exposure);
+    settings.set("shadows", (double)shadows);
+    settings.set("shadowResolution", (double)shadowResolution);
+    settings.set("shadowDistance", (double)shadowDistance);
+    settings.set("postVignette", (double)postVignette);
+    settings.set("postVignetteRadius", (double)postVignetteRadius);
+    settings.set("postVignetteSoftness", (double)postVignetteSoftness);
+    settings.set("postContrast", (double)postContrast);
+    settings.set("postSaturation", (double)postSaturation);
+    settings.set("postBloomStrength", (double)postBloomStrength);
+    settings.set("postBloomThreshold", (double)postBloomThreshold);
+    settings.set("postFxaa", postFxaa);
+    settings.set("textureMemoryMB", (double)textureMemoryMB);
     doc.set("settings", std::move(settings));
 
     Json entities = Json::MakeArray();
@@ -352,6 +421,20 @@ std::shared_ptr<Scene> Scene::Deserialize(const Json& doc, std::string* error) {
         scene->fogColor = JsonToColor(settings["fogColor"], Color(0.62f, 0.66f, 0.72f));
         scene->fogDensity = settings["fogDensity"].asFloat(0.02f);
         scene->background = JsonToColor(settings["background"], Color(0.09f, 0.09f, 0.12f));
+        scene->tonemap = (int)settings["tonemap"].asNumber(2.0);
+        scene->exposure = settings["exposure"].asFloat(1.0f);
+        scene->shadows = (int)settings["shadows"].asNumber(2.0);
+        scene->shadowResolution = (int)settings["shadowResolution"].asNumber(1024.0);
+        scene->shadowDistance = settings["shadowDistance"].asFloat(60.0f);
+        scene->postVignette = settings["postVignette"].asFloat(0.0f);
+        scene->postVignetteRadius = settings["postVignetteRadius"].asFloat(0.75f);
+        scene->postVignetteSoftness = settings["postVignetteSoftness"].asFloat(0.5f);
+        scene->postContrast = settings["postContrast"].asFloat(1.0f);
+        scene->postSaturation = settings["postSaturation"].asFloat(1.0f);
+        scene->postBloomStrength = settings["postBloomStrength"].asFloat(0.0f);
+        scene->postBloomThreshold = settings["postBloomThreshold"].asFloat(0.85f);
+        scene->postFxaa = settings["postFxaa"].asBool(false);
+        scene->textureMemoryMB = (int)settings["textureMemoryMB"].asNumber(256.0);
     }
     const Json& entities = doc["entities"];
     if (entities.isArray()) {
@@ -467,10 +550,8 @@ GameObject* Gameplay::CreateEmpty(const std::string& name) {
 GameObject* Gameplay::Instantiate(GameObject& original) {
     Scene* s = ActiveScene();
     if (!s) return nullptr;
-    Json subtree = s->SerializeEntity(&original);
-    std::string err;
-    GameObject* copy = s->DeserializeEntitySubtree(subtree, original.GetParent(), &err);
-    if (copy) copy->name = original.name;  // drop the id field side effects
+    GameObject* copy = s->InstantiateCopy(&original, original.GetParent());
+    if (copy) copy->name = original.name;  // identical copy, editor may rename
     return copy;
 }
 void Gameplay::Destroy(GameObject* go) {
@@ -480,6 +561,7 @@ void Gameplay::Destroy(GameObject* go) {
 void Gameplay::DestroyComponent(Component* c) {
     if (!c || !c->m_go) return;
     GameObject* go = c->m_go;
+    if (c->TypeId() == ComponentTypeId::Script) static_cast<ScriptComponent*>(c)->DestroyInstance();
     for (auto it = go->m_components.begin(); it != go->m_components.end(); ++it) {
         if (it->get() == c) {
             go->m_components.erase(it);

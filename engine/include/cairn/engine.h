@@ -113,6 +113,9 @@ public:
     // --- Scripting.
     // Loads/reloads the compiled script library. Returns false with a message.
     bool LoadScriptLibrary(const std::string& absolutePath, std::string* error);
+    // Fills in inspector fields that the scene does not serialize yet with the
+    // defaults declared by the loaded script classes.
+    void ApplyScriptPropDefaults();
     std::vector<ScriptClassInfo> ScriptClasses() const;
     bool HasScriptClass(const std::string& name) const;
 
@@ -141,6 +144,10 @@ public:
     std::vector<LogEntry> PollLogs(uint64_t afterId) { return Log::Poll(afterId); }
     std::vector<AudioEvent>& audioEvents() { return audioEvents_; }
     RenderStats lastStats() const { return lastStats_; }
+
+    // When off, log entries are only buffered (host tools read them via PollLogs).
+    void SetLogEcho(bool on) { Log::SetEchoStdout(on); }
+    bool logEcho() const { return Log::EchoStdout(); }
 
     // Editor selection outline in the viewport.
     void SetHighlightEntity(EntityId id) { highlightEntity_ = id; }

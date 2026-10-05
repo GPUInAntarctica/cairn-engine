@@ -9,6 +9,7 @@ namespace Cairn {
 class Scene;
 
 void PhysicsStep(Scene& scene, float dt);
-void PhysicsReset();
+// Drops cached trigger/contact pairs for a scene (called on scene swap/reset).
+void PhysicsReset(Scene* scene = nullptr);
 
 }  // namespace Cairn

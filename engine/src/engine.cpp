@@ -185,7 +185,7 @@ void Engine::NewScene(const std::string& name) {
     StopScripts();
     scene_ = std::make_shared<Scene>();
     scene_->name = name;
-    PhysicsReset();
+    PhysicsReset(scene_.get());
 }
 
 bool Engine::LoadSceneFile(const std::string& path, std::string* error) {
@@ -193,8 +193,31 @@ bool Engine::LoadSceneFile(const std::string& path, std::string* error) {
     if (!loaded) return false;
     StopScripts();
     scene_ = loaded;
-    PhysicsReset();
+    PhysicsReset(scene_.get());
+    ApplyScriptPropDefaults();
     return true;
+}
+
+// Fills in inspector fields that the loaded script classes declare but the
+// serialized data predates, so a field added after authoring reads back with its
+// declared default instead of 0.
+void Engine::ApplyScriptPropDefaults() {
+    if (scriptClasses_.empty()) return;
+    for (const auto& go : scene_->objects) {
+        for (Component* c : go->GetComponentList()) {
+            if (c->TypeId() != ComponentTypeId::Script) continue;
+            auto* sc = static_cast<ScriptComponent*>(c);
+            if (sc->scriptClass.empty()) continue;
+            for (const ScriptClassInfo& info : scriptClasses_) {
+                if (info.name != sc->scriptClass) continue;
+                if (!sc->properties.isObject()) sc->properties = Json::MakeObject();
+                for (const ScriptClassInfo::Prop& p : info.props) {
+                    if (!sc->properties.has(p.name)) sc->properties.set(p.name, p.defaultValue);
+                }
+                break;
+            }
+        }
+    }
 }
 
 bool Engine::SaveSceneFile(const std::string& path, std::string* error) {
@@ -210,7 +233,8 @@ bool Engine::RestoreSceneJson(const std::string& json, std::string* error) {
     if (!restored) return false;
     StopScripts();
     scene_ = restored;
-    PhysicsReset();
+    PhysicsReset(scene_.get());
+    ApplyScriptPropDefaults();
     return true;
 }
 
@@ -246,8 +270,7 @@ void Engine::DestroyEntity(EntityId id) {
 EntityId Engine::DuplicateEntity(EntityId id) {
     GameObject* src = FindEntity(id);
     if (!src) return kInvalidEntity;
-    Json subtree = scene_->SerializeEntity(src);
-    GameObject* copy = scene_->DeserializeEntitySubtree(subtree, src->GetParent());
+    GameObject* copy = scene_->InstantiateCopy(src, src->GetParent());
     if (copy) copy->name = src->name;  // identical copy, editor may rename
     return copy ? copy->m_id : kInvalidEntity;
 }
@@ -275,17 +298,17 @@ bool Engine::SetComponentProp(EntityId id, const std::string& typeName, const st
         Transform& t = go->transform();
         if (prop == "position" && value.isArray() && value.size() >= 3) {
             t.position = {value[0].asFloat(), value[1].asFloat(), value[2].asFloat()};
-            t.m_worldDirty = true;
+            t.MarkWorldDirty();
             return true;
         }
         if (prop == "rotation" && value.isArray() && value.size() >= 3) {
             t.SetEulerDegrees({value[0].asFloat(), value[1].asFloat(), value[2].asFloat()});
-            t.m_worldDirty = true;
+            t.MarkWorldDirty();
             return true;
         }
         if (prop == "scale" && value.isArray() && value.size() >= 3) {
             t.scale = {value[0].asFloat(), value[1].asFloat(), value[2].asFloat()};
-            t.m_worldDirty = true;
+            t.MarkWorldDirty();
             return true;
         }
         return false;
@@ -355,7 +378,9 @@ bool Engine::GetComponentProp(EntityId id, const std::string& typeName, const st
 }
 
 void Engine::ReloadAssets() {
-    EngineTextureLibrary().Clear();
+    // Only drop textures whose file actually changed on disk; a blanket clear
+    // would thrash the LRU cache for unchanged assets.
+    EngineTextureLibrary().ReloadChanged();
     EngineMeshLibrary().ClearObj();
 }
 
@@ -392,6 +417,10 @@ bool Engine::LoadScriptLibrary(const std::string& absolutePath, std::string* err
         scriptClasses_.push_back(std::move(info));
     }
     Log::Info("loaded %d script class(es) from %s", (int)scriptClasses_.size(), absolutePath.c_str());
+    ApplyScriptPropDefaults();
+    // A reload during play used to leave the game with dead scripts: re-enter
+    // play mode's startup so the new classes are instantiated immediately.
+    if (playing_) StartScripts();
     return true;
 }
 
@@ -440,11 +469,7 @@ void Engine::StopScripts() {
         for (Component* c : go->GetComponentList()) {
             if (c->TypeId() != ComponentTypeId::Script) continue;
             auto* sc = static_cast<ScriptComponent*>(c);
-            if (sc->instance) {
-                sc->instance->OnDestroy();
-                delete sc->instance;
-                sc->instance = nullptr;
-            }
+            sc->DestroyInstance();
         }
     }
     gameScriptsStarted_ = false;
@@ -458,7 +483,7 @@ bool Engine::Play() {
     accumulator_ = 0;
     time_ = 0;
     frameCount_ = 0;
-    PhysicsReset();
+    PhysicsReset(scene_.get());
     audioEvents_.clear();
     StartScripts();
     Log::Info("entered play mode");
@@ -489,7 +514,7 @@ void Engine::Stop() {
     playing_ = false;
     paused_ = false;
     time_ = 0;
-    PhysicsReset();
+    PhysicsReset(scene_.get());
     audioEvents_.clear();
     Log::Info("stopped play mode");
 }
@@ -563,10 +588,13 @@ bool Engine::BuildCameraView(CameraView* out) const {
         out->nearPlane = viewCam_.nearPlane;
         out->farPlane = viewCam_.farPlane;
         out->orthoSize = viewCam_.orthoSize;
-        out->clearColor = Color::FromHex(0x14141a);
+        // The viewport camera follows the scene background so the setting is
+        // actually visible outside play mode (it used to be ignored). The sky
+        // gradient keeps the background's hue: darker overhead, hazy horizon.
+        out->clearColor = scene_->background;
         out->skyEnabled = true;
-        out->skyTop = Color::FromHex(0x232833);
-        out->skyBottom = Color::FromHex(0x4a5261);
+        out->skyTop = scene_->background * 0.85f;
+        out->skyBottom = Color::Lerp(scene_->background, Color(1, 1, 1, 1), 0.55f);
     }
     out->projection = out->orthographic
                           ? Mat4::Ortho(-out->orthoSize * aspect, out->orthoSize * aspect,
@@ -576,6 +604,21 @@ bool Engine::BuildCameraView(CameraView* out) const {
     out->fogColor = scene_->fogColor;
     out->fogDensity = scene_->fogDensity;
     out->ambient = scene_->ambient;
+    out->tonemap = (Tonemap)std::clamp(scene_->tonemap, 0, 3);
+    out->exposure = scene_->exposure;
+    out->shadowCascades = std::clamp(scene_->shadows, 0, 4);
+    out->shadowResolution = std::clamp(scene_->shadowResolution, 256, 4096);
+    out->shadowDistance = std::clamp(scene_->shadowDistance, 5.0f, 500.0f);
+    // Post-processing, clamped to the documented effect ranges.
+    out->postVignette = std::clamp(scene_->postVignette, 0.0f, 1.0f);
+    out->postVignetteRadius = std::clamp(scene_->postVignetteRadius, 0.0f, 1.0f);
+    out->postVignetteSoftness = std::clamp(scene_->postVignetteSoftness, 0.0f, 1.0f);
+    out->postContrast = std::clamp(scene_->postContrast, 0.0f, 2.0f);
+    out->postSaturation = std::clamp(scene_->postSaturation, 0.0f, 2.0f);
+    out->postBloomStrength = std::clamp(scene_->postBloomStrength, 0.0f, 2.0f);
+    out->postBloomThreshold = std::clamp(scene_->postBloomThreshold, 0.0f, 1.0f);
+    out->postFxaa = scene_->postFxaa;
+    out->textureMemoryMB = std::clamp(scene_->textureMemoryMB, 8, 4096);
     return cam != nullptr;
 }
 
@@ -607,7 +650,7 @@ RenderStats Engine::RenderEditorFrame() {
         if (GameObject* go = FindEntity(highlightEntity_)) {
             AABB box;
             bool has = false;
-            if (auto* mr = go->GetComponent<MeshRenderer>()) {
+            if (auto* mr = go->GetComponent<MeshRenderer>(); mr && mr->enabled) {
                 std::shared_ptr<Mesh> mesh;
                 if (mr->mesh == MeshRenderer::MeshSource::Custom && !mr->meshPath.empty())
                     mesh = EngineMeshLibrary().GetObj(EngineResolvePath(mr->meshPath));
@@ -664,7 +707,7 @@ Json Engine::DebugCollectStats() {
         if (!go->ActiveInHierarchy()) continue;
         active++;
         auto* mr = go->GetComponent<MeshRenderer>();
-        if (!mr) continue;
+        if (!mr || !mr->enabled) continue;
         meshRenderers++;
         std::shared_ptr<Mesh> m = (mr->mesh == MeshRenderer::MeshSource::Custom && !mr->meshPath.empty())
                                       ? EngineMeshLibrary().GetObj(EngineResolvePath(mr->meshPath))
@@ -702,7 +745,7 @@ EntityId Engine::Pick(int pixelX, int pixelY) {    CameraView cam;
         if (!go->ActiveInHierarchy()) continue;
         AABB box;
         bool has = false;
-        if (auto* mr = go->GetComponent<MeshRenderer>()) {
+        if (auto* mr = go->GetComponent<MeshRenderer>(); mr && mr->enabled) {
             std::shared_ptr<Mesh> mesh;
             if (mr->mesh == MeshRenderer::MeshSource::Custom && !mr->meshPath.empty())
                 mesh = meshes.GetObj(EngineResolvePath(mr->meshPath));

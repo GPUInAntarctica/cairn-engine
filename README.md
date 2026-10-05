@@ -9,38 +9,57 @@
 [![Engine](https://img.shields.io/badge/engine-C%2B%2B20-00599C.svg)](docs/architecture.md)
 [![Editor](https://img.shields.io/badge/editor-Electron-47848F.svg)](docs/editor-manual.md)
 
-简体中文 · [English](#english)
+[English](README.md) · [简体中文](README.zh-CN.md)
 
 </div>
 
-Cairn 是一个精巧的游戏引擎：C++ 运行时负责渲染、物理与玩法脚本，Electron 编辑器负责场景搭建与内容创作。它没有庞大的依赖树——引擎核心零第三方库（仅 vendored 的 stb 与 Node 头文件），编辑器只依赖 Electron、Monaco 与 esbuild。
+Cairn is a compact game engine: a C++ runtime for rendering, physics and gameplay scripts, driven by an Electron editor for scene building and content creation. It keeps the dependency tree deliberately small — the engine core has **no third-party libraries** beyond two vendored stb headers, and the editor depends only on Electron, Monaco and esbuild.
 
-## 特性
+Rendering is a **software rasterizer**: no GPU, no drivers, no system graphics API. It runs anywhere.
 
-- **2D 与 3D 场景** — 统一的 GameObject/Component 模型，层级、预制体式复制、序列化为可读的 `.cscene` JSON
-- **软件渲染器** — 多线程光栅化（Blinn-Phong、天空渐变、雾、2D 精灵、位图字体），零 GPU 依赖，任何机器可跑
-- **C++ 脚本** — 借鉴 Unity 的组件模型：`OnStart` / `OnUpdate` / `FixedUpdate` / 触发器回调，编辑器内一键编译为共享库并热重载
-- **编辑器** — Unreal 风格深色界面：层级、检视器（反射驱动）、视口（选择/移动/旋转/缩放、Play/Pause/Step）、控制台、内容浏览器
-- **代码编辑器** — Monaco，C++ 高亮、引擎 API 自动补全、编译诊断直接标注到行
-- **图像编辑器** — 图层、笔刷/形状/填充、HSV 取色器、法线贴图生成（2D 光照可用）
-- **中英双语** — 编辑器界面完整中文化，语言即时切换
+## Features
 
-## 快速开始
+- **2D and 3D scenes** — a unified GameObject/Component model with hierarchy, duplication and readable `.cscene` JSON serialization
+- **Software renderer** — multithreaded rasterization with GGX specular, cascaded shadow maps, sky gradient, fog, 2D sprites and a bitmap font
+- **Post-processing** — bloom → color grading → vignette → FXAA, each independently switchable with a strict neutral passthrough
+- **C++ scripting** — Unity-style components: `OnStart` / `OnUpdate` / `FixedUpdate` / trigger and collision callbacks, compiled to a shared library from the editor and hot-reloaded
+- **The editor** — a dark, dense, keyboard-first workspace: hierarchy, reflection-driven inspector, viewport with select/move/rotate/scale and Play/Pause/Step, console, content browser
+- **Code editor** — Monaco with C++ syntax highlighting, engine API completion and build diagnostics mapped onto lines
+- **Image editor** — layers, brush/shape/fill tools, HSV picker and normal-map generation, shared with the CLI as a headless raster core
+- **Command line** — `cairn` exposes every engine capability as structured JSON (scene/entity/component editing, headless play mode, script builds, screenshots, image editing) with a stdin batch mode, designed for AI agents to drive directly — **no MCP server, no daemon**
+- **Bilingual UI** — full Simplified Chinese and English with instant switching
 
-要求：Node.js ≥ 20、CMake ≥ 3.16、C++20 编译器（g++ ≥ 11 / clang++ / MSVC）、Electron 可自动下载。
+## Quick start
+
+Requires Node.js ≥ 20, CMake ≥ 3.16 and a C++20 compiler (g++ ≥ 11 / clang++ / MSVC).
 
 ```bash
 git clone https://github.com/cairn-engine/cairn-engine.git
 cd cairn-engine
 npm install          # Electron / esbuild / Monaco / node-addon-api
-npm run build        # CMake 引擎库 + N-API 插件 + 渲染端打包
-npm test             # 引擎单测 + 端到端冒烟（含脚本编译与热重载）
-npm start            # 启动编辑器
+npm run build        # CMake engine library + N-API addon + renderer bundle
+npm test             # smoke test + CLI suite
+npm start            # launch the editor
 ```
 
-在启动画面新建项目（3D 沙盒或 2D 横版模板），按 **Ctrl+P** 进入 Play 模式。
+Create a project from the startup screen (3D sandbox or 2D platformer template) and press **Ctrl+P** to play.
 
-## 脚本示例
+## Command line
+
+```bash
+node cli/index.js engine.schema                  # self-describing command + argument schema
+node cli/index.js --project ./game scene.tree    # read a scene
+node cli/index.js --project ./game script.build  # compile and load gameplay scripts
+node cli/index.js --project ./game exec.run --file steps.jsonl   # batch execution
+```
+
+Every command prints exactly one JSON document on stdout
+(`{"ok":true,"command":...,"result":...}`), errors go to stderr as
+`{"ok":false,"error":{"code","message","details"}}` with a non-zero exit code,
+and `--format text` switches to a human-readable rendering. See
+[docs/cli.md](docs/cli.md).
+
+## Scripting example
 
 ```cpp
 #include <cairn/cairn.h>
@@ -50,7 +69,7 @@ class Rotator : public Component {
 public:
     void OnUpdate(float deltaTime) override {
         Vec3 euler = transform().GetEulerDegrees();
-        euler.y += PropFloat("speed") * deltaTime;   // 检视器可编辑字段
+        euler.y += PropFloat("speed") * deltaTime;   // inspector-editable field
         transform().SetEulerDegrees(euler);
     }
 
@@ -62,67 +81,39 @@ public:
 CAIRN_SCRIPT(Rotator)
 ```
 
-完整 API 见 [docs/scripting-api.md](docs/scripting-api.md)。
+The full scripting surface is in [docs/scripting-api.md](docs/scripting-api.md).
 
-## 文档
+## Documentation
 
-| 文档 | 内容 |
+| Document | Contents |
 | --- | --- |
-| [架构总览](docs/architecture.md) | 模块划分、数据流、热重载原理 |
-| [编辑器手册](docs/editor-manual.md) | 界面、快捷键、工作流 |
-| [脚本 API](docs/scripting-api.md) | C++ 脚本接口完整参考 |
-| [构建指南](docs/building.md) | 各平台构建、故障排查 |
+| [**Technical manual**](docs/technical-manual.md) | **Complete reference**: coordinate system, render pipeline, PBR shading, shadow mapping, post chain, threading, data model, reflection, physics, script host, file formats, build system |
+| [Architecture overview](docs/architecture.md) | Module breakdown, data flow, hot-reload mechanics |
+| [Editor manual](docs/editor-manual.md) | Interface, keyboard navigation, workflows |
+| [CLI reference](docs/cli.md) | `cairn` commands, JSON contract, batch mode |
+| [Scripting API](docs/scripting-api.md) | Complete C++ scripting reference |
+| [Building](docs/building.md) | Per-platform builds and troubleshooting |
 
-## 路线图
+## Project layout
 
-- [ ] GPU 后端（OpenGL）作为软件渲染的替代路径
-- [ ] 3D 模型导入扩展（glTF）
-- [ ] 音频系统（当前为 WAV 事件占位）
-- [ ] 光照贴图与阴影
-
-欢迎通过 [CONTRIBUTING.md](CONTRIBUTING.md) 参与贡献。
-
-## 许可证
-
-[MIT](LICENSE)
-
----
-
-<div align="center">
-
-# English
-
-</div>
-
-**Cairn** is a compact game engine: a C++ runtime for rendering, physics and gameplay scripts, driven by an Electron editor for scene building and content creation. It keeps the dependency tree deliberately small — the engine core has no third-party libraries beyond vendored stb headers and Node's own headers, and the editor relies only on Electron, Monaco and esbuild.
-
-### Features
-
-- **2D and 3D scenes** — a unified GameObject/Component model with hierarchy, duplication and readable `.cscene` JSON serialization
-- **Software renderer** — multithreaded rasterization (Blinn-Phong, sky gradient, fog, 2D sprites, bitmap font) with zero GPU requirements
-- **C++ scripting** — Unity-style components: `OnStart` / `OnUpdate` / `FixedUpdate` / trigger callbacks, compiled to a shared library from the editor and hot-reloaded
-- **The editor** — a dark, dense, Unreal-flavored workspace: hierarchy, reflection-driven inspector, viewport with select/move/rotate/scale and Play/Pause/Step, console, content browser
-- **Code editor** — Monaco with C++ highlighting, engine API completion and build diagnostics mapped onto lines
-- **Image editor** — layers, brush/shape/fill tools, HSV picker, and normal-map generation usable by the 2D lighting path
-- **Bilingual UI** — full Simplified Chinese and English with instant switching
-
-### Quick start
-
-Requires Node.js ≥ 20, CMake ≥ 3.16 and a C++20 compiler (g++ ≥ 11 / clang++ / MSVC).
-
-```bash
-git clone https://github.com/cairn-engine/cairn-engine.git
-cd cairn-engine
-npm install
-npm run build     # engine library + native addon + renderer bundle
-npm test          # engine unit tests + end-to-end smoke (script build & hot reload)
-npm start         # launch the editor
+```
+engine/         C++ runtime — math, json, scene, renderer, physics, script host
+addon/          N-API binding of the Engine facade (shared by editor and CLI)
+editor/main/    Electron main process — window, dialogs, project I/O, script build
+editor/renderer/Editor UI (plain DOM + ES modules, bundled with esbuild)
+runtime/        Exported player — loads a project and runs it without the editor
+cli/            `cairn` command line
+templates/      New-project templates (3D sandbox, 2D platformer)
+test/           smoke test + CLI suite
+docs/           Documentation
 ```
 
-Create a project from the startup screen (3D sandbox or 2D platformer template) and press **Ctrl+P** to play.
+## Status
 
-### Status
+Cairn is at version **0.1.0** — an early but usable foundation. See the
+[CHANGELOG](CHANGELOG.md) for the milestone history, and
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
-Cairn is at version **0.1.0** — an early, usable foundation. See the [roadmap](#路线图) and [CHANGELOG](CHANGELOG.md). Feedback and pull requests are welcome — please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
+## License
 
-Licensed under the [MIT License](LICENSE).
+[MIT](LICENSE)

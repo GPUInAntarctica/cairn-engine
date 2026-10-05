@@ -160,6 +160,8 @@ public:
             InstanceMethod("debugCollect", &EngineWrap::DebugCollect),
             InstanceMethod("pollLogs", &EngineWrap::PollLogs),
             InstanceMethod("pollAudio", &EngineWrap::PollAudio),
+            InstanceMethod("setLogEcho", &EngineWrap::SetLogEcho),
+            InstanceMethod("getLogEcho", &EngineWrap::GetLogEcho),
         });
         constructor = Napi::Persistent(func);
         exports.Set("Engine", func);
@@ -185,23 +187,24 @@ private:
         // (~2.7 MB at 960x540; a memcpy costs well under a millisecond).
         return Napi::Buffer<uint8_t>::Copy(info.Env(), t.color.data(), t.color.size());
     }
-    Napi::Value RenderEditorFrame(const Napi::CallbackInfo& info) {
-        RenderStats s = engine_->RenderEditorFrame();
-        Napi::Object o = Napi::Object::New(info.Env());
+    static Napi::Object StatsToObject(Napi::Env env, const RenderStats& s) {
+        Napi::Object o = Napi::Object::New(env);
         o.Set("drawCalls", s.drawCalls);
         o.Set("triangles", s.triangles);
         o.Set("meshesSeen", s.meshesSeen);
         o.Set("clipRejected", s.clipRejected);
+        o.Set("frustumCulled", s.frustumCulled);
+        o.Set("drawCalls2D", s.drawCalls2D);
+        o.Set("lightCount", s.lightCount);
+        o.Set("shadowedPixels", s.shadowedPixels);
+        o.Set("postPasses", s.postPasses);
         return o;
     }
+    Napi::Value RenderEditorFrame(const Napi::CallbackInfo& info) {
+        return StatsToObject(info.Env(), engine_->RenderEditorFrame());
+    }
     Napi::Value RenderGameFrame(const Napi::CallbackInfo& info) {
-        RenderStats s = engine_->RenderGameFrame();
-        Napi::Object o = Napi::Object::New(info.Env());
-        o.Set("drawCalls", s.drawCalls);
-        o.Set("triangles", s.triangles);
-        o.Set("meshesSeen", s.meshesSeen);
-        o.Set("clipRejected", s.clipRejected);
-        return o;
+        return StatsToObject(info.Env(), engine_->RenderGameFrame());
     }
     Napi::Value SaveFramePNG(const Napi::CallbackInfo& info) {
         bool ok = engine_->SaveFramePNG(GetString(info, 0));
@@ -442,6 +445,20 @@ private:
         else if (name == "fogEnabled") s.fogEnabled = v.ToBoolean();
         else if (name == "fogColor" && v.IsArray()) s.fogColor = readColor(v);
         else if (name == "fogDensity") s.fogDensity = (float)v.ToNumber().DoubleValue();
+        else if (name == "tonemap") s.tonemap = (int)v.ToNumber().DoubleValue();
+        else if (name == "exposure") s.exposure = (float)v.ToNumber().DoubleValue();
+        else if (name == "shadows") s.shadows = (int)v.ToNumber().DoubleValue();
+        else if (name == "shadowResolution") s.shadowResolution = (int)v.ToNumber().DoubleValue();
+        else if (name == "shadowDistance") s.shadowDistance = (float)v.ToNumber().DoubleValue();
+        else if (name == "postVignette") s.postVignette = (float)v.ToNumber().DoubleValue();
+        else if (name == "postVignetteRadius") s.postVignetteRadius = (float)v.ToNumber().DoubleValue();
+        else if (name == "postVignetteSoftness") s.postVignetteSoftness = (float)v.ToNumber().DoubleValue();
+        else if (name == "postContrast") s.postContrast = (float)v.ToNumber().DoubleValue();
+        else if (name == "postSaturation") s.postSaturation = (float)v.ToNumber().DoubleValue();
+        else if (name == "postBloomStrength") s.postBloomStrength = (float)v.ToNumber().DoubleValue();
+        else if (name == "postBloomThreshold") s.postBloomThreshold = (float)v.ToNumber().DoubleValue();
+        else if (name == "postFxaa") s.postFxaa = v.ToBoolean();
+        else if (name == "textureMemoryMB") s.textureMemoryMB = (int)v.ToNumber().DoubleValue();
         else if (name == "name") s.name = v.ToString().Utf8Value();
         else return Napi::Boolean::New(env, false);
         return Napi::Boolean::New(env, true);
@@ -464,6 +481,20 @@ private:
         o.Set("fogEnabled", s.fogEnabled);
         o.Set("fogColor", color(s.fogColor));
         o.Set("fogDensity", s.fogDensity);
+        o.Set("tonemap", s.tonemap);
+        o.Set("exposure", s.exposure);
+        o.Set("shadows", s.shadows);
+        o.Set("shadowResolution", s.shadowResolution);
+        o.Set("shadowDistance", s.shadowDistance);
+        o.Set("postVignette", s.postVignette);
+        o.Set("postVignetteRadius", s.postVignetteRadius);
+        o.Set("postVignetteSoftness", s.postVignetteSoftness);
+        o.Set("postContrast", s.postContrast);
+        o.Set("postSaturation", s.postSaturation);
+        o.Set("postBloomStrength", s.postBloomStrength);
+        o.Set("postBloomThreshold", s.postBloomThreshold);
+        o.Set("postFxaa", s.postFxaa);
+        o.Set("textureMemoryMB", s.textureMemoryMB);
         return o;
     }
 
@@ -595,6 +626,13 @@ private:
         }
         engine_->audioEvents().clear();
         return arr;
+    }
+
+    void SetLogEcho(const Napi::CallbackInfo& info) {
+        engine_->SetLogEcho(GetBool(info, 0, true));
+    }
+    Napi::Value GetLogEcho(const Napi::CallbackInfo& info) {
+        return Napi::Boolean::New(info.Env(), engine_->logEcho());
     }
 
     std::unique_ptr<Engine> engine_;

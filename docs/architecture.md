@@ -1,6 +1,8 @@
 # 架构 / Architecture
 
-Cairn 由三个主要部分组成：**C++ 引擎运行时**、**N-API 插件**和 **Electron 编辑器**。渲染采用软件光栅化，因此整个引擎不依赖 GPU 或任何系统图形库。
+渲染管线要点：软件光栅化按**水平条带**并行（每个线程独占一段行，帧缓冲与深度缓冲因此无数据竞争），每帧从 view-projection 提取**视锥**做包围盒剔除，网格**包围盒缓存**，纹理带 **mipmap 链 + 三线性**过滤。
+
+Cairn 由四个主要部分组成：**C++ 引擎运行时**、**N-API 插件**、**Electron 编辑器**和 **`cairn` 命令行**（编辑器与 CLI 共用同一个 N-API 门面；CLI 不是 MCP）。渲染采用软件光栅化，因此整个引擎不依赖 GPU 或任何系统图形库。
 
 ```
 ┌────────────────────────────────────────────────────────────┐
@@ -40,6 +42,8 @@ Cairn 由三个主要部分组成：**C++ 引擎运行时**、**N-API 插件**�
 | `addon/cairn_addon.cc` | N-API 绑定，暴露引擎门面并共享帧缓冲 |
 | `editor/main/` | Electron 主进程：窗口、原生对话框、项目系统、脚本编译管线、Player 导出、偏好 |
 | `editor/renderer/` | 编辑器 UI（esbuild 打包为 CJS 以使用 Node 集成） |
+| `editor/main/imaging.js` | 与 DOM 无关的栅格核心：分层文档、合成、笔刷/形状/填充、Sobel 法线贴图、PNG 编解码、BMP 解码（图像编辑器与 CLI 共用） |
+| `cli/` | `cairn` 命令行：命令注册表 + 参数 schema、JSON 输出契约、会话状态、批量模式（见 [cli.md](cli.md)） |
 | `runtime/` | 导出的 Player：无编辑器 UI 的 Electron 窗口，加载项目并运行首场景 |
 
 ## 帧循环

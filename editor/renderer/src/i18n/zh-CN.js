@@ -2,6 +2,7 @@
 'use strict';
 
 export const dict = {
+    'common.product': 'Cairn Engine',
     // menus
     'menu.file': '文件',
     'menu.file.newProject': '新建项目...',
@@ -92,7 +93,31 @@ export const dict = {
     'insp.background': '背景色',
     'insp.fog': '雾',
     'insp.fogDensity': '雾浓度',
+    'insp.exposure': '曝光',
+    'insp.tonemap': '色调映射',
+    'insp.tonemap.none': '无',
+    'insp.tonemap.reinhard': 'Reinhard',
+    'insp.tonemap.aces': 'ACES',
+    'insp.tonemap.filmic': 'Filmic',
+    'insp.postFxaa': 'FXAA 抗锯齿',
+    'insp.postContrast': '对比度',
+    'insp.postSaturation': '饱和度',
+    'insp.postBloomStrength': '泛光强度',
+    'insp.postBloomThreshold': '泛光阈值',
+    'insp.postVignette': '暗角强度',
+    'insp.postVignetteRadius': '暗角半径',
+    'insp.postVignetteSoftness': '暗角柔和度',
+    'insp.textureMemory': '纹理内存 (MB)',
     'insp.fogColor': '雾颜色',
+    'insp.position': '位置',
+    'insp.rotation': '旋转',
+    'insp.scale': '缩放',
+    'insp.enabled': '启用',
+    'insp.class': '类',
+    'insp.active': '激活',
+    'insp.name': '实体名称',
+    'insp.removeComponent': '移除组件',
+    'insp.alpha': 'Alpha',
 
     // dialogs
     'dialog.newProject.title': '新建项目',
@@ -107,6 +132,7 @@ export const dict = {
     'dialog.about.title': '关于 Cairn Engine',
     'dialog.about.tagline': '一个精巧的 C++ 游戏引擎，配有专注的 2D/3D 编辑器。',
     'dialog.about.license': '基于 MIT 许可证发布。',
+    'dialog.about.stack': 'C++ · Electron · 软件渲染器',
     'dialog.settings.title': '偏好设置',
     'dialog.settings.language': '语言',
     'dialog.settings.compiler': 'C++ 编译器',
@@ -118,6 +144,9 @@ export const dict = {
     'dialog.newScript.title': '新建 C++ 脚本',
     'dialog.newScript.name': '类名',
     'dialog.newScript.hint': '将在 Assets/Scripts 中创建同名 .cpp 文件（含类骨架）。',
+    'dialog.newScript.placeholder': 'PlayerController',
+    'dialog.newScript.invalid': '类名须以字母开头，且只能包含字母、数字和下划线。',
+    'dialog.newProject.defaultName': 'MyGame',
     'dialog.export.title': '导出 Player',
     'dialog.export.folder': '导出到',
     'dialog.export.hint': '将项目与运行时 Player 一起打包，需要 Electron 才能运行。',
@@ -131,6 +160,17 @@ export const dict = {
     'dialog.overwriteScene': '当前场景有未保存的修改。打开其他场景前是否保存？',
     'dialog.save': '保存',
     'dialog.dontSave': '不保存',
+
+    // project browser
+    'projectBrowser.select': '选择一个项目，或新建一个。',
+    'projectBrowser.first': '创建第一个项目以开始。',
+    'projectBrowser.hint': '最近打开的项目列在左侧。',
+    'projectBrowser.none': '没有最近的项目。',
+
+    // content browser defaults
+    'content.newFolder': '新建文件夹',
+    'content.newScene': '场景',
+    'content.imageFilter': '图片',
 
     // status / messages
     'status.ready': '就绪',
@@ -151,6 +191,14 @@ export const dict = {
     'status.entityCreated': '已创建 {name}',
     'status.scriptCreated': '脚本 {name} 已创建',
     'status.playerFocus': '点击视口以操控游戏，按 Esc 释放鼠标。',
+    'status.fps': '帧率',
+    'status.draw': '绘制',
+    'status.tris': '三角面',
+    'status.failed': '失败',
+
+    // viewport overlay
+    'viewport.draw': '绘制',
+    'viewport.tris': '三角面',
 
     // context menus
     'ctx.create': '创建',

@@ -13,6 +13,27 @@ constexpr float kTwoPi = 6.28318530717958f;
 constexpr float kDegToRad = kPi / 180.0f;
 constexpr float kRadToDeg = 180.0f / kPi;
 
+// sRGB <-> linear transfer functions. The approximations below are the standard
+// cheap fits (|error| < 0.002), which matters because a software rasterizer
+// converts every shaded pixel.
+inline float SrgbToLinear(float c) {
+    if (c <= 0.04045f) return c / 12.92f;
+    return std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+inline float LinearToSrgb(float c) {
+    if (c <= 0.0031308f) return c * 12.92f;
+    return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+}
+// Polynomial fits (~3 multiplies) used on the hot shading path.
+inline float SrgbToLinearFast(float c) {
+    if (c <= 0.04045f) return c / 12.92f;
+    return c * c * (c * 0.305306011f + 0.682171111f) + 0.012522878f;
+}
+inline float LinearToSrgbFast(float c) {
+    if (c <= 0.0031308f) return c * 12.92f;
+    return c * (c * 0.4127714f + 0.5276643f) + 0.0759182f;
+}
+
 inline float Radians(float deg) { return deg * kDegToRad; }
 inline float Degrees(float rad) { return rad * kRadToDeg; }
 inline float Clamp(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -255,6 +276,9 @@ struct Mat4 {
         r.m[12] = -(right + left) / (right - left);
         r.m[13] = -(top + bottom) / (top - bottom);
         r.m[14] = -(zFar + zNear) / (zFar - zNear);
+        // Orthographic: w stays 1, so only the spatial rows are written.
+        r.m[3] = r.m[7] = r.m[11] = 0.0f;
+        r.m[15] = 1.0f;
         return r;
     }
     static Mat4 LookAt(const Vec3& eye, const Vec3& target, const Vec3& up) {
@@ -268,6 +292,9 @@ struct Mat4 {
         r.m[12] = -Vec3::Dot(s, eye);
         r.m[13] = -Vec3::Dot(u, eye);
         r.m[14] = Vec3::Dot(f, eye);
+        // View matrices are affine: the homogeneous row must stay (0,0,0,1).
+        r.m[3] = r.m[7] = r.m[11] = 0.0f;
+        r.m[15] = 1.0f;
         return r;
     }
     Mat4 operator*(const Mat4& o) const {

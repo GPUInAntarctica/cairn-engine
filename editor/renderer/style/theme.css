@@ -1,53 +1,218 @@
 /* Cairn Engine - editor theme.
-   Flat, dense, keyboard-first. One accent color; no gradients, no gimmicks. */
+   Flat, dense, keyboard-first. One accent color; no gradients, no gimmicks.
+
+   Design rules this file is built to enforce:
+     1. One accent (--ac) and one accent only. It marks selection, focus and
+        active state. It is never decoration: no panel, header, icon or border
+        carries it unless that thing is selected, focused or active.
+     2. Elevation is a one-pixel border plus a background step. Shadows exist
+        only to lift an overlay (menu / dialog) off the panel behind it.
+     3. Every metric is a token. If a value is not in a scale below, it does
+        not belong in a stylesheet.
+     4. Type: four sizes. Space: a 2px grid. Radii never exceed 4px.
+     5. Motion is near-invisible and never load-bearing.
+*/
 
 :root {
-    --bg: #141419;
-    --panel: #1c1c23;
-    --panel-2: #212129;
-    --panel-3: #26262f;
-    --inset: #101016;
-    --border: #0b0b0f;
-    --border-hi: #2e2e38;
-    --text: #c9c9d2;
-    --text-dim: #8b8b97;
-    --text-faint: #5c5c66;
-    --accent: #6d9ee8;
-    --accent-dim: #3d5c88;
-    --accent-soft: rgba(109, 158, 232, 0.16);
-    --selection: #2b4a6f;
-    --warn: #d8a04a;
-    --error: #d05a5a;
-    --ok: #6fbf73;
-    --axis-x: #d05a5a;
-    --axis-y: #6fbf73;
-    --axis-z: #5a8fd0;
-    --mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Ubuntu Mono", monospace;
-    --ui: system-ui, "Segoe UI", "Noto Sans CJK SC", "Ubuntu", sans-serif;
+    /* ---- surfaces ---------------------------------------------------------
+       A single neutral ramp. Deliberately desaturated: the accent is the only
+       chromatic element in the chrome, so a tinted gray scale would dilute it.
+       Steps are ~4% lightness apart, which is the smallest gap that still
+       reads as a step on a calibrated panel. */
+    --sf-app:     #131316;   /* window background, chrome wells          */
+    --sf-panel:   #1a1a1e;   /* panel bodies                              */
+    --sf-header:  #212126;   /* panel headers, section headers, toolbars  */
+    --sf-raise:   #28282e;   /* hover, menus, buttons                    */
+    --sf-hover:   #232329;   /* quiet row hover inside a panel           */
+    --sf-inset:   #0f0f12;   /* text inputs, sunken wells                */
+    --sf-well:    #0b0b0e;   /* viewport, image canvas                   */
+    --sf-scrim:   rgba(8, 8, 10, 0.62);
+
+    /* ---- borders -----------------------------------------------------------
+       Three steps: hairline, control, control-hover. --bd-guide is for
+       indent guides only and is deliberately below the hairline step. */
+    --bd-subtle: #08080b;   /* dividers, panel edges                     */
+    --bd-line:   #2b2b33;   /* control borders, tab separators           */
+    --bd-strong: #3a3a45;   /* control border on hover                    */
+    --bd-guide:  rgba(255, 255, 255, 0.05);
+    --bd-row:    rgba(255, 255, 255, 0.04);   /* log row separators      */
+
+    /* ---- text --------------------------------------------------------------
+       Four steps. Contrast against --sf-panel (#1a1a1e) is ~10.4:1 for
+       --tx, 5.6:1 for --tx-dim and 3.1:1 for --tx-faint. */
+    --tx:        #c8c8d0;
+    --tx-hi:     #e6e6ec;   /* selection foreground, transient messages   */
+    --tx-dim:    #8e8e99;
+    --tx-faint:  #63636d;
+    --tx-on-ac:  #ffffff;
+
+    /* ---- accent ------------------------------------------------------------
+       Selection and focus only. */
+    --ac:        #6d9ee8;
+    --ac-dim:    #3f5f8c;
+    --ac-press:  #4a6da0;
+    --ac-soft:   rgba(109, 158, 232, 0.14);
+    --sel:       #2c4b72;   /* row selection background                 */
+
+    /* ---- state -------------------------------------------------------------
+       Reserved for genuine state, never decoration. */
+    --st-ok:     #6fbf73;
+    --st-warn:   #d0a24f;
+    --st-err:    #d4635e;
+    --st-ok-bg:   rgba(111, 191, 115, 0.13);
+    --st-warn-bg: rgba(208, 162, 79, 0.13);
+    --st-err-bg:  rgba(212, 99, 94, 0.13);
+
+    /* ---- axis --------------------------------------------------------------
+       Not an accent: an encoding. RGB is the domain convention for world
+       axes (Unreal, Blender, Maya all use it) and the inspector uses the same
+       three values for the axis ticks beside a vector field, so a column
+       colour and its tick can never disagree. */
+    --ax-x: #d4635e;
+    --ax-y: #6fbf73;
+    --ax-z: #5a8fd0;
+
+    /* ---- type --------------------------------------------------------------
+       11 micro / 12 base / 13 emphasis / 15 display. Nothing between. */
+    --fs-11: 11px;
+    --fs-12: 12px;
+    --fs-13: 13px;
+    --fs-15: 15px;
+    --lh-ui: 1.45;
+    --lh-cjk: 1.62;          /* Han glyphs need more leading than Latin   */
+    --lh-tight: 1.2;
+    /* Cap tracking. Neutralised for CJK: letter-spacing is a Latin display
+       convention and visibly loosens Han characters. */
+    --tracking-caps: 0.08em;
+
+    /* ---- spacing -----------------------------------------------------------
+       A 2px grid. Half-steps exist because a 22px control with a 1px border
+       needs 10px of interior, not 12. */
+    --sp-0-5: 2px;
+    --sp-1:   4px;
+    --sp-1-5: 6px;
+    --sp-2:   8px;
+    --sp-2-5: 10px;
+    --sp-3:   12px;
+    --sp-4:   16px;
+    --sp-5:   20px;
+    --sp-6:   24px;
+    --sp-7:   28px;
+
+    /* ---- radii -------------------------------------------------------------
+       4px is the ceiling. Anything larger reads as consumer, not tool. */
+    --r-1: 2px;
+    --r-2: 3px;
+    --r-3: 4px;
+
+    /* ---- heights -----------------------------------------------------------
+       The window grid is 27 / 34 / 1fr / 218 / 24. --h-bar and --h-status
+       must track it or the horizontal rules will not line up across panels. */
+    --h-bar: 27px;      /* menubar, tab strip, panel header           */
+    --h-toolbar: 34px;
+    --h-dock: 218px;
+    --h-status: 24px;
+    --h-row: 22px;      /* every list row and every inline control     */
+    --h-btn: 24px;
+    --h-tool: 26px;     /* toolbar / tool rail icon buttons           */
+    --h-btn-lg: 30px;
+
+    /* ---- widths ------------------------------------------------------------ */
+    --w-hierarchy: 258px;
+    /* 320 rather than 300: at 300 the label column could not hold
+       "Normal Strength" without ellipsis, and 96px of label column is what
+       lets the value column keep three readable mono fields. */
+    --w-inspector: 320px;
+    --w-split: 5px;
+    --w-inspector-label: 96px;   /* the inspector's strict label column  */
+    --w-form-label: 104px;       /* dialog form label column            */
+    --w-content-side: 170px;
+    --w-swatch: 16px;
+    --w-gutter: 8px;
+    --indent: 16px;              /* tree indent step                    */
+
+    /* ---- focus -------------------------------------------------------------
+       An outline, not a shadow: it costs no layout, needs no token colour
+       pair, and survives overflow:hidden when inset. */
+    --focus-width: 1px;
+    --focus-offset: 1px;
+
+    /* ---- motion ------------------------------------------------------------
+       Near-invisible by policy. Nothing animates on scroll, on mount or on
+       selection; the only transitions are colour changes on a control the
+       pointer is already over. */
+    --dur: 100ms;
+    --dur-instant: 70ms;
+    --ease: cubic-bezier(0.2, 0, 0.2, 1);
+
+    /* ---- fonts -------------------------------------------------------------
+       The CJK families sit before the generic fallback on purpose so Han
+       glyphs resolve deterministically instead of through whatever
+       fontconfig happens to pick. --mono is the value face: numbers must
+       align in columns. */
+    --mono: "Cascadia Mono", "JetBrains Mono", "DejaVu Sans Mono", Consolas,
+            "Ubuntu Mono", "Noto Sans Mono CJK SC", monospace;
+    --ui: system-ui, "Segoe UI", "Noto Sans CJK SC", "Source Han Sans SC",
+          "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "WenQuanYi Micro Hei",
+          Ubuntu, sans-serif;
 }
+
+:root[data-lang^="zh"] { --tracking-caps: 0; --lh-ui: 1.62; }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body, #root { height: 100%; overflow: hidden; }
+
 body {
-    background: var(--bg);
-    color: var(--text);
-    font: 12px/1.45 var(--ui);
+    background: var(--sf-app);
+    color: var(--tx);
+    font-family: var(--ui);
+    font-size: var(--fs-12);
+    line-height: var(--lh-ui);
     user-select: none;
     cursor: default;
+    -webkit-font-smoothing: antialiased;
 }
 
-::-webkit-scrollbar { width: 10px; height: 10px; }
+/* Chromium pins form controls to their own default font (13.333px), which
+   would smuggle a fifth size into the type scale. Inherit first, then let the
+   component rules below re-apply tokens. */
+input, select, textarea, button { font-family: inherit; font-size: inherit; line-height: normal; }
+
+/* Every focusable thing gets the same ring. Applied via :focus-visible so a
+   mouse click does not leave a ring behind, but keyboard navigation does. */
+:focus { outline: none; }
+:focus-visible {
+    outline: var(--focus-width) solid var(--ac);
+    outline-offset: var(--focus-offset);
+}
+/* Sunken controls clip an outer ring, so they take it inset. */
+.num-field:focus-within,
+input[type=text]:focus-visible,
+input[type=number]:focus-visible,
+select:focus-visible {
+    outline: var(--focus-width) solid var(--ac);
+    outline-offset: -1px;
+}
+
+::-webkit-scrollbar { width: var(--sp-2-5); height: var(--sp-2-5); }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #33333e; border: 2px solid var(--panel); border-radius: 5px; }
-::-webkit-scrollbar-thumb:hover { background: #44444f; }
+::-webkit-scrollbar-thumb {
+    background: #34343d;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    border-radius: var(--r-1);
+}
+::-webkit-scrollbar-thumb:hover { background: #45454f; background-clip: padding-box; }
 ::-webkit-scrollbar-corner { background: transparent; }
 
-/* ---- app grid ---- */
+/* ---- app grid -----------------------------------------------------------
+   27 / 34 / 1fr / 218 / 24. These are the vertical rhythm of the whole editor:
+   every panel header, tab strip and status bar aligns to one of these. */
 #app {
     display: grid;
     height: 100%;
-    grid-template-rows: 27px 34px minmax(0, 1fr) 218px 24px;
-    grid-template-columns: 258px 5px 1fr 5px 300px;
+    grid-template-rows: var(--h-bar) var(--h-toolbar) minmax(0, 1fr) var(--h-dock) var(--h-status);
+    grid-template-columns: var(--w-hierarchy) var(--w-split) 1fr var(--w-split) var(--w-inspector);
     grid-template-areas:
         "menubar menubar menubar menubar menubar"
         "toolbar toolbar toolbar toolbar toolbar"
@@ -56,26 +221,34 @@ body {
         "statusbar statusbar statusbar statusbar statusbar";
 }
 #statusbar { grid-area: statusbar; }
-
-#menubar  { grid-area: menubar; }
-#toolbar  { grid-area: toolbar; }
+#menubar   { grid-area: menubar; }
+#toolbar   { grid-area: toolbar; }
 #hierarchy { grid-area: hierarchy; }
-#center   { grid-area: center; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+#center    { grid-area: center; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 #inspector { grid-area: inspector; }
-#bottom   { grid-area: bottom; min-height: 0; display: flex; flex-direction: column; }
+#bottom    { grid-area: bottom; min-height: 0; display: flex; flex-direction: column; }
+#bottom .dock-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #bottom .tab-page { flex: 1; min-height: 0; display: none; }
 #bottom .tab-page.active { display: flex; flex-direction: column; }
 
 .vsplit { grid-area: vsplit; cursor: col-resize; }
 .hsplit { grid-area: hsplit; cursor: col-resize; }
-.bsplit { grid-area: bottom-split; cursor: row-resize; }
-.vsplit, .hsplit { background: var(--border); transition: background 120ms; }
-.vsplit:hover, .hsplit:hover { background: var(--accent-dim); }
+.vsplit, .hsplit {
+    background: var(--bd-subtle);
+    transition: background var(--dur) var(--ease);
+}
+.vsplit:hover, .hsplit:hover, .vsplit:focus-visible, .hsplit:focus-visible {
+    background: var(--ac-dim);
+    outline: none;
+}
 
-/* ---- panels ---- */
+/* ---- panels --------------------------------------------------------------
+   --h-bar here is the load-bearing number in this file: it is what makes the
+   first row of the hierarchy, the first tab and the inspector's first block
+   all start on the same pixel row. */
 .panel {
-    background: var(--panel);
-    border-right: 1px solid var(--border);
+    background: var(--sf-panel);
+    border-right: 1px solid var(--bd-subtle);
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -83,368 +256,996 @@ body {
 }
 .panel:last-child { border-right: none; }
 .panel-header {
-    height: 26px;
+    height: var(--h-bar);
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 0 10px;
-    background: var(--panel-2);
-    border-bottom: 1px solid var(--border);
-    font-size: 10.5px;
+    gap: var(--sp-1-5);
+    padding: 0 var(--sp-2-5);
+    background: var(--sf-header);
+    border-bottom: 1px solid var(--bd-subtle);
+    font-size: var(--fs-11);
     font-weight: 600;
-    letter-spacing: 0.8px;
+    letter-spacing: var(--tracking-caps);
     text-transform: uppercase;
-    color: var(--text-dim);
+    color: var(--tx-dim);
     flex: none;
+    user-select: none;
 }
 .panel-header .spacer { flex: 1; }
 .panel-body { flex: 1; overflow: auto; min-height: 0; position: relative; }
+/* A panel body that hosts its own scrolling child (a search field above a
+   tree) must not scroll itself, or the window gets two nested scrollbars. */
+.panel-split { display: flex; flex-direction: column; overflow: hidden; }
+.panel-split > .tree { flex: 1; overflow-y: auto; overflow-x: hidden; }
 
-/* ---- menubar ---- */
-#menubar { display: flex; align-items: stretch; background: var(--inset); border-bottom: 1px solid var(--border); }
-.menu-root {
-    padding: 0 10px;
+/* ---- menubar ------------------------------------------------------------- */
+#menubar {
     display: flex;
-    align-items: center;
-    color: var(--text-dim);
-    font-size: 12px;
+    align-items: stretch;
+    background: var(--sf-app);
+    border-bottom: 1px solid var(--bd-subtle);
 }
-.menu-root:hover, .menu-root.open { background: var(--panel-3); color: var(--text); }
-.menu-brand {
-    padding: 0 12px;
+.menu-root {
+    padding: 0 var(--sp-2-5);
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-weight: 700;
-    letter-spacing: 0.6px;
-    color: var(--text);
-    font-size: 12px;
+    color: var(--tx-dim);
+    font-size: var(--fs-12);
+    user-select: none;
+}
+.menu-root:hover, .menu-root.open { background: var(--sf-raise); color: var(--tx); }
+.menu-brand {
+    padding: 0 var(--sp-3);
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    font-weight: 600;
+    color: var(--tx-hi);
+    font-size: var(--fs-12);
+    display: flex;
 }
 .menu-brand svg { display: block; }
+
+/* Menus are overlays, so this is one of the two places a shadow is allowed.
+   It is a tight ambient occlusion, not a drop shadow: the panel behind must
+   stay readable through it. */
 .menu-dropdown {
     position: fixed;
     z-index: 1000;
-    background: #26262f;
-    border: 1px solid var(--border-hi);
-    box-shadow: 0 8px 24px rgba(0,0,0,0.55);
+    background: var(--sf-raise);
+    border: 1px solid var(--bd-line);
+    box-shadow: 0 var(--sp-1) var(--sp-1-5) rgba(0, 0, 0, 0.45);
     min-width: 220px;
-    padding: 4px 0;
+    padding: var(--sp-1) 0;
 }
 .menu-item {
     display: flex;
     align-items: center;
-    padding: 5px 14px 5px 18px;
-    gap: 10px;
+    padding: var(--sp-1) var(--sp-3) var(--sp-1) var(--sp-4);
+    gap: var(--sp-2-5);
     white-space: nowrap;
+    font-size: var(--fs-12);
 }
-.menu-item:hover { background: var(--selection); }
-.menu-item .shortcut { margin-left: auto; color: var(--text-faint); font-size: 11px; padding-left: 18px; }
-.menu-item.disabled { color: var(--text-faint); pointer-events: none; }
-.menu-sep { height: 1px; background: var(--border-hi); margin: 4px 8px; }
+.menu-item:hover, .menu-item:focus-visible { background: var(--sel); color: var(--tx-hi); outline-offset: -2px; }
+.menu-item .shortcut {
+    margin-left: auto;
+    color: var(--tx-faint);
+    font-size: var(--fs-11);
+    font-family: var(--mono);
+    padding-left: var(--sp-4);
+}
+.menu-item.disabled { color: var(--tx-faint); pointer-events: none; }
+.menu-sep { height: 1px; background: var(--bd-line); margin: var(--sp-1) var(--sp-2); }
 
-/* ---- toolbar ---- */
+/* ---- toolbar -------------------------------------------------------------
+   Icon-only by design: a label under every glyph is what turns a tool rail
+   into a row of chips. Identity comes from the tooltip and the shortcut. */
 #toolbar {
     display: flex;
     align-items: center;
-    gap: 4px;
-    padding: 0 8px;
-    background: var(--panel);
-    border-bottom: 1px solid var(--border);
+    gap: var(--sp-1);
+    padding: 0 var(--sp-2);
+    background: var(--sf-panel);
+    border-bottom: 1px solid var(--bd-subtle);
 }
-.tb-group { display: flex; align-items: center; gap: 2px; }
-.tb-sep { width: 1px; height: 18px; background: var(--border-hi); margin: 0 8px; }
+.tb-group { display: flex; align-items: center; gap: var(--sp-0-5); }
+.tb-sep { width: 1px; height: 18px; background: var(--bd-line); margin: 0 var(--sp-2); }
 .tb-btn {
-    width: 26px; height: 26px;
-    display: flex; align-items: center; justify-content: center;
+    width: var(--h-tool);
+    height: var(--h-tool);
+    font-family: var(--ui);
+    font-size: var(--fs-12);
+    display: flex;
+    align-items: center;
+    justify-content: center;
     border: 1px solid transparent;
-    border-radius: 3px;
-    color: var(--text-dim);
+    border-radius: var(--r-2);
+    color: var(--tx-dim);
     background: transparent;
 }
-.tb-btn:hover { background: var(--panel-3); color: var(--text); border-color: var(--border-hi); }
-.tb-btn.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-dim); }
+.tb-btn:hover { background: var(--sf-raise); color: var(--tx); border-color: var(--bd-line); }
+.tb-btn:active { background: var(--sf-header); }
+.tb-btn.active { background: var(--ac-soft); color: var(--ac); border-color: var(--ac-dim); }
 .tb-btn:disabled { opacity: 0.35; pointer-events: none; }
 .tb-btn svg { display: block; }
-.tb-btn.playing { color: var(--ok); border-color: var(--ok); }
+.tb-btn.playing { color: var(--st-ok); border-color: var(--st-ok); }
 
-/* ---- tabs ---- */
-.tab-strip { display: flex; background: var(--inset); border-bottom: 1px solid var(--border); flex: none; overflow-x: auto; }
-.tab-strip::-webkit-scrollbar { height: 3px; }
-.tab {
-    display: flex; align-items: center; gap: 7px;
-    padding: 0 12px; height: 27px;
-    color: var(--text-faint);
-    border-right: 1px solid var(--border);
-    white-space: nowrap;
+/* ---- tabs ----------------------------------------------------------------
+   Active is expressed three ways at once - background step, foreground
+   colour and a 2px accent rule - because a tab strip is read pre-attentively
+   and one signal is not enough. Inactive tabs recede to --tx-faint. */
+.tab-strip {
+    display: flex;
+    background: var(--sf-app);
+    border-bottom: 1px solid var(--bd-subtle);
+    flex: none;
+    overflow-x: auto;
+    height: var(--h-bar);
 }
-.tab.active { background: var(--panel); color: var(--text); box-shadow: inset 0 2px 0 var(--accent); }
-.tab:hover:not(.active) { color: var(--text-dim); }
-.tab .close { width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; border-radius: 2px; opacity: 0.5; }
-.tab .close:hover { background: var(--panel-3); opacity: 1; }
+.tab-strip::-webkit-scrollbar { height: var(--sp-0-5); }
+.tab {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-1-5);
+    padding: 0 var(--sp-3);
+    height: var(--h-bar);
+    color: var(--tx-faint);
+    border-right: 1px solid var(--bd-subtle);
+    white-space: nowrap;
+    font-size: var(--fs-12);
+    position: relative;
+    user-select: none;
+}
+.tab.active {
+    background: var(--sf-panel);
+    color: var(--tx-hi);
+    box-shadow: inset 0 2px 0 var(--ac);
+}
+/* Tabs are real buttons in the dock strip so they are focusable and
+   keyboard-activatable without a tabindex; the button reset is here rather
+   than in a reset file because there is only one. */
+button.tab { font-family: var(--ui); background: transparent; border: 0; border-right: 1px solid var(--bd-subtle); text-align: left; }
+.tab:hover:not(.active) { color: var(--tx-dim); background: var(--sf-header); }
+.tab-icon { display: flex; color: var(--tx-faint); }
+.tab.active .tab-icon { color: var(--ac); }
+.tab-label { overflow: hidden; text-overflow: ellipsis; }
+.tab .close {
+    width: 14px;
+    height: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--r-1);
+    opacity: 0.5;
+}
+.tab .close:hover { background: var(--sf-raise); opacity: 1; }
+/* Unsaved: the close affordance yields to a dot so the two states never
+   compete for the same pixels. Clicking the dot still closes the tab. */
+.tab.dirty .close::before {
+    content: '';
+    width: var(--sp-0-5);
+    height: var(--sp-0-5);
+    border-radius: 50%;
+    background: var(--tx-dim);
+}
+.tab.dirty .close { opacity: 1; }
 .tab-content-host { flex: 1; min-height: 0; position: relative; }
 .tab-content-host .tab-page { position: absolute; inset: 0; display: none; }
 .tab-content-host .tab-page.active { display: flex; flex-direction: column; }
 
-/* ---- hierarchy ---- */
+/* ---- hierarchy -----------------------------------------------------------
+   Selection gets three signals: a background step, a foreground step, and a
+   2px accent rule at the leading edge. The rule is what makes the selection
+   locatable at a glance in a 200-row tree without raising the contrast of
+   the whole row. */
 .tree-search {
-    margin: 6px 8px;
+    margin: var(--sp-1-5) var(--sp-2);
     flex: none;
 }
 .tree-row {
-    display: flex; align-items: center; gap: 6px;
-    height: 22px; padding: 0 8px;
-    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: var(--sp-1-5);
+    height: var(--h-row);
+    padding-right: var(--sp-2);
+    padding-left: calc(var(--sp-2) + var(--depth, 0) * var(--indent));
+    color: var(--tx-dim);
     white-space: nowrap;
+    position: relative;
+    user-select: none;
 }
-.tree-row:hover { background: var(--panel-2); color: var(--text); }
-.tree-row.selected { background: var(--selection); color: #fff; }
-.tree-row .toggle { width: 12px; text-align: center; color: var(--text-faint); font-size: 9px; flex: none; }
-.tree-row .icon { flex: none; display: flex; opacity: 0.85; }
-.tree-row .label { overflow: hidden; text-overflow: ellipsis; }
-.tree-row .inactive-mark { color: var(--text-faint); font-style: italic; }
+/* Indent guides: one gradient across the indent region, driven by --depth.
+   No extra DOM, no per-row element. */
+.tree-row::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: calc(var(--depth, 0) * var(--indent));
+    background-image: repeating-linear-gradient(
+        to right, var(--bd-guide) 0 1px, transparent 1px var(--indent));
+    pointer-events: none;
+}
+.tree-row:hover { background: var(--sf-hover); color: var(--tx); }
+.tree-row.selected { background: var(--sel); color: var(--tx-hi); }
+.tree-row.selected::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: var(--sp-0-5);
+    background: var(--ac);
+}
+.tree-row:focus-visible { outline-offset: -2px; }
+.tree-row .toggle {
+    width: var(--sp-3);
+    text-align: center;
+    color: var(--tx-faint);
+    font-size: var(--fs-11);
+    line-height: var(--lh-tight);
+    flex: none;
+}
+.tree-row:hover .toggle { color: var(--tx-dim); }
+.tree-row .icon { flex: none; display: flex; color: var(--tx-faint); }
+.tree-row:hover .icon, .tree-row.selected .icon { color: var(--tx-dim); }
+.tree-row.selected .icon { color: var(--tx-hi); }
+/* flex:1 + min-width:0 is what actually lets the ellipsis engage; without
+   min-width:0 a flex item refuses to shrink below its content width. */
+.tree-row .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tree-row .inactive-mark { color: var(--tx-faint); font-style: italic; }
+/* Inline rename: occupies the row and only grows a border once focused, so
+   the edit reads as "the label became editable" rather than "a control
+   appeared". */
+.tree-row .tree-rename {
+    flex: 1;
+    min-width: 0;
+    height: 18px;
+    padding: 0 var(--sp-1);
+    font-size: var(--fs-12);
+    background: var(--sf-inset);
+    border: 1px solid var(--bd-line);
+    border-radius: var(--r-1);
+    color: var(--tx);
+}
 
-/* ---- inspector ---- */
-.insp-entity-header { padding: 8px 10px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
-.insp-name-row { display: flex; align-items: center; gap: 8px; }
-.insp-name-row input[type=text] { flex: 1; }
-.comp-block { border-bottom: 1px solid var(--border); }
+/* ---- inspector -----------------------------------------------------------
+   The label column is fixed. Every row is the same two-column grid, so the
+   value column starts at the same x on every row of every block and numbers
+   form a single readable column. */
+.insp-entity-header {
+    padding: var(--sp-2) var(--sp-2-5);
+    border-bottom: 1px solid var(--bd-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1-5);
+    flex: none;
+}
+.insp-name-row { display: flex; align-items: center; gap: var(--sp-2); }
+/* The tag row uses the same fixed label column as every prop row below it. */
+.insp-name-row > label {
+    width: var(--w-inspector-label);
+    flex: none;
+    font-size: var(--fs-12);
+    color: var(--tx-dim);
+}
+.insp-name-row input[type=text] { flex: 1; min-width: 0; }
+#insp-name { font-weight: 600; }
+
+.comp-block { border-bottom: 1px solid var(--bd-subtle); }
+/* Section header: one background step, 600 weight, and the entity/component
+   name in --tx rather than --tx-hi. Shouting would be a larger size or an
+   accent; neither is used. */
 .comp-header {
-    display: flex; align-items: center; gap: 8px;
-    padding: 6px 10px;
-    background: var(--panel-2);
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: 0 var(--sp-2-5);
+    height: var(--h-bar);
+    background: var(--sf-header);
     font-weight: 600;
-    font-size: 11.5px;
+    font-size: var(--fs-12);
+    color: var(--tx);
+    user-select: none;
+    cursor: default;
 }
-.comp-header .toggle-arrow { color: var(--text-faint); font-size: 9px; width: 10px; }
-.comp-header .remove { margin-left: auto; color: var(--text-faint); padding: 2px 6px; border-radius: 3px; }
-.comp-header .remove:hover { color: var(--error); background: var(--panel-3); }
-.comp-body { padding: 7px 10px 10px; display: flex; flex-direction: column; gap: 5px; }
-.prop-row { display: grid; grid-template-columns: 92px 1fr; align-items: center; gap: 8px; min-height: 22px; }
-.prop-row > label { color: var(--text-dim); font-size: 11.5px; cursor: ew-resize; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.prop-row > label.no-drag { cursor: default; }
-.prop-vector { display: flex; gap: 4px; }
-.prop-vector .num-field { flex: 1; min-width: 0; }
-.add-component-row { padding: 8px 10px; }
+.comp-header:hover { background: var(--sf-raise); }
+.comp-header .toggle-arrow { color: var(--tx-faint); font-size: var(--fs-11); line-height: var(--lh-tight); width: var(--sp-2-5); }
+.comp-header .remove {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    color: var(--tx-faint);
+    border-radius: var(--r-1);
+    opacity: 0;
+}
+.comp-header:hover .remove { opacity: 1; }
+.comp-header .remove:hover { color: var(--st-err); background: var(--st-err-bg); }
+.comp-body {
+    padding: var(--sp-1-5) var(--sp-2-5) var(--sp-2-5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1-5);
+}
 
-/* ---- controls ---- */
+/* Every property row: fixed label column, fluid value column, one row height.
+   gap is the column gutter and the row rhythm at once. */
+.prop-row {
+    display: grid;
+    grid-template-columns: var(--w-inspector-label) minmax(0, 1fr);
+    align-items: center;
+    gap: var(--sp-2);
+    min-height: var(--h-row);
+}
+.prop-row > label {
+    color: var(--tx-dim);
+    font-size: var(--fs-12);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: ew-resize;
+}
+/* Drag-scrub is advertised on the label only, and only for rows that can
+   actually scrub; no-drag rows get the default arrow so the cursor is a
+   truthful signal. */
+.prop-row > label.no-drag { cursor: default; }
+.prop-vector { display: flex; gap: var(--sp-1); min-width: 0; }
+.prop-vector .num-field { flex: 1; min-width: 0; }
+/* Colour is a fixed-width swatch plus a fluid alpha slider, so a colour row
+   reads as a pair rather than as one ambiguous control. */
+.prop-color { display: flex; gap: var(--sp-1-5); align-items: center; min-width: 0; }
+.add-component-row { padding: var(--sp-2) var(--sp-2-5); }
+
+/* ---- controls ------------------------------------------------------------
+   Every inline control is --h-row and --r-2. Uniformity here is what makes a
+   mixed-type inspector read as one column instead of a pile of widgets. */
 input[type=text], input[type=number], select {
-    background: var(--inset);
-    border: 1px solid var(--border-hi);
-    color: var(--text);
-    height: 22px;
-    padding: 0 7px;
-    border-radius: 3px;
-    font: 12px var(--ui);
+    background: var(--sf-inset);
+    border: 1px solid var(--bd-line);
+    color: var(--tx);
+    height: var(--h-row);
+    padding: 0 var(--sp-1-5);
+    border-radius: var(--r-2);
+    font-family: var(--ui);
+    font-size: var(--fs-12);
+    outline: none;
+    min-width: 0;
+    width: 100%;
+}
+input[type=text]::placeholder { color: var(--tx-faint); }
+input[type=text]:hover, input[type=number]:hover, select:hover { border-color: var(--bd-strong); }
+select { cursor: pointer; }
+select option { background: var(--sf-raise); color: var(--tx); }
+input[type=number]::-webkit-inner-spin-button { display: none; }
+
+input[type=checkbox] {
+    accent-color: var(--ac);
+    font-size: inherit;
+    width: 13px;
+    height: 13px;
+    margin: 0;
+    cursor: pointer;
+    justify-self: start;
+}
+input[type=color] {
+    width: 100%;
+    max-width: 42px;
+    height: var(--h-row);
+    padding: var(--sp-0-5);
+    border: 1px solid var(--bd-line);
+    border-radius: var(--r-2);
+    background: var(--sf-inset);
+    cursor: pointer;
+}
+input[type=color]:hover { border-color: var(--bd-strong); }
+
+/* Sliders are restyled rather than left to the platform. The stock track is a
+   light pill that out-shouts every other control in the inspector. */
+input[type=range] {
+    -webkit-appearance: none;
+    appearance: none;
+    flex: 1;
+    min-width: 0;
+    height: var(--h-row);
+    background: transparent;
+    cursor: ew-resize;
+}
+input[type=range]::-webkit-slider-runnable-track {
+    height: var(--sp-1);
+    background: var(--sf-inset);
+    border: 1px solid var(--bd-line);
+    border-radius: var(--r-1);
+}
+input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: var(--sp-2);
+    height: 18px;
+    margin-top: -10px;
+    background: var(--sf-raise);
+    border: 1px solid var(--bd-strong);
+    border-radius: var(--r-1);
+}
+input[type=range]:hover::-webkit-slider-thumb { background: var(--ac-dim); border-color: var(--ac); }
+input[type=range]:focus-visible::-webkit-slider-thumb { background: var(--ac-dim); border-color: var(--ac); }
+
+.num-field {
+    display: flex;
+    align-items: center;
+    background: var(--sf-inset);
+    border: 1px solid var(--bd-line);
+    border-radius: var(--r-2);
+    height: var(--h-row);
+    overflow: hidden;
+    min-width: 0;
+}
+.num-field:hover { border-color: var(--bd-strong); }
+.num-field:focus-within { border-color: var(--ac); }
+/* The axis tick. 3px, flush, no rounding: it is a colour key, not a control. */
+.num-field .prefix { width: var(--sp-0-5); align-self: stretch; flex: none; }
+.num-field.ax .prefix { background: var(--ax-x); }
+.num-field.ay .prefix { background: var(--ax-y); }
+.num-field.az .prefix { background: var(--ax-z); }
+/* Values are monospace and tabular: a dragged number must not reflow the
+   column it sits in. */
+.num-field input {
+    border: none;
+    background: transparent;
+    height: 100%;
+    width: 100%;
+    padding: 0 var(--sp-1-5);
+    color: var(--tx);
+    font-family: var(--mono);
+    font-size: var(--fs-12);
+    font-variant-numeric: tabular-nums;
     outline: none;
     min-width: 0;
 }
-input[type=text]:focus, input[type=number]:focus, select:focus { border-color: var(--accent-dim); }
-input[type=number]::-webkit-inner-spin-button { display: none; }
-select { cursor: pointer; }
-input[type=checkbox] { accent-color: var(--accent); width: 13px; height: 13px; cursor: pointer; }
-input[type=color] { width: 42px; height: 22px; padding: 0; border: 1px solid var(--border-hi); border-radius: 3px; background: var(--inset); cursor: pointer; }
-input[type=range] { accent-color: var(--accent); }
-.num-field { display: flex; align-items: center; background: var(--inset); border: 1px solid var(--border-hi); border-radius: 3px; height: 22px; overflow: hidden; }
-.num-field:focus-within { border-color: var(--accent-dim); }
-.num-field .prefix { width: 3px; align-self: stretch; flex: none; }
-.num-field.ax .prefix { background: var(--axis-x); }
-.num-field.ay .prefix { background: var(--axis-y); }
-.num-field.az .prefix { background: var(--axis-z); }
-.num-field input { border: none; background: transparent; height: 100%; width: 100%; padding: 0 6px; color: var(--text); font: 11.5px var(--ui); outline: none; }
+.num-field input::-webkit-outer-spin-button,
+.num-field input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
 button.btn {
-    background: var(--panel-3);
-    border: 1px solid var(--border-hi);
-    color: var(--text);
-    height: 24px;
-    padding: 0 12px;
-    border-radius: 3px;
-    font: 12px var(--ui);
+    background: var(--sf-raise);
+    border: 1px solid var(--bd-line);
+    color: var(--tx);
+    height: var(--h-btn);
+    padding: 0 var(--sp-3);
+    border-radius: var(--r-2);
+    font-family: var(--ui);
+    font-size: var(--fs-12);
     cursor: pointer;
 }
-button.btn:hover { background: #2e2e3a; border-color: #3d3d4a; }
-button.btn.primary { background: var(--accent-dim); border-color: var(--accent); }
-button.btn.primary:hover { background: #4a6da0; }
+button.btn:hover { background: var(--sf-header); border-color: var(--bd-strong); }
+button.btn:active { background: var(--sf-inset); }
+button.btn.primary { background: var(--ac-dim); border-color: var(--ac); color: var(--tx-on-ac); }
+button.btn.primary:hover { background: var(--ac-press); }
 button.btn:disabled { opacity: 0.4; pointer-events: none; }
 
-/* ---- console ---- */
-.console-toolbar { display: flex; align-items: center; gap: 10px; padding: 4px 10px; background: var(--panel-2); border-bottom: 1px solid var(--border); flex: none; }
-.console-filter { display: flex; gap: 8px; align-items: center; color: var(--text-dim); font-size: 11px; }
-.console-list { flex: 1; overflow-y: auto; font-family: var(--mono); font-size: 11.5px; user-select: text; }
-.log-row { display: flex; gap: 8px; padding: 2px 10px; border-bottom: 1px solid rgba(255,255,255,0.02); }
-.log-row .lvl { width: 14px; flex: none; text-align: center; }
-.log-row .time { color: var(--text-faint); flex: none; }
-.log-row .msg { white-space: pre-wrap; word-break: break-word; }
-.log-info .lvl { color: var(--text-dim); } .log-info .msg { color: var(--text); }
-.log-warning .lvl { color: var(--warn); } .log-warning .msg { color: #e3c084; }
-.log-error .lvl { color: var(--error); } .log-error .msg { color: #e29090; }
-
-/* ---- content browser ---- */
-.content-wrap { display: flex; flex: 1; min-height: 0; }
-.content-side { width: 170px; flex: none; border-right: 1px solid var(--border); overflow-y: auto; padding: 6px 0; }
-.content-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.content-crumbs { display: flex; align-items: center; gap: 2px; padding: 5px 10px; color: var(--text-dim); font-size: 11.5px; border-bottom: 1px solid var(--border); flex: none; }
-.content-crumbs .crumb { padding: 2px 6px; border-radius: 3px; }
-.content-crumbs .crumb:hover { background: var(--panel-3); color: var(--text); }
-.content-grid { flex: 1; overflow-y: auto; padding: 10px; display: grid; grid-template-columns: repeat(auto-fill, 96px); gap: 8px; align-content: start; }
-.asset-tile {
-    width: 96px; padding: 6px;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    display: flex; flex-direction: column; align-items: center; gap: 6px;
+/* ---- console -------------------------------------------------------------
+   Severity is carried by a 3px leading rule plus the level glyph. The row
+   background stays flat so a burst of errors does not turn the dock into a
+   stack of coloured cards. */
+.console-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2-5);
+    padding: 0 var(--sp-2-5);
+    height: var(--h-bar);
+    background: var(--sf-header);
+    border-bottom: 1px solid var(--bd-subtle);
+    flex: none;
 }
-.asset-tile:hover { background: var(--panel-2); border-color: var(--border-hi); }
-.asset-tile.selected { background: var(--selection); border-color: var(--accent-dim); }
-.asset-tile .thumb {
-    width: 64px; height: 64px;
-    background: repeating-conic-gradient(#20202a 0% 25%, #181820 0% 50%) 0 0/12px 12px;
-    border: 1px solid var(--border-hi);
-    border-radius: 3px;
-    display: flex; align-items: center; justify-content: center;
+.console-filter { display: flex; gap: var(--sp-2); align-items: center; color: var(--tx-dim); font-size: var(--fs-11); }
+.console-filter label { display: flex; align-items: center; gap: var(--sp-1); cursor: pointer; }
+.console-filter:hover { color: var(--tx); }
+.console-title { display: flex; align-items: center; gap: var(--sp-1-5); color: var(--tx-dim); font-weight: 600; }
+.console-spacer { flex: 1; }
+/* The one place a control is deliberately smaller than --h-btn: it sits in a
+   27px toolbar next to 11px checkboxes and would need two lines at 24px. */
+.btn.btn-sm { height: 18px; padding: 0 var(--sp-2); font-size: var(--fs-11); }
+.console-list {
+    flex: 1;
+    overflow-y: auto;
+    font-family: var(--mono);
+    font-size: var(--fs-12);
+    font-variant-numeric: tabular-nums;
+    user-select: text;
+    padding-bottom: var(--sp-2);
+}
+.log-row {
+    display: flex;
+    gap: var(--sp-2);
+    padding: 1px var(--sp-2-5) 1px 0;
+    border-bottom: 1px solid var(--bd-row);
+    position: relative;
+    line-height: 1.5;
+}
+.log-row::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: var(--sp-0-5);
+}
+.log-row .lvl { width: var(--sp-4); flex: none; text-align: center; }
+.log-row .time { color: var(--tx-faint); flex: none; }
+.log-row .msg { white-space: pre-wrap; word-break: break-word; flex: 1; min-width: 0; }
+.log-row .count { color: var(--tx-faint); flex: none; }
+.log-info::before { background: transparent; }
+.log-info .lvl { color: var(--tx-faint); }
+.log-info .msg { color: var(--tx-dim); }
+.log-warning::before { background: var(--st-warn); }
+.log-warning .lvl { color: var(--st-warn); }
+.log-warning .msg { color: var(--tx); }
+.log-error::before { background: var(--st-err); }
+.log-error .lvl { color: var(--st-err); }
+.log-error .msg { color: var(--tx-hi); }
+
+/* ---- content browser -----------------------------------------------------
+   Tiles are 96px on a 8px gutter, which divides the dock cleanly. The
+   checkerboard is the one permitted pattern: it is a transparency
+   indicator, not decoration. */
+.content-wrap { display: flex; flex: 1; min-height: 0; }
+.content-side {
+    width: var(--w-content-side);
+    flex: none;
+    border-right: 1px solid var(--bd-subtle);
+    overflow-y: auto;
+    padding: var(--sp-1) 0;
+}
+.content-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.content-crumbs {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-0-5);
+    padding: 0 var(--sp-2-5);
+    height: var(--h-bar);
+    color: var(--tx-dim);
+    font-size: var(--fs-12);
+    border-bottom: 1px solid var(--bd-subtle);
+    flex: none;
+    white-space: nowrap;
     overflow: hidden;
-    color: var(--text-dim);
+}
+.content-crumbs .sep { color: var(--tx-faint); flex: none; }
+.content-crumbs .crumb {
+    padding: 0 var(--sp-1-5);
+    height: 18px;
+    display: flex;
+    align-items: center;
+    border-radius: var(--r-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.content-crumbs .crumb:hover { background: var(--sf-raise); color: var(--tx); }
+.content-crumbs .crumb.current { color: var(--tx-hi); }
+.content-grid {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--sp-2-5);
+    display: grid;
+    grid-template-columns: repeat(auto-fill, 96px);
+    gap: var(--sp-2);
+    align-content: start;
+}
+.asset-tile {
+    width: 96px;
+    padding: var(--sp-1-5);
+    border: 1px solid transparent;
+    border-radius: var(--r-2);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--sp-1-5);
+    user-select: none;
+}
+.asset-tile:hover { background: var(--sf-hover); border-color: var(--bd-line); }
+.asset-tile:focus-visible { outline-offset: -2px; }
+.asset-tile.selected { background: var(--sel); border-color: var(--ac-dim); }
+.asset-tile.selected .name { color: var(--tx-hi); }
+.asset-tile .thumb {
+    width: 64px;
+    height: 64px;
+    background: repeating-conic-gradient(#1f1f26 0% 25%, #191920 0% 50%) 0 0/12px 12px;
+    border: 1px solid var(--bd-line);
+    border-radius: var(--r-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    color: var(--tx-faint);
+    flex: none;
 }
 .asset-tile .thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
-.asset-tile .name { font-size: 11px; color: var(--text-dim); text-align: center; word-break: break-all; max-height: 26px; overflow: hidden; line-height: 13px; }
-.asset-tile.selected .name { color: #fff; }
-.folder-row { display: flex; align-items: center; gap: 7px; height: 24px; padding: 0 10px; color: var(--text-dim); }
-.folder-row:hover { background: var(--panel-2); color: var(--text); }
-.folder-row.selected { background: var(--selection); color: #fff; }
+.asset-tile .thumb svg { color: var(--tx-faint); }
+.asset-tile.selected .thumb { border-color: var(--ac-dim); }
+.asset-tile .name {
+    font-size: var(--fs-11);
+    color: var(--tx-dim);
+    text-align: center;
+    word-break: break-all;
+    max-height: 26px;
+    overflow: hidden;
+    line-height: 13px;
+    width: 100%;
+}
+.asset-tile .tile-rename {
+    width: 100%;
+    font-size: var(--fs-11);
+    height: 18px;
+    padding: 0 var(--sp-1);
+    background: var(--sf-inset);
+    border: 1px solid var(--ac);
+    border-radius: var(--r-1);
+    color: var(--tx);
+    text-align: center;
+}
+.folder-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-1-5);
+    height: var(--h-row);
+    padding-right: var(--sp-2);
+    padding-left: calc(var(--sp-2) + var(--depth, 0) * var(--indent));
+    color: var(--tx-dim);
+    user-select: none;
+    position: relative;
+}
+/* Same indent-guide treatment as the hierarchy, so the two trees read as one
+   system rather than as two similar-but-different lists. */
+.folder-row::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: calc(var(--depth, 0) * var(--indent));
+    background-image: repeating-linear-gradient(
+        to right, var(--bd-guide) 0 1px, transparent 1px var(--indent));
+    pointer-events: none;
+}
+.folder-row.selected::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: var(--sp-0-5);
+    background: var(--ac);
+}
+.folder-row:hover { background: var(--sf-hover); color: var(--tx); }
+.folder-row.selected { background: var(--sel); color: var(--tx-hi); }
+.folder-row.selected .folder-icon { color: var(--tx-hi); }
+.folder-row:focus-visible { outline-offset: -2px; }
+.folder-row .folder-icon { flex: none; display: flex; color: var(--tx-faint); }
+.folder-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
-/* ---- statusbar ---- */
+/* ---- statusbar -----------------------------------------------------------
+   Reading order left to right: transient message, then the file, then
+   counters, then what is selected. Selection sits rightmost and in the
+   brightest ink because it is the one thing the user is acting on. */
 #statusbar {
-    display: flex; align-items: center; gap: 16px;
-    padding: 0 12px;
-    background: var(--inset);
-    border-top: 1px solid var(--border);
-    color: var(--text-faint);
-    font-size: 11px;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-4);
+    padding: 0 var(--sp-3);
+    background: var(--sf-app);
+    border-top: 1px solid var(--bd-subtle);
+    color: var(--tx-faint);
+    font-size: var(--fs-11);
+    white-space: nowrap;
+    user-select: none;
 }
 #statusbar .spacer { flex: 1; }
-#statusbar .stat { display: flex; gap: 5px; }
-#statusbar .stat b { color: var(--text-dim); font-weight: 500; }
+/* The message slot is the loudest element in the bar, and only while a message
+   is actually present. */
+#sb-left { color: var(--tx-dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#sb-left.live { color: var(--tx-hi); }
+#sb-state { color: var(--tx-dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#sb-state.playing { color: var(--st-ok); }
+#sb-scene { color: var(--tx-faint); display: flex; align-items: center; gap: var(--sp-1); }
+/* The compiler is a standing environment fact: present, dim, never a message. */
+#sb-compiler { color: var(--tx-faint); font-family: var(--mono); font-size: var(--fs-11); }
+#sb-scene.dirty::before {
+    content: '';
+    width: var(--sp-1);
+    height: var(--sp-1);
+    border-radius: 50%;
+    background: var(--st-warn);
+    flex: none;
+}
+#statusbar .stat { display: flex; gap: var(--sp-1); align-items: baseline; }
+#statusbar .stat b {
+    color: var(--tx-dim);
+    font-weight: 400;
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+}
+/* Counters are grouped so they read as one block rather than four loose facts. */
+#sb-counters { display: flex; gap: var(--sp-4); }
+#sb-selection { color: var(--tx); font-weight: 600; }
 
-/* ---- viewport ---- */
-.viewport-root { flex: 1; position: relative; min-height: 0; background: #000; }
-.viewport-root canvas.scene { position: absolute; inset: 0; width: 100%; height: 100%; }
-.viewport-root canvas.overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+/* ---- viewport ------------------------------------------------------------ */
+.viewport-root { flex: 1; position: relative; min-height: 0; background: var(--sf-well); }
+.viewport-root canvas.scene,
+.viewport-root canvas.overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+.viewport-root canvas.overlay { pointer-events: none; }
 .viewport-stats {
-    position: absolute; top: 8px; left: 10px;
-    font: 11px var(--mono);
-    color: var(--text-dim);
-    background: rgba(16,16,22,0.72);
-    padding: 4px 8px;
-    border-radius: 3px;
+    position: absolute;
+    top: var(--sp-2);
+    left: var(--sp-2-5);
+    font-family: var(--mono);
+    font-size: var(--fs-11);
+    font-variant-numeric: tabular-nums;
+    line-height: var(--lh-cjk);
+    color: var(--tx-dim);
+    background: rgba(11, 11, 14, 0.78);
+    padding: var(--sp-1) var(--sp-2);
+    border-radius: var(--r-2);
     pointer-events: none;
+    display: none;
 }
 .viewport-focus-badge {
-    position: absolute; top: 8px; right: 10px;
-    font: 10px var(--ui);
-    letter-spacing: 1px;
-    color: var(--ok);
-    background: rgba(16,16,22,0.72);
-    padding: 3px 8px;
-    border-radius: 3px;
+    position: absolute;
+    top: var(--sp-2);
+    right: var(--sp-2-5);
+    font-size: var(--fs-11);
+    letter-spacing: var(--tracking-caps);
+    text-transform: uppercase;
+    color: var(--st-ok);
+    background: var(--st-ok-bg);
+    border: 1px solid var(--st-ok);
+    border-radius: var(--r-2);
+    padding: var(--sp-0-5) var(--sp-1-5);
     pointer-events: none;
+    display: none;
 }
-.playing-outline { outline: 1px solid var(--ok); outline-offset: -1px; }
+.playing-outline { outline: 1px solid var(--st-ok); outline-offset: -1px; }
 
-/* ---- dialogs ---- */
+/* ---- dialogs -------------------------------------------------------------
+   The scrim is a flat 62% wash: enough to separate, not enough to turn the
+   panel behind it into mud. The shadow is tight so the dialog reads as
+   lifted off a known surface rather than floating in space. */
 .dialog-backdrop {
-    position: fixed; inset: 0; z-index: 2000;
-    background: rgba(8,8,12,0.6);
-    display: flex; align-items: center; justify-content: center;
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    background: var(--sf-scrim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 .dialog {
-    background: var(--panel);
-    border: 1px solid var(--border-hi);
-    box-shadow: 0 16px 48px rgba(0,0,0,0.6);
-    border-radius: 4px;
+    background: var(--sf-panel);
+    border: 1px solid var(--bd-line);
+    box-shadow: 0 var(--sp-2) var(--sp-4) rgba(0, 0, 0, 0.55);
+    border-radius: var(--r-3);
     min-width: 380px;
     max-width: 90vw;
     max-height: 85vh;
-    display: flex; flex-direction: column;
+    display: flex;
+    flex-direction: column;
 }
 .dialog-title {
-    padding: 10px 16px;
+    padding: 0 var(--sp-4);
+    height: var(--h-bar);
     font-weight: 600;
-    border-bottom: 1px solid var(--border);
-    background: var(--panel-2);
-    border-radius: 4px 4px 0 0;
-    display: flex; align-items: center;
+    font-size: var(--fs-12);
+    border-bottom: 1px solid var(--bd-subtle);
+    background: var(--sf-header);
+    border-radius: var(--r-3) var(--r-3) 0 0;
+    display: flex;
+    align-items: center;
 }
-.dialog-title .close { margin-left: auto; color: var(--text-faint); }
-.dialog-body { padding: 16px; overflow-y: auto; user-select: text; }
-.dialog-actions { padding: 12px 16px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
-.form-row { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 10px; margin-bottom: 10px; }
-.form-row > label { color: var(--text-dim); }
-.form-row input[type=text] { width: 100%; }
-.form-hint { color: var(--text-faint); font-size: 11px; margin-top: 4px; }
+.dialog-title .close { margin-left: auto; color: var(--tx-faint); display: flex; }
+.dialog-title .close:hover { color: var(--tx); }
+.dialog-body { padding: var(--sp-4); overflow-y: auto; user-select: text; }
+.dialog-message { max-width: 420px; line-height: var(--lh-cjk); color: var(--tx); }
+.about-row { display: flex; gap: var(--sp-5); align-items: flex-start; }
+.about-mark { color: var(--ac); padding-top: var(--sp-0-5); flex: none; }
+.about-body { max-width: 420px; }
+.about-body h3 { font-size: var(--fs-15); font-weight: 600; margin-bottom: var(--sp-1); }
+.about-body h3 .muted { font-weight: 400; }
+.about-line { margin-top: var(--sp-2); }
+.path-row { display: flex; gap: var(--sp-1-5); align-items: center; min-width: 0; }
+.path-row input { flex: 1; }
+.form-block { margin-bottom: var(--sp-2-5); }
+.dialog-actions {
+    padding: var(--sp-2-5) var(--sp-4);
+    border-top: 1px solid var(--bd-subtle);
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--sp-2);
+}
+/* Dialogs reuse the inspector's label column so a labelled field in a dialog
+   and a labelled field in the inspector line up. */
+.form-row {
+    display: grid;
+    grid-template-columns: var(--w-form-label) minmax(0, 1fr);
+    align-items: center;
+    gap: var(--sp-2);
+    margin-bottom: var(--sp-2-5);
+}
+.form-row > label { color: var(--tx-dim); font-size: var(--fs-12); }
+.form-row:last-child { margin-bottom: 0; }
+.form-hint { color: var(--tx-faint); font-size: var(--fs-11); margin-top: var(--sp-1); }
 
-.template-cards { display: flex; gap: 10px; margin-bottom: 14px; }
+.template-cards { display: flex; gap: var(--sp-2); margin-bottom: var(--sp-3); }
 .template-card {
-    flex: 1; padding: 12px;
-    border: 1px solid var(--border-hi);
-    border-radius: 4px;
+    flex: 1;
+    padding: var(--sp-3);
+    border: 1px solid var(--bd-line);
+    border-radius: var(--r-3);
     cursor: pointer;
-    background: var(--panel-2);
+    background: var(--sf-header);
+    text-align: left;
+    font-family: var(--ui);
+    color: var(--tx);
 }
-.template-card:hover { border-color: var(--accent-dim); }
-.template-card.selected { border-color: var(--accent); background: var(--accent-soft); }
-.template-card h4 { font-size: 12.5px; margin-bottom: 4px; }
-.template-card p { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+.template-card:hover { border-color: var(--bd-strong); }
+.template-card:focus-visible { outline-offset: 1px; }
+.template-card.selected { border-color: var(--ac); background: var(--ac-soft); }
+.template-card h4 { font-size: var(--fs-13); margin-bottom: var(--sp-1); }
+.template-card p { font-size: var(--fs-11); color: var(--tx-dim); line-height: var(--lh-cjk); }
 
-/* ---- code editor ---- */
+/* ---- code editor ---------------------------------------------------------
+   Monaco gets no outline from us: it owns its own focus treatment. Only the
+   background is themed so the editor does not read as a light rectangle in a
+   dark window. */
 .code-host { flex: 1; min-height: 0; }
-.code-host .monaco-editor, .code-host .monaco-editor-background { background: var(--panel) !important; }
+.code-host .monaco-editor,
+.code-host .monaco-editor-background { background: var(--sf-panel) !important; }
 
-/* ---- image editor ---- */
+/* ---- image editor -------------------------------------------------------- */
 .imged-root { flex: 1; display: flex; min-height: 0; }
-.imged-tools { width: 40px; flex: none; background: var(--panel-2); border-right: 1px solid var(--border); display: flex; flex-direction: column; align-items: center; padding-top: 6px; gap: 2px; }
-.imged-tool { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border-radius: 3px; color: var(--text-dim); border: 1px solid transparent; }
-.imged-tool:hover { background: var(--panel-3); color: var(--text); }
-.imged-tool.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-dim); }
-.imged-canvas-wrap { flex: 1; overflow: auto; background: #0d0d11; display: flex; align-items: center; justify-content: center; position: relative; }
-.imged-canvas-stack { position: relative; box-shadow: 0 4px 24px rgba(0,0,0,0.5); }
+.imged-tools {
+    width: var(--sp-6);
+    flex: none;
+    background: var(--sf-header);
+    border-right: 1px solid var(--bd-subtle);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: var(--sp-1-5) 0;
+    gap: var(--sp-0-5);
+}
+.imged-tool {
+    width: var(--h-btn);
+    height: var(--h-btn);
+    font-family: var(--ui);
+    font-size: var(--fs-12);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--r-2);
+    color: var(--tx-dim);
+    border: 1px solid transparent;
+    background: transparent;
+}
+.imged-tool:hover { background: var(--sf-raise); color: var(--tx); }
+.imged-tool.active { background: var(--ac-soft); color: var(--ac); border-color: var(--ac-dim); }
+/* The canvas is the only place a shadow is load-bearing: it shows the sprite
+   edge against the surrounding wash. */
+.imged-canvas-wrap {
+    flex: 1;
+    overflow: auto;
+    background: var(--sf-inset);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+.imged-canvas-stack { position: relative; box-shadow: 0 0 0 1px var(--bd-line), 0 var(--sp-2) var(--sp-4) rgba(0, 0, 0, 0.45); }
 .imged-canvas-stack canvas { position: absolute; inset: 0; image-rendering: pixelated; }
 .imged-canvas-stack canvas.base { position: relative; }
-.imged-side { width: 220px; flex: none; border-left: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
-.imged-side .section { border-bottom: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
-.imged-side h5 { font-size: 10.5px; letter-spacing: 0.8px; text-transform: uppercase; color: var(--text-dim); }
-.imged-layers { flex: 1; overflow-y: auto; min-height: 0; }
-.layer-row { display: flex; align-items: center; gap: 8px; padding: 5px 10px; }
-.layer-row:hover { background: var(--panel-2); }
-.layer-row.selected { background: var(--selection); }
-.layer-row .eye { width: 16px; text-align: center; color: var(--text-dim); }
-.layer-row .eye.off { color: var(--text-faint); opacity: 0.5; }
-.layer-row .lname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sv-picker { width: 100%; height: 120px; cursor: crosshair; border: 1px solid var(--border-hi); border-radius: 3px; }
-.hue-strip { width: 100%; height: 14px; cursor: crosshair; border: 1px solid var(--border-hi); border-radius: 3px; }
-.swatch-row { display: flex; flex-wrap: wrap; gap: 4px; }
-.swatch { width: 16px; height: 16px; border-radius: 2px; border: 1px solid var(--border-hi); cursor: pointer; }
-.swatch:hover { border-color: var(--text); }
-
-/* ---- project browser (startup) ---- */
-#project-browser { position: fixed; inset: 0; display: flex; background: var(--bg); z-index: 500; }
-.pb-side {
-    width: 300px; flex: none;
-    background: var(--panel);
-    border-right: 1px solid var(--border);
-    display: flex; flex-direction: column;
+.imged-side {
+    width: 220px;
+    flex: none;
+    border-left: 1px solid var(--bd-subtle);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
 }
-.pb-brand { padding: 28px 24px 20px; }
-.pb-brand h1 { font-size: 17px; font-weight: 700; letter-spacing: 0.4px; display: flex; align-items: center; gap: 10px; }
-.pb-brand p { color: var(--text-faint); font-size: 11.5px; margin-top: 6px; }
-.pb-list { flex: 1; overflow-y: auto; padding: 0 12px; }
-.pb-item { padding: 9px 12px; border-radius: 4px; margin-bottom: 4px; }
-.pb-item:hover { background: var(--panel-3); }
-.pb-item.selected { background: var(--selection); }
-.pb-item .name { font-size: 12.5px; }
-.pb-item .path { color: var(--text-faint); font-size: 10.5px; margin-top: 2px; word-break: break-all; }
-.pb-actions { padding: 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
-.pb-actions button { height: 30px; }
-.pb-main { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 14px; color: var(--text-faint); }
-.pb-main svg { opacity: 0.5; }
+.imged-side .section { border-bottom: 1px solid var(--bd-subtle); padding: var(--sp-2) var(--sp-2-5); display: flex; flex-direction: column; gap: var(--sp-1-5); }
+.imged-side h5 { font-size: var(--fs-11); font-weight: 600; letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--tx-dim); }
+.imged-layers { flex: 1; overflow-y: auto; min-height: 0; }
+.layer-row { display: flex; align-items: center; gap: var(--sp-2); height: var(--h-row); padding: 0 var(--sp-2-5); }
+.layer-row:hover { background: var(--sf-hover); }
+.layer-row.selected { background: var(--sel); }
+.layer-row .eye { width: var(--sp-4); flex: none; text-align: center; color: var(--tx-dim); }
+.layer-row .eye.off { color: var(--tx-faint); opacity: 0.5; }
+.layer-row .lname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv-picker { width: 100%; height: 120px; cursor: crosshair; border: 1px solid var(--bd-line); border-radius: var(--r-2); background: var(--sf-well); }
+.hue-strip { width: 100%; height: var(--sp-2); cursor: crosshair; border: 1px solid var(--bd-line); border-radius: var(--r-2); }
+.swatch-row { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.swatch { width: var(--w-swatch); height: var(--w-swatch); border-radius: var(--r-1); border: 1px solid var(--bd-line); cursor: pointer; padding: 0; font-size: inherit; }
+.swatch:hover { border-color: var(--tx); }
 
-.muted { color: var(--text-faint); }
-.spin { animation: spin 1s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
+/* ---- project browser -----------------------------------------------------
+   A startup screen, not a landing page: one rail, one list, one empty line.
+   No centred hero, no oversized mark, no marketing copy. */
+#project-browser { position: fixed; inset: 0; display: flex; background: var(--sf-app); z-index: 500; }
+.pb-side {
+    width: 320px;
+    flex: none;
+    background: var(--sf-panel);
+    border-right: 1px solid var(--bd-subtle);
+    display: flex;
+    flex-direction: column;
+}
+.pb-brand {
+    padding: var(--sp-5) var(--sp-4) var(--sp-3);
+    border-bottom: 1px solid var(--bd-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+}
+.pb-brand h1 { font-size: var(--fs-15); font-weight: 600; display: flex; align-items: center; gap: var(--sp-2); }
+.pb-brand h1 svg { color: var(--ac); }
+.pb-brand p { color: var(--tx-faint); font-size: var(--fs-12); }
+.pb-list { flex: 1; overflow-y: auto; padding: var(--sp-2) var(--sp-3); }
+.pb-item {
+    padding: var(--sp-2) var(--sp-2-5);
+    border-radius: var(--r-2);
+    margin-bottom: var(--sp-0-5);
+    border: 1px solid transparent;
+    cursor: default;
+}
+.pb-item:hover { background: var(--sf-hover); }
+.pb-item.selected { background: var(--sel); border-color: var(--ac-dim); }
+.pb-item:focus-visible { outline-offset: -2px; }
+.pb-item .name { font-size: var(--fs-13); color: var(--tx); }
+.pb-item .path { color: var(--tx-faint); font-size: var(--fs-11); margin-top: 1px; word-break: break-all; }
+.pb-actions {
+    padding: var(--sp-3);
+    border-top: 1px solid var(--bd-subtle);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+.pb-actions button { height: var(--h-btn-lg); }
+.pb-foot {
+    padding: var(--sp-2) var(--sp-3);
+    border-top: 1px solid var(--bd-subtle);
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+}
+.pb-foot > label { color: var(--tx-dim); font-size: var(--fs-11); flex: none; }
+.pb-foot select { width: auto; flex: 1; }
+/* The main area states what to do and stops. Top-aligned, single line. */
+.pb-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: var(--sp-6) var(--sp-6) 0;
+    color: var(--tx-faint);
+    font-size: var(--fs-13);
+    gap: var(--sp-1);
+}
+.pb-main .hint { color: var(--tx-dim); font-size: var(--fs-12); }
+
+/* ---- shared -------------------------------------------------------------- */
+.muted { color: var(--tx-faint); }
+.empty-line {
+    padding: var(--sp-3) var(--sp-2-5);
+    color: var(--tx-faint);
+    font-size: var(--fs-12);
+}
+
+/* Motion is decorative by definition, so it is the first thing to go when the
+   user has asked for less of it. */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        transition-duration: 1ms !important;
+        transition-delay: 0ms !important;
+        animation-duration: 1ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+    }
+}

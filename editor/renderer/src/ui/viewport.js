@@ -27,6 +27,12 @@ export class Viewport {
 
         this.cam = { yaw: 40, pitch: -32, distance: 12, pivot: [0, 0.5, 0], ortho: false, orthoSize: 6 };
         this.ctx = this.overlay.getContext('2d');
+        this.sceneCtx = this.sceneCanvas.getContext('2d');
+        // Box of the viewport in client space. localPoint() runs on every
+        // window-level mousemove, and getBoundingClientRect() there forces a
+        // synchronous layout. The box only changes on resize / tab switch, so
+        // it is cached instead.
+        this.box = { left: 0, top: 0, width: 1, height: 1 };
         this.hoverId = 0;
         this.drag = null;
         this.focused = false;
@@ -39,12 +45,29 @@ export class Viewport {
         on('selection-changed', () => this.drawOverlay());
         on('scene-changed', () => this.drawOverlay());
         window.addEventListener('resize', () => this.resize());
+        // The cached box is only exact if something tells us when the layout
+        // moved. A ResizeObserver covers splitter drags, tab switches (the
+        // scene page goes display:none and reports 0x0) and window resizes
+        // without any of them having to remember to poke us.
+        if (typeof ResizeObserver !== 'undefined') {
+            this.observer = new ResizeObserver(() => this.resize());
+            this.observer.observe(this.root);
+        }
         this.resize();
     }
 
     // ---- sizing -----------------------------------------------------------
     resize() {
         const rect = this.root.getBoundingClientRect();
+        // A hidden tab page reports a zero-sized box. Resizing to it would
+        // shrink the backing store to the 2px floor and leave the viewport
+        // blank when the page comes back, so a zero box is ignored: the
+        // ResizeObserver fires again with real dimensions on re-show.
+        if (rect.width < 1 || rect.height < 1) return;
+        this.box.left = rect.left;
+        this.box.top = rect.top;
+        this.box.width = rect.width;
+        this.box.height = rect.height;
         const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
         const w = Math.max(2, Math.min(1920, Math.floor(rect.width * dpr)));
         const h = Math.max(2, Math.min(1200, Math.floor(rect.height * dpr)));
@@ -86,7 +109,7 @@ export class Viewport {
             yaw: this.cam.yaw,
             pitch: this.cam.pitch,
             ortho: this.cam.ortho,
-            orthoSize: this.cam.orthoSize / (this.cam.ortho ? 1 : 1),
+            orthoSize: this.cam.orthoSize,
             fov: 60,
         });
     }
@@ -108,13 +131,12 @@ export class Viewport {
 
     // ---- pointer ----------------------------------------------------------
     localPoint(ev) {
-        const rect = this.root.getBoundingClientRect();
-        return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+        return { x: ev.clientX - this.box.left, y: ev.clientY - this.box.top };
     }
 
     pickAt(x, y) {
-        const dprX = this.sceneCanvas.width / this.root.clientWidth;
-        const dprY = this.sceneCanvas.height / this.root.clientHeight;
+        const dprX = this.sceneCanvas.width / this.box.width;
+        const dprY = this.sceneCanvas.height / this.box.height;
         return engineInstance().pick(x * dprX, y * dprY);
     }
 
@@ -150,7 +172,7 @@ export class Viewport {
                 this.cam.yaw = this.drag.yaw + dx * 0.4;
                 this.cam.pitch = clamp(this.drag.pitch - dy * 0.4, -89, 89);
             } else if (this.drag.mode === 'pan') {
-                const scale = this.cam.ortho ? this.cam.orthoSize * 2 / this.root.clientHeight
+                const scale = this.cam.ortho ? this.cam.orthoSize * 2 / this.box.height
                                              : this.cam.distance * 0.0018;
                 const right = this.camRight();
                 const up = cameraUp(this.cam.yaw, this.cam.pitch);
@@ -181,7 +203,7 @@ export class Viewport {
     forwardMouse(ev, down) {
         const eng = engineInstance();
         const pt = this.localPoint(ev);
-        const dprY = this.sceneCanvas.height / this.root.clientHeight;
+        const dprY = this.sceneCanvas.height / this.box.height;
         eng.mouseMove(pt.x, this.sceneCanvas.height - pt.y * dprY);
         if (down) eng.mouseDown(ev.button);
         else eng.mouseUp(ev.button);
@@ -268,7 +290,7 @@ export class Viewport {
         if (drag.mode === 'move') {
             // Move on the camera-facing plane; snap to the dominant axis with Shift.
             const scale = this.cam.ortho
-                ? this.cam.orthoSize * 2 / this.root.clientHeight
+                ? this.cam.orthoSize * 2 / this.box.height
                 : this.cam.distance * 0.0018;
             const dx = (pt.x - drag.startPointer.x) * scale;
             const dy = -(pt.y - drag.startPointer.y) * scale;
@@ -322,7 +344,7 @@ export class Viewport {
         const buf = eng.getFrameBuffer();
         if (!buf) return;
         const w = this.sceneCanvas.width, h = this.sceneCanvas.height;
-        const ctx = this.sceneCanvas.getContext('2d');
+        const ctx = this.sceneCtx;
         try {
             if (!this.imageData || this.imageData.width !== w || this.imageData.height !== h ||
                 this.frameBufKey !== buf.buffer) {
@@ -341,8 +363,11 @@ export class Viewport {
         const ctx = this.ctx;
         const w = this.overlay.width, h = this.overlay.height;
         ctx.clearRect(0, 0, w, h);
-        if (!this.showStats) this.statsEl.style.display = 'none';
-        else this.statsEl.style.display = 'block';
+        const wantStats = this.showStats ? 'block' : 'none';
+        if (wantStats !== this.statsShown) {
+            this.statsEl.style.display = wantStats;
+            this.statsShown = wantStats;
+        }
 
         // Axis handles for the move tool.
         if (editor.selection && editor.tool === 'move' && !editor.playing && this.axisHandles) {
@@ -366,10 +391,12 @@ export class Viewport {
 
     updateStats(stats, fps) {
         if (!this.showStats) return;
-        const w = this.sceneCanvas.width, h = this.sceneCanvas.height;
-        this.statsEl.innerHTML =
-            `${w}×${h} &nbsp; ${fps.toFixed(0)} fps<br>` +
-            `draw ${stats.drawCalls} · tri ${stats.triangles}`;
+        const html = `${this.sceneCanvas.width}×${this.sceneCanvas.height} &nbsp; ${fps.toFixed(0)} fps` +
+            `<br>${t('viewport.draw')} ${stats.drawCalls} · ${t('viewport.tris')} ${stats.triangles}`;
+        if (html !== this.statsHtml) {
+            this.statsEl.innerHTML = html;
+            this.statsHtml = html;
+        }
     }
 
     setTool(tool) {
@@ -409,8 +436,16 @@ function worldToScreen(p) {
     return engineInstance().worldToScreen(p[0], p[1], p[2]);
 }
 
+// Axis colours live in theme.css as --ax-x/y/z, alongside the tick colours in
+// the inspector. Resolved once from the stylesheet so the two cannot drift.
+const AXIS_VARS = ['--ax-x', '--ax-y', '--ax-z'];
+let axisPalette = null;
 function axisColor(axis) {
-    return ['#d05a5a', '#6fbf73', '#5a8fd0'][axis];
+    if (!axisPalette) {
+        const cs = getComputedStyle(document.documentElement);
+        axisPalette = AXIS_VARS.map(v => cs.getPropertyValue(v).trim() || '#888');
+    }
+    return axisPalette[axis];
 }
 
 // KeyboardEvent.code -> Cairn KeyCode (mirrors engine/include/cairn/scripting.h).

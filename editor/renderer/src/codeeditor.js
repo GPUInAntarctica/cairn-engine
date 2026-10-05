@@ -9,6 +9,16 @@ import fs from 'fs';
 
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api.js';
 import 'monaco-editor/esm/vs/editor/editor.all.js';
+// editor.all bundles the core editor and its features, but NOT the language
+// grammars: those live in basic-languages. Without this import the cpp model
+// is registered with no tokenizer, every span falls back to the default token
+// colour, and the editor renders as an undifferentiated wall of light grey.
+import 'monaco-editor/esm/vs/basic-languages/cpp/cpp.contribution.js';
+// editor.all only bundles the core editor; the language grammars live in
+// basic-languages. Without this import the cpp model has no tokenizer, so
+// every line falls back to the bare identifier colour and the editor renders
+// as a wall of white.
+import 'monaco-editor/esm/vs/basic-languages/cpp/cpp.contribution.js';
 
 import { editor, scriptClassMeta } from './state.js';
 import { emit, on } from './events.js';
@@ -28,23 +38,32 @@ function ensureTheme() {
     monaco.editor.defineTheme('cairn-dark', {
         base: 'vs-dark',
         inherit: true,
+        // Values mirror the theme.css tokens. Monaco cannot read CSS custom
+        // properties, so these are duplicated deliberately: the accent is the
+        // only chromatic token, and comments recede to --text-faint so they
+        // never compete with code.
         rules: [
-            { token: 'comment', foreground: '5c5c66', fontStyle: 'italic' },
+            { token: 'comment', foreground: '63636d', fontStyle: 'italic' },
             { token: 'keyword', foreground: '6d9ee8' },
-            { token: 'keyword.directive', foreground: '8b8b97' },
-            { token: 'number', foreground: 'c8a04a' },
+            { token: 'keyword.directive', foreground: '8e8e99' },
+            { token: 'number', foreground: 'd0a24f' },
             { token: 'string', foreground: '8fbf7f' },
             { token: 'type', foreground: '7fc8c8' },
-            { token: 'identifier', foreground: 'c9c9d2' },
+            { token: 'type.identifier', foreground: '7fc8c8' },
+            { token: 'identifier', foreground: 'c8c8d0' },
         ],
         colors: {
-            'editor.background': '#1c1c23',
-            'editor.lineHighlightBackground': '#22222b',
+            'editor.background': '#1a1a1e',
+            'editor.foreground': '#c8c8d0',
             'editorLineNumber.foreground': '#4a4a56',
-            'editorLineNumber.activeForeground': '#8b8b97',
-            'editorGutter.background': '#1c1c23',
-            'editor.selectionBackground': '#2b4a6f',
-            'editorIndentGuide.background1': '#2a2a34',
+            'editorLineNumber.activeForeground': '#8e8e99',
+            'editorGutter.background': '#1a1a1e',
+            'editor.lineHighlightBackground': '#212126',
+            'editor.selectionBackground': '#2c4b72',
+            'editorIndentGuide.background1': '#2a2a32',
+            'editorWidget.background': '#212126',
+            'editorSuggestWidget.background': '#212126',
+            'editorSuggestWidget.border': '#2b2b33',
         },
     });
 }

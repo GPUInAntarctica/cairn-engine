@@ -1,7 +1,9 @@
-// Cairn Engine - lightweight rigidbody physics.
-// 3D: AABB/sphere shapes, impulse resolution with restitution.
-// 2D: axis-aligned boxes on the XY plane (2D shapes only interact with 2D).
-// Trigger overlap events feed script OnTriggerEnter/OnTriggerExit.
+// Cairn Engine - rigidbody physics.
+//
+// Shapes are gathered in world space from the entity's world matrix, integrated
+// with semi-implicit Euler and resolved with impulses plus restitution. Trigger
+// overlap events feed script OnTriggerEnter/OnTriggerExit; solid contacts feed
+// OnCollisionEnter/Stay/Exit. 3D and 2D shapes never mix.
 #include "cairn/physics.h"
 
 #include "cairn/engine.h"
@@ -11,7 +13,6 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace Cairn {
 
@@ -21,34 +22,46 @@ struct Shape {
     enum Kind { Box3, Sphere3, Box2 } kind;
     GameObject* go = nullptr;
     Component* comp = nullptr;
+    RigidBody* rb = nullptr;
     bool isTrigger = false;
     bool isStatic = true;
-    RigidBody* rb = nullptr;
-    // World-space bounds.
-    Vec3 min, max;      // boxes
+    Vec3 min, max;      // boxes, world space
     Vec3 center;        // boxes: center; spheres: center
     float radius = 0;   // spheres
 
     bool Is2D() const { return kind == Box2; }
     bool IsSolid() const { return !isTrigger; }
+    // Effective mass; a non-positive mass behaves as unit mass without the
+    // engine ever rewriting the value the user authored.
+    float InvMass() const {
+        if (!rb || isStatic || !rb->enabled || rb->isKinematic) return 0.0f;
+        return 1.0f / (rb->mass > 0.0f ? rb->mass : 1.0f);
+    }
 };
-
-AABB WorldBox(const BoxCollider& col, const Transform& t) {
-    Vec3 half = Vec3(col.size.x * t.scale.x, col.size.y * t.scale.y, col.size.z * t.scale.z).Abs() * 0.5f;
-    Vec3 c = t.position + Vec3(col.center.x * t.scale.x, col.center.y * t.scale.y, col.center.z * t.scale.z);
-    return AABB(c - half, c + half);
-}
-
-AABB WorldBox2(const Collider2D& col, const Transform& t) {
-    Vec3 half(std::fabs(col.size.x * t.scale.x) * 0.5f, std::fabs(col.size.y * t.scale.y) * 0.5f, 0.0f);
-    Vec3 c = t.position + Vec3(col.center.x * t.scale.x, col.center.y * t.scale.y, 0.0f);
-    return AABB(c - half, c + half);
-}
 
 struct Contact {
     Vec3 normal;      // points from B toward A
     float penetration = 0;
 };
+
+Vec3 TransformPoint(const Mat4& m, const Vec3& p) { return m.TransformPoint(p); }
+
+AABB WorldBox(const BoxCollider& col, const Mat4& world) {
+    Vec3 half = col.size.Abs() * 0.5f;
+    return AABB(col.center - half, col.center + half).Transformed(world);
+}
+
+AABB WorldBox2D(const Collider2D& col, const Mat4& world) {
+    Vec3 half(std::fabs(col.size.x) * 0.5f, std::fabs(col.size.y) * 0.5f, 0.0f);
+    return AABB(Vec3(col.center.x - half.x, col.center.y - half.y, 0.0f),
+                Vec3(col.center.x + half.x, col.center.y + half.y, 0.0f))
+        .Transformed(world);
+}
+
+float WorldMaxScale(Transform& t) {
+    Vec3 s = t.WorldScale();
+    return std::max({std::fabs(s.x), std::fabs(s.y), std::fabs(s.z)});
+}
 
 bool Collide(const Shape& a, const Shape& b, Contact* out) {
     if (a.Is2D() != b.Is2D()) return false;  // never mix 2D and 3D shapes
@@ -99,45 +112,122 @@ bool Collide(const Shape& a, const Shape& b, Contact* out) {
     return true;
 }
 
-uint64_t PairKey(const Shape& a, const Shape& b) {
-    uint64_t ka = a.comp ? a.comp->m_componentId : 0;
-    uint64_t kb = b.comp ? b.comp->m_componentId : 0;
+uint64_t PairKey(Component* a, Component* b) {
+    uint64_t ka = a ? a->m_componentId : 0;
+    uint64_t kb = b ? b->m_componentId : 0;
     if (ka > kb) std::swap(ka, kb);
     return (ka << 32) | kb;
-}
-
-std::unordered_map<uint64_t, bool>& TriggerPairs() {
-    static std::unordered_map<uint64_t, bool> map;
-    return map;
 }
 
 void NotifyTrigger(const Shape& self, const Shape& other, bool entered) {
     if (!self.go) return;
     for (Component* c : self.go->GetComponentList()) {
-        if (c->TypeId() != ComponentTypeId::Script) continue;
+        if (c->TypeId() != ComponentTypeId::Script || !c->enabled) continue;
         auto* sc = static_cast<ScriptComponent*>(c);
-        if (sc->instance && sc->enabled) {
+        if (sc->instance) {
             if (entered) sc->instance->OnTriggerEnter(other.comp);
             else sc->instance->OnTriggerExit(other.comp);
         }
     }
 }
 
+void NotifyCollision(Component* receiver, const Shape& self, const Shape& other, CollisionPhase phase) {
+    if (!self.go) return;
+    for (Component* c : self.go->GetComponentList()) {
+        if (c->TypeId() != ComponentTypeId::Script || !c->enabled) continue;
+        auto* sc = static_cast<ScriptComponent*>(c);
+        if (!sc->instance) continue;
+        switch (phase) {
+            case CollisionPhase::Enter: sc->instance->OnCollisionEnter(other.comp); break;
+            case CollisionPhase::Stay: sc->instance->OnCollisionStay(other.comp); break;
+            case CollisionPhase::Exit: sc->instance->OnCollisionExit(other.comp); break;
+        }
+    }
+    (void)receiver;
+}
+
+// Moves a GameObject by a world-space delta, converting to the parent's local
+// space so parented rigidbodies behave like their unparented counterparts.
+void MoveWorld(Transform& t, const Vec3& worldDelta) {
+    GameObject* parent = t.m_parent;
+    if (!parent) {
+        t.position += worldDelta;
+    } else {
+        Mat4 inv = parent->transform().WorldMatrix().Inverted();
+        Vec3 worldPos = t.WorldMatrix().GetTranslation() + worldDelta;
+        t.position = inv.TransformPoint(worldPos);
+    }
+    t.MarkWorldDirty();
+}
+
+// Gather every enabled collider in world space. Called once per step, after
+// integration, so shape data can never drift out of sync with the objects.
+void GatherShapes(Scene& scene, std::vector<Shape>* out) {
+    for (const auto& go : scene.objects) {
+        if (!go->ActiveInHierarchy()) continue;
+        Transform& t = go->transform();
+        Mat4 world = t.WorldMatrix();
+        RigidBody* rb = go->GetComponent<RigidBody>();
+        bool dynamic = rb && rb->enabled && !rb->isKinematic;
+        auto add = [&](Shape s) {
+            s.go = go.get();
+            s.isStatic = !dynamic;
+            s.rb = dynamic ? rb : nullptr;
+            out->push_back(s);
+        };
+        if (auto* c = go->GetComponent<BoxCollider>(); c && c->enabled) {
+            AABB box = WorldBox(*c, world);
+            Shape s;
+            s.kind = Shape::Box3;
+            s.comp = c;
+            s.isTrigger = c->isTrigger;
+            s.min = box.min; s.max = box.max; s.center = box.Center();
+            add(s);
+        }
+        if (auto* c = go->GetComponent<SphereCollider>(); c && c->enabled) {
+            Shape s;
+            s.kind = Shape::Sphere3;
+            s.comp = c;
+            s.isTrigger = c->isTrigger;
+            s.center = TransformPoint(world, c->center);
+            s.radius = c->radius * WorldMaxScale(t);
+            add(s);
+        }
+        if (auto* c = go->GetComponent<Collider2D>(); c && c->enabled) {
+            AABB box = WorldBox2D(*c, world);
+            Shape s;
+            s.kind = Shape::Box2;
+            s.comp = c;
+            s.isTrigger = c->isTrigger;
+            s.min = box.min; s.max = box.max; s.center = box.Center();
+            add(s);
+        }
+    }
+}
+
+bool HasEnabledCollider(const GameObject& go) {
+    for (Component* c : go.GetComponentList()) {
+        switch (c->TypeId()) {
+            case ComponentTypeId::BoxCollider:
+            case ComponentTypeId::SphereCollider:
+            case ComponentTypeId::Collider2D:
+                if (c->enabled) return true;
+                break;
+            default:
+                break;
+        }
+    }
+    return false;
+}
+
 void ResolveContact(Shape& a, Shape& b, const Contact& ct) {
-    float invMassA = (a.rb && !a.isStatic && a.rb->mass > 0) ? 1.0f / a.rb->mass : 0.0f;
-    float invMassB = (b.rb && !b.isStatic && b.rb->mass > 0) ? 1.0f / b.rb->mass : 0.0f;
+    float invMassA = a.InvMass();
+    float invMassB = b.InvMass();
     float invSum = invMassA + invMassB;
     if (invSum <= 0) return;
 
-    Vec3 push = ct.normal * (ct.penetration / invSum);
-    if (invMassA > 0) {
-        a.go->transform().position += push * invMassA;
-        a.go->transform().m_worldDirty = true;
-    }
-    if (invMassB > 0) {
-        b.go->transform().position -= push * invMassB;
-        b.go->transform().m_worldDirty = true;
-    }
+    if (a.go) MoveWorld(a.go->transform(), ct.normal * (ct.penetration / invSum) * invMassA);
+    if (b.go) MoveWorld(b.go->transform(), -ct.normal * (ct.penetration / invSum) * invMassB);
 
     Vec3 relVel;
     if (invMassA > 0 && a.rb) relVel += a.rb->velocity;
@@ -154,142 +244,96 @@ void ResolveContact(Shape& a, Shape& b, const Contact& ct) {
 
 }  // namespace
 
-void PhysicsReset() { TriggerPairs().clear(); }
+void PhysicsReset(Scene* scene) {
+    if (scene) scene->physicsPairs.clear();
+}
 
 void PhysicsStep(Scene& scene, float dt) {
     if (dt <= 0) return;
 
-    // Gather shapes.
-    std::vector<Shape> shapes;
-    for (const auto& go : scene.objects) {
-        if (!go->ActiveInHierarchy()) continue;
-        const Transform& t = go->transform();
-        RigidBody* rb = go->GetComponent<RigidBody>();
-        bool dynamic = rb && !rb->isKinematic;
-        auto add = [&](Shape s) {
-            s.go = go.get();
-            s.isStatic = !dynamic;
-            s.rb = rb;
-            shapes.push_back(s);
-        };
-        if (auto* c = go->GetComponent<BoxCollider>()) {
-            AABB box = WorldBox(*c, t);
-            Shape s;
-            s.kind = Shape::Box3;
-            s.comp = c;
-            s.isTrigger = c->isTrigger;
-            s.min = box.min; s.max = box.max; s.center = box.Center();
-            add(s);
-        }
-        if (auto* c = go->GetComponent<SphereCollider>()) {
-            Shape s;
-            s.kind = Shape::Sphere3;
-            s.comp = c;
-            s.isTrigger = c->isTrigger;
-            s.center = t.position + Vec3(c->center.x * t.scale.x, c->center.y * t.scale.y, c->center.z * t.scale.z);
-            s.radius = c->radius * std::max({t.scale.x, t.scale.y, std::fabs(t.scale.z)});
-            add(s);
-        }
-        if (auto* c = go->GetComponent<Collider2D>()) {
-            AABB box = WorldBox2(*c, t);
-            Shape s;
-            s.kind = Shape::Box2;
-            s.comp = c;
-            s.isTrigger = c->isTrigger;
-            s.min = box.min; s.max = box.max; s.center = box.Center();
-            add(s);
-        }
-    }
-
-    // Integrate dynamic rigidbodies (semi-implicit Euler).
+    // Integrate dynamic rigidbodies (semi-implicit Euler, world space).
     for (const auto& go : scene.objects) {
         if (!go->ActiveInHierarchy()) continue;
         RigidBody* rb = go->GetComponent<RigidBody>();
-        if (!rb || rb->isKinematic) continue;
-        Transform& t = go->transform();
-        if (rb->mass <= 0) rb->mass = 1.0f;
+        if (!rb || !rb->enabled || rb->isKinematic) continue;
+        if (!HasEnabledCollider(*go)) continue;
+        float mass = rb->mass > 0.0f ? rb->mass : 1.0f;
         if (rb->useGravity) rb->velocity += scene.gravity * rb->gravityScale * dt;
-        rb->velocity += (rb->m_accumForce / rb->mass) * dt;
+        rb->velocity += (rb->m_accumForce / mass) * dt;
         rb->m_accumForce = Vec3();
         if (rb->drag > 0) rb->velocity *= std::max(0.0f, 1.0f - rb->drag * dt);
-        t.position += rb->velocity * dt;
-        if (rb->freezeZ) {
-            t.position.z = 0.0f;
-            rb->velocity.z = 0.0f;
-        }
-        t.m_worldDirty = true;
+        if (rb->freezeZ) rb->velocity.z = 0.0f;
+        MoveWorld(go->transform(), rb->velocity * dt);
     }
 
-    // Refresh world-space bounds after integration.
-    {
-        size_t i = 0;
-        for (const auto& go : scene.objects) {
-            if (!go->ActiveInHierarchy()) continue;
-            const Transform& t = go->transform();
-            if (auto* c = go->GetComponent<BoxCollider>()) {
-                AABB box = WorldBox(*c, t);
-                shapes[i].min = box.min; shapes[i].max = box.max; shapes[i].center = box.Center();
-                ++i;
-            }
-            if (auto* c = go->GetComponent<SphereCollider>()) {
-                shapes[i].center = t.position + Vec3(c->center.x * t.scale.x, c->center.y * t.scale.y, c->center.z * t.scale.z);
-                shapes[i].radius = c->radius * std::max({t.scale.x, t.scale.y, std::fabs(t.scale.z)});
-                ++i;
-            }
-            if (auto* c = go->GetComponent<Collider2D>()) {
-                AABB box = WorldBox2(*c, t);
-                shapes[i].min = box.min; shapes[i].max = box.max; shapes[i].center = box.Center();
-                ++i;
-            }
-        }
-    }
+    // Shapes are gathered once, after integration.
+    std::vector<Shape> shapes;
+    GatherShapes(scene, &shapes);
 
-    // Narrow phase.
-    std::unordered_set<uint64_t> overlappingNow;
+    // Narrow phase: contacts and trigger overlaps in one sweep.
+    std::unordered_map<uint64_t, PairRecord> seenPairs;
     for (size_t a = 0; a < shapes.size(); ++a) {
         for (size_t b = a + 1; b < shapes.size(); ++b) {
             Shape& A = shapes[a];
             Shape& B = shapes[b];
             if (!A.comp || !B.comp) continue;
-            bool triggerPair = A.isTrigger || B.isTrigger;
-            if (!triggerPair && A.isStatic && B.isStatic) continue;
+            // Only two solid colliders push each other; a trigger reports
+            // events but never turns the pair into a non-solid contact.
+            bool solidPair = A.IsSolid() && B.IsSolid();
+            if (!solidPair && A.isStatic && B.isStatic && A.Is2D() == B.Is2D()) continue;
 
             Contact ct;
             if (!Collide(A, B, &ct)) continue;
 
-            if (triggerPair) {
-                uint64_t key = PairKey(A, B);
-                overlappingNow.insert(key);
-                bool was = TriggerPairs().count(key) > 0;
+            uint64_t key = PairKey(A.comp, B.comp);
+            if (solidPair) {
+                bool first = seenPairs.find(key) == seenPairs.end();
+                if (first) {
+                    NotifyCollision(nullptr, A, B, CollisionPhase::Enter);
+                    NotifyCollision(nullptr, B, A, CollisionPhase::Enter);
+                } else {
+                    NotifyCollision(nullptr, A, B, CollisionPhase::Stay);
+                    NotifyCollision(nullptr, B, A, CollisionPhase::Stay);
+                }
+                seenPairs[key] = PairRecord{A.comp, B.comp, false};
+                if (!(A.isStatic && B.isStatic)) ResolveContact(A, B, ct);
+            } else {
+                bool was = scene.physicsPairs.count(key) > 0;
+                seenPairs[key] = PairRecord{A.comp, B.comp, true};
                 if (!was) {
                     NotifyTrigger(A, B, true);
                     NotifyTrigger(B, A, true);
-                    TriggerPairs()[key] = true;
                 }
-            } else {
-                ResolveContact(A, B, ct);
             }
         }
     }
 
-    // Trigger exits.
-    for (auto it = TriggerPairs().begin(); it != TriggerPairs().end();) {
-        if (overlappingNow.count(it->first) == 0) {
-            for (size_t a = 0; a < shapes.size(); ++a) {
-                for (size_t b = a + 1; b < shapes.size(); ++b) {
-                    if (PairKey(shapes[a], shapes[b]) == it->first) {
-                        NotifyTrigger(shapes[a], shapes[b], false);
-                        NotifyTrigger(shapes[b], shapes[a], false);
-                        a = shapes.size();
-                        break;
-                    }
-                }
+    // Exits: solid contacts that ended this step, plus pairs whose collider or
+    // entity disappeared (stored pointers keep the exit event deliverable).
+    for (auto it = scene.physicsPairs.begin(); it != scene.physicsPairs.end();) {
+        uint64_t key = it->first;
+        auto found = seenPairs.find(key);
+        if (found == seenPairs.end()) {
+            Shape a, b;
+            a.comp = it->second.a;
+            b.comp = it->second.b;
+            a.go = a.comp ? a.comp->m_go : nullptr;
+            b.go = b.comp ? b.comp->m_go : nullptr;
+            if (it->second.isTrigger) {
+                NotifyTrigger(a, b, false);
+                NotifyTrigger(b, a, false);
+            } else {
+                NotifyCollision(nullptr, a, b, CollisionPhase::Exit);
+                NotifyCollision(nullptr, b, a, CollisionPhase::Exit);
             }
-            it = TriggerPairs().erase(it);
+            it = scene.physicsPairs.erase(it);
         } else {
+            it->second.a = found->second.a;
+            it->second.b = found->second.b;
             ++it;
         }
     }
+    scene.physicsPairs.swap(seenPairs);
 }
 
 }  // namespace Cairn

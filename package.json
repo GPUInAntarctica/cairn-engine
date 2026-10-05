@@ -19,13 +19,26 @@
     "electron"
   ],
   "main": "editor/main/main.js",
+  "bin": {
+    "cairn": "cli/index.js"
+  },
+  "files": [
+    "cli",
+    "editor",
+    "engine",
+    "runtime",
+    "templates",
+    "scripts"
+  ],
   "scripts": {
     "build:engine": "node scripts/build.js engine",
     "build:addon": "node scripts/build.js addon",
     "build": "node scripts/build.js",
     "rebuild": "node scripts/build.js --force",
     "prestart": "node scripts/build.js renderer",
-    "test": "node test/smoke.js",
+    "test": "node test/smoke.js && node test/cli.js",
+    "docs:cli": "node scripts/gen-cli-docs.js",
+    "cairn": "node cli/index.js",
     "start": "electron .",
     "dev": "electron . --dev"
   },
