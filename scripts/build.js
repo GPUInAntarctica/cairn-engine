@@ -44,8 +44,15 @@ function nodeIncludeDir() {
 
 function buildEngine() {
     fs.mkdirSync(buildDir, { recursive: true });
-    const cmakeArgs = ['-S', engineDir, '-B', buildDir, '-DCMAKE_BUILD_TYPE=Release'];
-    if (!fs.existsSync(path.join(buildDir, 'CMakeCache.txt')) || force) run('cmake', cmakeArgs);
+    // Extra -D flags from the command line reach CMake, so documented options
+    // like `npm run build -- -DCAIRN_ENABLE_VULKAN=OFF` actually take effect.
+    const defines = process.argv.slice(2).filter(a => a.startsWith('-D'));
+    const cmakeArgs = ['-S', engineDir, '-B', buildDir, '-DCMAKE_BUILD_TYPE=Release', ...defines];
+    if (defines.length && !force) {
+        log(`cmake defines: ${defines.join(' ')} (reconfigure)`);
+    }
+    if (!fs.existsSync(path.join(buildDir, 'CMakeCache.txt')) || force || defines.length)
+        run('cmake', cmakeArgs);
     run('cmake', ['--build', buildDir, '-j', String(Math.max(2, require('os').cpus().length - 1))]);
     const soName = fs.existsSync(path.join(buildDir, 'libcairn_engine.so')) ? 'libcairn_engine.so'
         : fs.existsSync(path.join(buildDir, 'libcairn_engine.dylib')) ? 'libcairn_engine.dylib'

@@ -79,6 +79,22 @@ cairn --project ./game --scene Assets/Scenes/Main.cscene scene.tree
 State that has to survive across calls must be written to disk (`scene.save`,
 `image.save`) — that is what makes the workflow reproducible.
 
+### Picking a render backend
+
+Rendering defaults to the Vulkan GPU backend, falling back to software when no
+Vulkan 1.3 device is present. Two ways to steer it:
+
+```bash
+cairn --project ./game scene.settings.set --key renderBackend --value software   # auto | vulkan | software
+cairn --project ./game scene.settings.set --key msaa --value 4                   # 1 | 2 | 4 | 8
+CAIRN_RENDER_BACKEND=software cairn --project ./game exec.run --file steps.jsonl
+```
+
+The environment variable only speaks for scenes left on `auto`; a project that
+names a backend keeps it. Prefer it for bulk work — a GPU frame ends in a
+blocking readback, so a few hundred rendered frames will fight the desktop for
+the card. `render.editorFrame` reports which backend actually ran in `stats`.
+
 ## Recipes
 
 Read a scene:
@@ -88,8 +104,8 @@ cairn --project ./game --scene Assets/Scenes/Main.cscene scene.tree
 cairn --project ./game --scene Assets/Scenes/Main.cscene scene.hierarchy
 ```
 
-Author a scene (single process, state carried between calls is not possible —
-use `exec.run` for multi-step work):
+Author a scene. Single calls lose their session state, so anything with more
+than two or three steps belongs in an `exec.run` batch:
 
 ```bash
 cairn --project ./game scene.new --name Level
@@ -97,6 +113,12 @@ cairn --project ./game entity.createPrimitive --mesh Cube --name Floor --positio
 cairn --project ./game component.add --id 1 --type BoxCollider --props '{"size":[40,1,40]}'
 cairn --project ./game scene.save --file Assets/Scenes/Level.cscene
 ```
+
+One subtlety worth remembering: a batch whose first step is `scene.new` must
+**not** be given `--scene <that file>`, because the session would try to load a
+file the batch is about to create. Pass `--scene` only when loading something
+that already exists. Working end-to-end examples live in the
+[README](../README.md#driving-the-engine-from-an-agent).
 
 Preview and simulate headlessly:
 
