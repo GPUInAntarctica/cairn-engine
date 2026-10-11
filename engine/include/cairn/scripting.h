@@ -9,6 +9,7 @@
 #pragma once
 
 #include "json.h"
+#include "log.h"   // CAIRN_PRINTF
 #include "math.h"
 
 #include <cstdint>
@@ -561,9 +562,9 @@ void Play(const std::string& clipPath, float volume = 1.0f, float pitch = 1.0f);
 // ---------------------------------------------------------------------------
 namespace Debug {
 // Goes to the editor console.
-void Log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-void LogWarning(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-void LogError(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void Log(const char* fmt, ...) CAIRN_PRINTF(1, 2);
+void LogWarning(const char* fmt, ...) CAIRN_PRINTF(1, 2);
+void LogError(const char* fmt, ...) CAIRN_PRINTF(1, 2);
 // Draws a line in the viewport for `duration` seconds (editor aid).
 void DrawLine(const Vec3& from, const Vec3& to, Color color = Color::White, float duration = 0.0f);
 }  // namespace Debug

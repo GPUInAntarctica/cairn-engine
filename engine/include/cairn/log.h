@@ -7,6 +7,14 @@
 #include <string>
 #include <vector>
 
+// printf format checking is a GCC/Clang extension; MSVC has no equivalent and
+// rejects the attribute outright, so the whole thing compiles away there.
+#if defined(__GNUC__) || defined(__clang__)
+#define CAIRN_PRINTF(fmtIndex, argIndex) __attribute__((format(printf, fmtIndex, argIndex)))
+#else
+#define CAIRN_PRINTF(fmtIndex, argIndex)
+#endif
+
 namespace Cairn {
 
 enum class LogLevel : int { Info = 0, Warning = 1, Error = 2 };
@@ -20,10 +28,10 @@ struct LogEntry {
 class Log {
 public:
     // Thread-safe printf-style logging.
-    static void Write(LogLevel level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
-    static void Info(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-    static void Warning(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
-    static void Error(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+    static void Write(LogLevel level, const char* fmt, ...) CAIRN_PRINTF(2, 3);
+    static void Info(const char* fmt, ...) CAIRN_PRINTF(1, 2);
+    static void Warning(const char* fmt, ...) CAIRN_PRINTF(1, 2);
+    static void Error(const char* fmt, ...) CAIRN_PRINTF(1, 2);
 
     // Returns entries with id greater than `afterId`, oldest first. The buffer
     // holds the most recent 1024 entries regardless of polling.
