@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -78,7 +79,13 @@ public:
     size_t size() const;
     Json& operator[](size_t i);
     const Json& operator[](size_t i) const;
-    const Json& operator[](int i) const { return (*this)[(size_t)i]; }
+    // Accepts any integral index -- `arr[i]`, `arr[n - 1]`, `arr[0u]` -- while
+    // keeping pointer keys away from these overloads. MSVC otherwise reports
+    // C2666 for obj["name"] because the integral candidates look similar.
+    template <typename I, std::enable_if_t<std::is_integral_v<I> && !std::is_same_v<I, bool>, int> = 0>
+    Json& operator[](I i) { return (*this)[static_cast<size_t>(i)]; }
+    template <typename I, std::enable_if_t<std::is_integral_v<I> && !std::is_same_v<I, bool>, int> = 0>
+    const Json& operator[](I i) const { return (*this)[static_cast<size_t>(i)]; }
     const Array& arrayItems() const;
 
     // Serializes to compact or indented text.
