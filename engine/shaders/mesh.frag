@@ -132,7 +132,9 @@ float sampleShadow(vec3 P, float viewDepth, float ndotl) {
     float refDepth = ndc.z * 0.5 + 0.5;
     float size = shadow.shadowParams.z;
     float fx = (ndc.x * 0.5 + 0.5) * size;
-    float fy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
+    // shadow.vert flips y before rasterising, so the lookup uses the raw
+    // NDC row. Flipping here as well would mirror every shadow.
+    float fy = (ndc.y * 0.5 + 0.5) * size;
     int ix = int(fx), iy = int(fy);
     float hits = 0.0, taps = 0.0;
     for (int dy = -1; dy <= 1; ++dy) {

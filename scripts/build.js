@@ -119,7 +119,10 @@ function buildRenderer() {
 
 // ---------------------------------------------------------------------------
 
-const target = process.argv[2] || 'all';
+// `--force` re-runs cmake configure; it is a flag, not a target, so it must
+// not be mistaken for one (it silently built nothing before).
+const rest = process.argv.slice(2).filter(a => !a.startsWith('-'));
+const target = rest[0] || 'all';
 fs.mkdirSync(buildOut, { recursive: true });
 
 if (target === 'engine' || target === 'all') buildEngine();
