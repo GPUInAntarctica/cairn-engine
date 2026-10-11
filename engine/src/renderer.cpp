@@ -41,27 +41,39 @@ public:
             for (int i = 0; i < count; ++i) f(i);
             return;
         }
-        // task_/jobCount_ are published atomically: a worker that is still
-        // finishing the previous epoch can never observe a half-written
-        // dispatch for the next one.
+        // task_ points at the caller's stack frame, so no worker may still be
+        // inside Work() when this returns: the next dispatch would overwrite
+        // it, and a straggler still looping would call into a destroyed
+        // std::function. Waiting for pending_ == 0 is not enough -- a worker
+        // that has already claimed its last index decrements pending_ and is
+        // still one fetch_add away from leaving the loop. So the wait also
+        // requires every worker to have left the dispatch loop (retired_).
+        const int workers = (int)threads_.size();
         task_.store(&f, std::memory_order_relaxed);
         jobCount_.store(count, std::memory_order_relaxed);
         next_.store(0, std::memory_order_relaxed);
         pending_.store(count, std::memory_order_relaxed);
+        retired_.store(0, std::memory_order_relaxed);
+        workerTotal_ = workers;
         {
             std::lock_guard<std::mutex> lock(m_);
             epoch_++;
         }
         wake_.notify_all();
-        Work();
+        Work(false);   // the caller participates but is not one of the workers
         std::unique_lock<std::mutex> lock(m_);
-        done_.wait(lock, [this] { return pending_.load(std::memory_order_acquire) == 0; });
+        done_.wait(lock, [this] {
+            return pending_.load(std::memory_order_acquire) == 0 &&
+                   retired_.load(std::memory_order_acquire) == workerTotal_;
+        });
     }
 
     int workerCount() const { return (int)threads_.size() + 1; }
 
 private:
-    void Work() {
+    // `countsRetirement` is false for the calling thread, which is not one of
+    // the `workerTotal_` workers ParallelFor waits on.
+    void Work(bool countsRetirement) {
         const auto* task = task_.load(std::memory_order_acquire);
         const int count = jobCount_.load(std::memory_order_acquire);
         while (true) {
@@ -73,6 +85,10 @@ private:
                 done_.notify_all();
             }
         }
+        if (countsRetirement && retired_.fetch_add(1, std::memory_order_acq_rel) + 1 == workerTotal_) {
+            std::lock_guard<std::mutex> lock(m_);
+            done_.notify_all();
+        }
     }
     void WorkerLoop() {
         uint64_t seen = 0;
@@ -83,7 +99,7 @@ private:
                 if (stop_) return;
                 seen = epoch_;
             }
-            Work();
+            Work(true);
         }
     }
 
@@ -94,6 +110,11 @@ private:
     std::atomic<int> jobCount_{0};
     std::atomic<int> next_{0};
     std::atomic<int> pending_{0};
+    // Workers that have left the dispatch loop for the current epoch.
+    std::atomic<int> retired_{0};
+    // Size of the pool for the in-flight dispatch; read by workers only after
+    // they observe the epoch bump, and never changes mid-epoch.
+    int workerTotal_ = 0;
     uint64_t epoch_ = 0;
     bool stop_ = false;
 };

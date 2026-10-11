@@ -104,8 +104,13 @@ app.whenReady().then(() => {
     // Headless smoke support: CAIRN_AUTOTEST=1 quits after the UI settles and
     // reports renderer console errors through the exit code.
     if (process.env.CAIRN_AUTOTEST) {
+        // console-message levels are 0 verbose, 1 info, 2 warning, 3 error.
+        // Only errors fail the harness: Electron's own security and
+        // deprecation warnings are printed as level 2, and treating those as
+        // failures makes every CI run red over noise the app cannot control.
         mainWindow.webContents.on('console-message', (_e, level, message) => {
-            if (level >= 2) console.error(`[renderer-error] ${message}`);
+            if (level >= 3) console.error(`[renderer-error] ${message}`);
+            else if (level === 2) console.warn(`[renderer-warn] ${message}`);
         });
         setTimeout(async () => {
             try {
