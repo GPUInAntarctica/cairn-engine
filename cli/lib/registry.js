@@ -209,6 +209,10 @@ function readJsonArg(str, key) {
     try {
         return JSON.parse(text);
     } catch (err) {
+        // Some settings also have names (tonemap aces, renderBackend vulkan).
+        // Hand the bare token to the command, which validates it and reports
+        // the accepted names -- a better error than "not valid JSON".
+        if (text.trim() && !/^[[{"]/.test(text.trim())) return text.trim();
         throw invalidArg(`--${key || 'value'} is not valid JSON: ${err.message}`);
     }
 }

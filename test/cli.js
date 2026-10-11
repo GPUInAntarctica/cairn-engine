@@ -26,7 +26,13 @@ function check(cond, label, extra) {
 }
 
 function batchEnv() {
-    return Object.assign({}, process.env, { CAIRN_PROJECT: '', CAIRN_HOME: path.join(scratch, 'home') });
+    // Software rasteriser on purpose: these checks assert CPU-exact pixel
+    // maths and the suite renders hundreds of frames. Every GPU frame blocks
+    // on a readback fence, which would saturate the GPU and stall the desktop.
+    return Object.assign({}, process.env, {
+        CAIRN_PROJECT: '', CAIRN_HOME: path.join(scratch, 'home'),
+        CAIRN_RENDER_BACKEND: 'software',
+    });
 }
 
 // Runs the CLI and returns {code, json, stdout, stderr}.
@@ -36,7 +42,7 @@ function run(args, options = {}) {
         input: options.input || '',
         cwd: options.cwd || scratch,
         // Keep the developer's real preferences store untouched.
-        env: Object.assign({}, process.env, {
+        env: Object.assign({}, batchEnv(), {
             CAIRN_PROJECT: '',
             CAIRN_HOME: path.join(scratch, 'home'),
         }),

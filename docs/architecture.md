@@ -27,6 +27,15 @@ Cairn 由四个主要部分组成：**C++ 引擎运行时**、**N-API 插件**�
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## 渲染后端
+
+两条光栅化路径共用同一个前端：`GatherScene()` 产出 `FrameDrawList`（不透明网格、2D 项、阴影投射体、调试线、灯光、级联矩阵），`FitCascadeSet()` 拟合阴影视锥，之后才分派到某个后端。
+
+- **Vulkan（默认）。** `RenderBackend::Auto` 在运行时探测到可用的 Vulkan 1.3 设备时走 GPU，否则静默回退软件；`RenderBackend::Vulkan` 强制 GPU，失败会记日志并回退。GPU 帧最后用 `vkCmdCopyImageToBuffer` 阻塞回读，因此宿主拿到的始终是一份可 blit 的像素。
+- **软件。** `RenderBackend::Software` 强制 CPU 光栅化，MSAA 与逐像素阴影统计只在这条路径上有定义；像素级断言的测试都固定走这条路径。
+
+场景设置 `renderBackend`（auto/vulkan/software）与 `msaa` 决定选择；环境变量 `CAIRN_RENDER_BACKEND` 可在进程级覆盖（测试套件用它把渲染固定在 CPU 上，避免数百次阻塞回读抢占显卡）。
+
 ## 模块
 
 | 模块 | 职责 |
@@ -35,7 +44,9 @@ Cairn 由四个主要部分组成：**C++ 引擎运行时**、**N-API 插件**�
 | `engine/src/json.*` | 保序 JSON 解析/序列化，用于场景、项目与编辑器通信 |
 | `engine/src/scene.cpp` | GameObject/Component 容器、Transform 父子链、延迟销毁、`.cscene` 读写 |
 | `engine/src/components.cpp` | 反射表：每个引擎组件暴露 属性名/类型/get/set，检视器与序列化共用 |
-| `engine/src/renderer.cpp` | 多线程软件光栅化：裁剪（六面体）、透视校正插值、Blinn-Phong、天空、雾、2D 精灵/文本、调试线 |
+| `engine/src/renderer.cpp` | 渲染前端 + 多线程软件光栅化：场景收集（`GatherScene`）、阴影视锥拟合（`FitCascadeSet`）、后端分发、裁剪（六面体）、透视校正插值、GGX、天空、雾、2D 精灵/文本、调试线 |
+| `engine/src/backend_vulkan.cpp` | Vulkan 1.3 GPU 后端（dynamic rendering + synchronization2，运行时 `dlopen`）：网格/精灵/线/天空管线、MSAA 解析、级联阴影数组、纹理与 mipmap 上传、后处理链、颜色与深度回读。`engine/src/vk_loader.h` 负责符号解析（设备级命令必须走 `vkGetDeviceProcAddr`） |
+| `engine/shaders/*.vert,frag` | GLSL 源，构建时由 `glslc` 编译为 SPIR-V 并嵌入库（`engine/cmake/embed_spirv.cmake`）；缺少 Vulkan 头文件或编译器时整个后端被裁掉 |
 | `engine/src/physics.cpp` | 半隐式欧拉积分，AABB/球碰撞（3D）与 XY 平面盒（2D），触发器事件回调脚本 |
 | `engine/src/script_host.cpp` | `dlopen` 玩法库、注册表查询、热重载（复制到唯一文件名避免加载器缓存） |
 | `engine/src/engine.cpp` | 门面：场景/资产/输入/播放状态机/拾取/投影，编辑器与 Player 共用 |

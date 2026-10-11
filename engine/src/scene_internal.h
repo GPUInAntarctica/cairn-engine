@@ -66,6 +66,12 @@ public:
     bool postFxaa = false;             // luma-edge AA over the final image
     // Texture cache budget in megabytes (LRU eviction above it).
     int textureMemoryMB = 256;
+    // Rasteriser selection: 0 = auto (prefer the GPU, fall back to software),
+    // 1 = force Vulkan, 2 = force software. Mirrors RenderBackend.
+    int renderBackend = 0;
+    // MSAA sample count for the GPU backend (1, 2, 4 or 8). The software
+    // rasteriser is single-sampled and ignores this.
+    int msaa = 4;
 
     uint32_t nextComponentId = 1;
     std::unordered_map<uint64_t, PairRecord> physicsPairs;  // triggers + contacts

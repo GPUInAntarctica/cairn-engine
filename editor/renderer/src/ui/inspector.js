@@ -134,6 +134,15 @@ export class Inspector {
         body.appendChild(numberRow(t('insp.postVignetteRadius'), () => s.postVignetteRadius, 0.01, v => set('postVignetteRadius', v)));
         body.appendChild(numberRow(t('insp.postVignetteSoftness'), () => s.postVignetteSoftness, 0.01, v => set('postVignetteSoftness', v)));
         body.appendChild(numberRow(t('insp.textureMemory'), () => s.textureMemoryMB, 8, v => set('textureMemoryMB', v)));
+
+        // Rasteriser. Auto prefers the GPU and falls back to software, so the
+        // same scene file keeps working on a machine with no usable Vulkan.
+        body.appendChild(enumRow(t('insp.renderBackend'), () => s.renderBackend,
+            ['auto', 'vulkan', 'software'].map(k => t('insp.renderBackend.' + k)),
+            v => { set('renderBackend', v); markDirty(); }));
+        body.appendChild(enumRow(t('insp.msaa'), () => [1, 2, 4, 8].indexOf(s.msaa),
+            [1, 2, 4, 8].map(k => `${k}x`),
+            v => { set('msaa', [1, 2, 4, 8][v]); markDirty(); }));
         el.appendChild(block);
     }
 

@@ -9,6 +9,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// The smoke test asserts CPU-exact pixels and renders every frame through a
+// blocking readback. Pin the software rasteriser so the suite never competes
+// with the desktop for the GPU.
+process.env.CAIRN_RENDER_BACKEND = 'software';
+
 const root = path.resolve(__dirname, '..');
 let failures = 0;
 function check(cond, label) {

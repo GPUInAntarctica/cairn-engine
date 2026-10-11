@@ -5,9 +5,12 @@
 #include "script_host.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdarg>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb/stb_image_write.h"
@@ -562,6 +565,26 @@ void Engine::EndFrameInput() {
     std::memcpy(input_.mouseWasDown, input_.mouseDown, sizeof(input_.mouseDown));
 }
 
+// CAIRN_RENDER_BACKEND=auto|vulkan|software changes the machine-level default
+// for the whole process — it only speaks for scenes left on Auto, so a project
+// that names a backend still gets the one it asked for. The test suites set it
+// to software: they assert CPU-exact pixel maths and render hundreds of frames,
+// and every GPU frame blocks on a readback fence, which starves the desktop
+// compositor on a busy machine.
+static RenderBackend EnvRenderBackend(RenderBackend fromScene) {
+    static const int override = [] {
+        const char* v = std::getenv("CAIRN_RENDER_BACKEND");
+        if (!v) return -1;
+        std::string s(v);
+        for (char& c : s) c = (char)std::tolower((unsigned char)c);
+        if (s == "vulkan" || s == "gpu") return (int)RenderBackend::Vulkan;
+        if (s == "software" || s == "cpu") return (int)RenderBackend::Software;
+        return -1;
+    }();
+    if (override < 0 || fromScene != RenderBackend::Auto) return fromScene;
+    return (RenderBackend)override;
+}
+
 bool Engine::BuildCameraView(CameraView* out) const {
     CameraComponent* cam = playing_ ? scene_->MainCamera() : nullptr;
     float aspect = (float)renderer_.target().width / std::max(1, renderer_.target().height);
@@ -619,6 +642,12 @@ bool Engine::BuildCameraView(CameraView* out) const {
     out->postBloomThreshold = std::clamp(scene_->postBloomThreshold, 0.0f, 1.0f);
     out->postFxaa = scene_->postFxaa;
     out->textureMemoryMB = std::clamp(scene_->textureMemoryMB, 8, 4096);
+    // Rasteriser selection and multisampling. Auto keeps the GPU when one is
+    // usable and degrades to software otherwise, so the same scene file runs
+    // everywhere; forcing software is what the CPU-exact tests use.
+    out->backend = (RenderBackend)std::clamp(scene_->renderBackend, 0, 2);
+    out->backend = EnvRenderBackend(out->backend);
+    out->msaa = scene_->msaa == 1 ? 1 : scene_->msaa == 2 ? 2 : scene_->msaa == 8 ? 8 : 4;
     return cam != nullptr;
 }
 

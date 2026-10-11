@@ -320,7 +320,7 @@ the document with `--image FILE`). `image.open`, `image.layer.*`,
 | `scene.new` | `--name` (string, default "Scene") | Create an empty in-memory scene. |
 | `scene.save` | `--file` (string) | Write the loaded scene back to a .cscene file. |
 | `scene.settings.get` | — | Read scene settings (gravity, ambient, background, fog, name). |
-| `scene.settings.set` | `--key` (enum, required, one of name \| gravity \| ambient \| background \| fogEnabled \| fogColor \| fogDensity \| tonemap \| exposure \| shadows \| shadowResolution \| shadowDistance \| postVignette \| postVignetteRadius \| postVignetteSoftness \| postContrast \| postSaturation \| postBloomStrength \| postBloomThreshold \| postFxaa \| textureMemoryMB)<br>`--value` (json, required) | Set one scene setting by name. |
+| `scene.settings.set` | `--key` (enum, required, one of name \| gravity \| ambient \| background \| fogEnabled \| fogColor \| fogDensity \| tonemap \| exposure \| shadows \| shadowResolution \| shadowDistance \| postVignette \| postVignetteRadius \| postVignetteSoftness \| postContrast \| postSaturation \| postBloomStrength \| postBloomThreshold \| postFxaa \| textureMemoryMB \| renderBackend \| msaa)<br>`--value` (json, required) | Set one scene setting by name. |
 | `scene.snapshot` | `--file` (path) | Capture the scene as JSON for later restore (undo helper). |
 | `scene.stats` | — | Renderer-side counters for the current scene (objects, mesh renderers, draw calls). |
 | `scene.tree` | `--filter` (string)<br>`--component` (string) | Full scene tree: every entity with transform, components and properties. |

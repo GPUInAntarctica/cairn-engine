@@ -8,6 +8,8 @@
 | CMake | ≥ 3.16 | 引擎库构建 |
 | C++ 编译器 | C++20 | g++ ≥ 11 / clang++ / MSVC 2019+ |
 | Electron | 自动安装 | 编辑器与 Player |
+| Vulkan 头文件 | 可选 | GPU 后端；缺失时自动关闭，引擎仍可软件渲染 |
+| `glslc` | 可选 | 把 `engine/shaders/*.vert,frag` 编译为 SPIR-V 并嵌入库 |
 
 ## 构建 / Build
 
@@ -26,6 +28,18 @@ npm run build:engine # CMake → build/libcairn_engine.so
 npm run build:addon  # 插件 → build/cairn_engine_addon.node
 node scripts/build.js renderer  # 渲染端 → editor/renderer/dist/
 ```
+
+## GPU 渲染 / GPU rendering
+
+Vulkan 后端默认开启（`CAIRN_ENABLE_VULKAN=ON`），需要 Vulkan 头文件和 `glslc`。两者任一缺失时构建照常通过，只是 `VulkanBackendAvailable()` 返回 false，渲染固定走软件光栅化。
+
+```bash
+npm run build -- -DCAIRN_ENABLE_VULKAN=OFF   # 强制软件后端（无着色器编译）
+```
+
+运行时不需要链接 Vulkan loader：`libvulkan.so.1` 通过 `dlopen` 载入，设备级命令用 `vkGetDeviceProcAddr` 解析。后端要求 Vulkan 1.3（dynamic rendering + synchronization2 为硬性依赖），并且场景设置或环境变量 `CAIRN_RENDER_BACKEND=vulkan` 强制 GPU。
+
+GPU 帧以 `vkCmdCopyImageToBuffer` 阻塞回读结束，宿主拿到的仍是普通像素缓冲。批量渲染时用 `CAIRN_RENDER_BACKEND=software` 可以避免回读与显卡争用。
 
 ## 平台说明 / Platforms
 

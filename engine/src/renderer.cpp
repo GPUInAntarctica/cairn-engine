@@ -2,7 +2,9 @@
 
 #include "cairn/engine.h"
 #include "cairn/log.h"
+#include "backend_vulkan.h"
 #include "font_internal.h"
+#include "gpu_types.h"
 #include "scene_internal.h"
 
 #include <algorithm>
@@ -11,9 +13,6 @@
 #include <functional>
 
 namespace Cairn {
-
-// Maximum simultaneous lights evaluated per pixel.
-static constexpr size_t kMaxLights = 16;
 
 // ---------------------------------------------------------------------------
 // Small persistent worker pool for band-parallel rasterization.
@@ -155,43 +154,12 @@ struct RasterVert {
     Vec2 tuv;              // uv / w
 };
 
-struct MaterialGpu {
-    const Texture* albedo = nullptr;
-    Vec2 tiling{1, 1};
-    Color color{1, 1, 1, 1};
-    float specular = 0.5f;
-    float shininess = 32.0f;
-    float metallic = 0.0f;         // 0 dielectric, 1 metal
-    float roughness = -1.0f;       // <0 derives from shininess
-    float normalStrength = 1.0f;
-    Color emissive{0, 0, 0, 1};    // decoded to LINEAR at fill time
-    bool unlit = false;
-    const Texture* normalMap = nullptr;
-    bool pixelPerfect = false;
-    bool blend = false;        // alpha blend instead of opaque overwrite
-    bool spriteLighting = false;  // 2D lighting using normalMap / plain sprites
-    int cullMode = 1;          // 0 off, 1 back faces, 2 front faces
-    bool antialias = true;     // edge coverage antialiasing
-    bool frontFacing = true;   // resolved per polygon in EmitPolygon
-    bool castShadows = false;
-    bool receiveShadows = true;
-    bool depthOnly = false;    // shadow pass: write depth, skip shading
-};
+// Appends one world-space quad (six vertices) to the shared 2D list. Both
+// backends consume the result verbatim, so the winding and the derived plane
+// normal are decided here exactly once.
+uint32_t AppendQuad(FrameDrawList* list, const Vec3 world[4], const Vec2 uv[4]);
 
-struct GpuLight {
-    int type = 0;         // 0 directional, 1 point, 2 spot
-    Vec3 pos;
-    Vec3 dir{0, -1, 0};   // normalized, points from light toward scene
-    Color color{1, 1, 1};
-    float intensity = 1.0f;
-    float range = 15.0f;
-    float cosOuter = -1.0f;  // spot cone
-    float cosInner = -1.0f;
-    bool castShadows = false;
-    float shadowBias = 0.02f;
-};
-
-    struct ShadowSampler {
+struct ShadowSampler {
         bool enabled = false;
         float strength = 0.85f;
         int size = 1024;
@@ -231,7 +199,7 @@ struct Renderer::Impl {
     std::vector<float>* depth = nullptr;
 
     // Directional shadow cascades.
-    static constexpr int kMaxCascades = 4;
+    static constexpr int kMaxCascades = Cairn::kMaxCascades;
     int cascadeCount = 0;
     int cascadeSize = 1024;
     float cascadeSplits[kMaxCascades] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -249,6 +217,16 @@ struct Renderer::Impl {
     std::vector<std::shared_ptr<Texture>> liveTextures;
     float shadowStrength = 0.85f;
     Vec3 shadowToLight{0, 1, 0};    // towards the shadow-casting directional light
+    // Eye of each fitted cascade; the depth pass culls back faces against it.
+    Vec3 cascadeEye[kMaxCascades];
+    // Shared draw list for the frame plus the lazily created GPU backend. The
+    // Vulkan backend is only instantiated when a scene actually asks for it.
+    FrameDrawList drawList;
+    std::unique_ptr<VulkanBackend> vulkan;
+    bool vulkanProbed = false;
+    // World-space bounds of every shadow caster this frame, gathered once so
+    // the cascade fits can extend toward geometry outside the view slice.
+    std::vector<AABB> casterBounds;
 
     Impl() {
         int hw = (int)std::thread::hardware_concurrency();
@@ -455,17 +433,17 @@ struct Renderer::Impl {
 
     std::vector<ClipVert> xformScratch, polyScratch, clipScratch;
 
-    // Builds one screen-space quad (two triangles) from world corners.
-    void EmitQuad(const Vec3 world[4], const Vec2 uv[4], const MaterialGpu& mat) {
+    // Emits one quad (two triangles) from a shared 2D vertex range. The GPU
+    // backend uploads the same vertices verbatim, so the software path only has
+    // to project and clip them.
+    void EmitQuadVerts(const Vertex2D* q, const MaterialGpu& mat) {
         pendingMat = mat;
-        Vec3 normal = Vec3::Cross(world[1] - world[0], world[3] - world[0]).Normalized();
-        if (normal.LengthSq() < 1e-9f) normal = Vec3(0, 0, -1);
         ClipVert cv[4];
         for (int i = 0; i < 4; ++i) {
-            cv[i].world = world[i];
-            cv[i].clip = viewProj * Vec4(world[i], 1.0f);
-            cv[i].normal = normal;
-            cv[i].uv = uv[i];
+            cv[i].world = q[i].pos;
+            cv[i].clip = viewProj * Vec4(q[i].pos, 1.0f);
+            cv[i].normal = q[i].normal;
+            cv[i].uv = q[i].uv;
         }
         static const int quads[2][3] = {{0, 1, 2}, {0, 2, 3}};
         std::vector<ClipVert> clipped;
@@ -656,8 +634,34 @@ struct Renderer::Impl {
         return lightProj * lightView;
     }
 
-    void RenderShadowPass(Scene& scene, const GpuLight& light, const CameraView& cam) {
+    // Fits every cascade to its view-frustum slice. Shared by both backends:
+    // only the depth rendering afterwards differs. Results land in the Impl
+    // fields the software sampler reads and are mirrored into `list` for the
+    // GPU backend, which rasterizes the maps itself.
+    void FitCascadeSet(FrameDrawList& list, const CameraView& cam) {
+        cascadeCount = std::clamp(cam.shadowCascades, 0, (int)kMaxCascades);
+        cascadeSize = std::clamp(cam.shadowResolution, 256, 4096);
+        shadowStrength = std::clamp(cam.shadowStrength, 0.0f, 1.0f);
+        list.cascadeCount = cascadeCount;
+        list.cascadeSize = cascadeSize;
+        list.shadowStrength = shadowStrength;
         if (cascadeCount <= 0) return;
+
+        const GpuLight* sun = nullptr;
+        for (const GpuLight& li : list.lights) {
+            if (li.type == 0 && li.castShadows) {
+                sun = &li;
+                break;
+            }
+        }
+        if (!sun) {
+            // Cascades configured but no directional light casts this frame:
+            // keep the sampler off so stale maps can never darken pixels.
+            cascadeCount = 0;
+            list.cascadeCount = 0;
+            return;
+        }
+        const GpuLight& light = *sun;
         const float nearZ = std::max(cam.nearPlane, 0.05f);
         // Cascades only cover the shadow distance: including the whole far
         // plane would stretch the depth range and destroy precision.
@@ -668,19 +672,27 @@ struct Renderer::Impl {
         // Direction towards the light, for the slope-scaled depth bias.
         shadowToLight = -light.dir.Normalized();
         if (shadowToLight.LengthSq() < 1e-9f) shadowToLight = Vec3(0, 1, 0);
+        list.shadowToLight = shadowToLight;
 
-        // World-space bounds of every caster, gathered once: the cascade fits
-        // extend toward this geometry so off-screen occluders still shadow.
-        std::vector<AABB> casterBounds;
-        for (const auto& go : scene.objects) {
-            if (!go->ActiveInHierarchy()) continue;
-            auto* mr = go->GetComponent<MeshRenderer>();
-            if (!mr || !mr->enabled || !mr->castShadows) continue;
-            std::shared_ptr<Mesh> mesh = ResolveMesh(mr);
-            if (!mesh) continue;
-            casterBounds.push_back(mesh->Bounds().Transformed(go->transform().WorldMatrix()));
+        for (int c = 0; c < cascadeCount; ++c) {
+            // Cascade c covers [splits[c-1], splits[c]] - the same slice
+            // SampleShadow selects with viewDepth <= splits[c].
+            const float sliceNear = (c == 0) ? nearZ : cascadeSplits[c - 1];
+            cascadeMatrix[c] = FitCascade(light, cam.view, sliceNear, cascadeSplits[c], cascadeSize,
+                                          &casterBounds);
+            cascadeRange[c] = std::max(1.0f, lastCascadeRange);
+            cascadeTexel[c] = std::max(1e-4f, lastCascadeTexel);
+            cascadeEye[c] = lightEye;
+            list.cascadeMatrix[c] = cascadeMatrix[c];
+            list.cascadeSplits[c] = cascadeSplits[c];
+            list.cascadeRange[c] = cascadeRange[c];
+            list.cascadeTexel[c] = cascadeTexel[c];
         }
+    }
 
+    // Software depth pass: rasterizes the fitted cascades into CPU float maps.
+    void RenderShadowPassSoftware(const FrameDrawList& list) {
+        if (cascadeCount <= 0) return;
         // Save the main frame state so the depth-only pass can reuse the
         // rasterizer with a different target.
         std::vector<uint8_t>* savedColor = color;
@@ -692,14 +704,6 @@ struct Renderer::Impl {
         invertViewProj = viewProj.Inverted();
         for (int c = 0; c < cascadeCount; ++c) {
             cascadeDepth[c].assign((size_t)cascadeSize * cascadeSize, 1.0f);
-            // Cascade c covers [splits[c-1], splits[c]] — the same slice
-            // SampleShadow selects with viewDepth <= splits[c].
-            const float sliceNear = (c == 0) ? nearZ : cascadeSplits[c - 1];
-            cascadeMatrix[c] = FitCascade(light, cam.view, sliceNear, cascadeSplits[c],
-                                          cascadeSize, &casterBounds);
-            cascadeRange[c] = std::max(1.0f, lastCascadeRange);
-            cascadeTexel[c] = std::max(1e-4f, lastCascadeTexel);
-
             W = H = cascadeSize;
             color = &shadowScratch;
             depth = &cascadeDepth[c];
@@ -707,23 +711,18 @@ struct Renderer::Impl {
             // Face culling inside EmitPolygon uses camPos: it must sit on the
             // light's side. The light node's own position is arbitrary for a
             // directional light, so use the fitted light-space eye instead.
-            camPos = lightEye;
+            camPos = cascadeEye[c];
 
             triVerts.clear();
             triMats.clear();
-            for (const auto& go : scene.objects) {
-                if (!go->ActiveInHierarchy()) continue;
-                auto* mr = go->GetComponent<MeshRenderer>();
-                if (!mr || !mr->enabled || !mr->castShadows) continue;
-                std::shared_ptr<Mesh> mesh = ResolveMesh(mr);
-                if (!mesh) continue;
-                AABB worldBounds = mesh->Bounds().Transformed(go->transform().WorldMatrix());
-                if (!IntersectsShadowVolume(cascadeMatrix[c], worldBounds)) continue;
+            for (const auto& caster : list.casters) {
+                if (!caster.mesh) continue;
+                if (!IntersectsShadowVolume(cascadeMatrix[c], caster.bounds)) continue;
                 MaterialGpu mat;
-                mat.cullMode = (int)mr->cullMode;
+                mat.cullMode = caster.cullMode;
                 mat.castShadows = true;
                 mat.depthOnly = true;
-                EmitMesh(*mesh, go->transform().WorldMatrix(), mat);
+                EmitMesh(*caster.mesh, caster.model, mat);
             }
             const int jobs = (int)(triVerts.size() / 3);
             RasterizeParallel(0, jobs);
@@ -1445,7 +1444,9 @@ struct Renderer::Impl {
         }
     }
 
-    void DrawTextQuads(const TextRenderer& text, const Mat4& world) {
+    // Builds one glyph quad per character straight into the shared 2D vertex
+    // list. The atlas has to stay alive for the frame, so the caller pins it.
+    void AppendTextQuads(const TextRenderer& text, const Mat4& world, FrameDrawList* list) {
         const BitmapFont& font = BitmapFont::Get();
         const Texture* atlas = font.atlas();
         if (!atlas) return;
@@ -1462,27 +1463,267 @@ struct Renderer::Impl {
         mat.pixelPerfect = true;
         mat.cullMode = 0;    // text is visible from both sides
         mat.antialias = false;
-        Vec2 uv[4];
+        const uint32_t first = (uint32_t)list->verts2D.size();
         float pen = x0;
         for (unsigned char ch : text.text) {
             GlyphRect g;
             font.Glyph(ch, &g);
             float gw = (float)BitmapFont::kGlyphW * scale;
             float gh = (float)BitmapFont::kGlyphH * scale;
-            Vec3 w0 = world.TransformPoint(Vec3(pen, 0, 0));
-            Vec3 w1 = world.TransformPoint(Vec3(pen + gw, 0, 0));
-            Vec3 w2 = world.TransformPoint(Vec3(pen + gw, gh, 0));
-            Vec3 w3 = world.TransformPoint(Vec3(pen, gh, 0));
-            Vec3 quad[4] = {w0, w1, w2, w3};
-            uv[0] = {g.u, g.v};
-            uv[1] = {g.u + g.w, g.v};
-            uv[2] = {g.u + g.w, g.v + g.h};
-            uv[3] = {g.u, g.v + g.h};
-            EmitQuad(quad, uv, mat);
+            Vec3 quad[4] = {world.TransformPoint(Vec3(pen, 0, 0)),
+                            world.TransformPoint(Vec3(pen + gw, 0, 0)),
+                            world.TransformPoint(Vec3(pen + gw, gh, 0)),
+                            world.TransformPoint(Vec3(pen, gh, 0))};
+            Vec2 uv[4] = {{g.u, g.v}, {g.u + g.w, g.v}, {g.u + g.w, g.v + g.h}, {g.u, g.v + g.h}};
+            AppendQuad(list, quad, uv);
             pen += (float)g.advance * scale;
         }
+        if (list->verts2D.size() > first) {
+            FrameDrawList::Item2D item;
+            item.mat = mat;
+            item.firstVert = first;
+            item.vertCount = (uint32_t)list->verts2D.size() - first;
+            list->items2D.push_back(item);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Scene gather: the backend-independent front end.
+    //
+    // One walk of the Scene produces the light set, the frustum-culled 3D
+    // draws, the depth-sorted 2D quads and the shadow casters. Everything
+    // after this point is pure execution: the software rasterizer walks the
+    // same list through its clipping front end, the Vulkan backend uploads it
+    // verbatim.
+    struct SceneGather {
+        int meshesSeen = 0;
+        int frustumCulled = 0;
+        int drawCalls2D = 0;
+        int lightCount = 0;
+        int clipRejected = 0;   // meshes that produced no drawable triangles
+    };
+
+    void CollectLights(const Scene& scene, std::vector<GpuLight>* out) {
+        out->clear();
+        bool warned = false;
+        for (const auto& go : scene.objects) {
+            if (!go->ActiveInHierarchy()) continue;
+            auto* light = go->GetComponent<LightComponent>();
+            if (!light || !light->enabled) continue;   // disabled lights emit nothing
+            GpuLight gl;
+            gl.type = (int)light->type;
+            gl.pos = go->transform().WorldPosition();
+            gl.dir = go->transform().Forward().Normalized();
+            if (gl.dir.LengthSq() < 1e-9f) gl.dir = Vec3(0, -1, 0);
+            gl.color = light->color;
+            gl.intensity = light->intensity;
+            gl.range = light->range;
+            if ((int)light->type == (int)LightComponent::LightType::Spot) {
+                gl.type = 2;
+                gl.cosOuter = std::cos(Radians(std::clamp(light->spotAngle, 1.0f, 89.0f)));
+                gl.cosInner =
+                    std::cos(Radians(std::clamp(light->spotInnerAngle, 0.5f, light->spotAngle)));
+            }
+            gl.castShadows = light->castShadows;
+            gl.shadowBias = light->shadowBias;
+            out->push_back(gl);
+            if (out->size() >= kMaxLights) {
+                if (!warned) {
+                    warned = true;
+                    Log::Warning("light limit (%d) reached; further lights are ignored this frame",
+                                 (int)kMaxLights);
+                }
+                break;
+            }
+        }
+    }
+
+    void GatherScene(Scene& scene, const Frustum& frustum, TextureLibrary& textures,
+                     FrameDrawList* list, SceneGather* stats) {
+        // ---- Opaque 3D drawables, plus the caster set for the shadow fits.
+        for (const auto& go : scene.objects) {
+            if (!go->ActiveInHierarchy()) continue;
+            auto* mr = go->GetComponent<MeshRenderer>();
+            if (!mr || !mr->enabled) continue;   // disabling the component hides the mesh
+            stats->meshesSeen++;
+            std::shared_ptr<Mesh> mesh = ResolveMesh(mr);
+            if (!mesh) continue;
+            const Mat4 world = go->transform().WorldMatrix();
+            const AABB worldBounds = mesh->Bounds().Transformed(world);
+            if (mr->castShadows) {
+                FrameDrawList::ShadowCaster caster;
+                caster.mesh = mesh;
+                caster.model = world;
+                caster.bounds = worldBounds;
+                caster.cullMode = (int)mr->cullMode;
+                list->casters.push_back(std::move(caster));
+            }
+            // Frustum culling: a mesh whose world bounds miss the view is
+            // skipped before any vertex is transformed or clipped.
+            if (!frustum.IntersectsAABB(worldBounds)) {
+                stats->frustumCulled++;
+                continue;
+            }
+            MaterialGpu mat;
+            mat.color = mr->albedoColor;
+            mat.tiling = mr->tiling;
+            mat.specular = mr->specular;
+            mat.shininess = mr->shininess;
+            mat.metallic = mr->metallic;
+            mat.roughness = mr->roughness;
+            mat.normalStrength = std::max(0.0f, mr->normalStrength);
+            // Emissive is authored in sRGB like every other color; light it as
+            // data.
+            mat.emissive = Color(SrgbToLinearFast(mr->emissiveColor.r),
+                                 SrgbToLinearFast(mr->emissiveColor.g),
+                                 SrgbToLinearFast(mr->emissiveColor.b), 1.0f);
+            mat.unlit = mr->unlit;
+            mat.cullMode = (int)mr->cullMode;
+            mat.antialias = mr->antialias;
+            mat.castShadows = mr->castShadows;
+            mat.receiveShadows = mr->receiveShadows;
+            if (!mr->albedoTexturePath.empty()) {
+                std::shared_ptr<Texture> tex = textures.Get(EngineResolvePath(mr->albedoTexturePath));
+                list->liveTextures.push_back(tex);   // pin: eviction must not free it
+                mat.albedo = tex.get();
+                mat.albedoSRGB = tex && tex->isSRGB();
+            }
+            if (!mr->normalMapPath.empty()) {
+                // Normal maps are data: sample as linear (asset .meta import
+                // settings will own color-space selection later).
+                std::shared_ptr<Texture> tex =
+                    textures.Get(EngineResolvePath(mr->normalMapPath), /*srgb=*/false);
+                list->liveTextures.push_back(tex);
+                mat.normalMap = tex.get();
+            }
+            if (mesh->indices.size() < 3) {
+                stats->clipRejected++;
+                continue;
+            }
+            FrameDrawList::OpaqueDraw draw;
+            draw.mesh = mesh;
+            draw.model = world;
+            draw.mat = mat;
+            list->opaque.push_back(std::move(draw));
+        }
+
+        // ---- 2D pass: sprites + text, sorted by layer then depth (far first).
+        struct DrawItem {
+            int sortingLayer;
+            int order;
+            float depthKey;   // distance along the view direction (far first)
+            bool isText;
+            GameObject* go;
+        };
+        std::vector<DrawItem> items;
+        for (const auto& go : scene.objects) {
+            if (!go->ActiveInHierarchy()) continue;
+            const bool sprite =
+                go->GetComponent<SpriteRenderer>() && go->GetComponent<SpriteRenderer>()->enabled;
+            const bool text = go->GetComponent<TextRenderer>() && go->GetComponent<TextRenderer>()->enabled;
+            if (!sprite && !text) continue;
+            // Sprite/text bounds come from their component size; text uses a
+            // rough estimate that only has to be conservative.
+            AABB bounds;
+            if (sprite) {
+                auto* sp = go->GetComponent<SpriteRenderer>();
+                float w = sp->pixelsPerUnit * 0.5f;
+                bounds = AABB(Vec3(-w, -w, 0), Vec3(w, w, 0));
+            } else {
+                auto* tr = go->GetComponent<TextRenderer>();
+                float w = tr->fontSize * 0.6f * static_cast<float>(std::max<size_t>(1, tr->text.size()));
+                bounds = AABB(Vec3(-w, 0, 0), Vec3(w, tr->fontSize, 0));
+            }
+            if (!frustum.IntersectsAABB(bounds.Transformed(go->transform().WorldMatrix()))) {
+                stats->frustumCulled++;
+                continue;
+            }
+            // Depth is measured along the view direction so transparents sort
+            // correctly for any camera orientation (world Z only worked for a
+            // camera looking down an axis).
+            const float viewDepth =
+                Vec3::Dot(go->transform().WorldPosition() - list->camPos, list->camForward);
+            if (sprite) {
+                auto* sp = go->GetComponent<SpriteRenderer>();
+                items.push_back({sp->sortingLayer, sp->orderInLayer, viewDepth, false, go.get()});
+            } else {
+                auto* tr = go->GetComponent<TextRenderer>();
+                items.push_back({tr->sortingLayer, tr->orderInLayer, viewDepth, true, go.get()});
+            }
+        }
+        std::sort(items.begin(), items.end(), [](const DrawItem& a, const DrawItem& b) {
+            if (a.sortingLayer != b.sortingLayer) return a.sortingLayer < b.sortingLayer;
+            if (a.order != b.order) return a.order < b.order;
+            return a.depthKey > b.depthKey;  // far first
+        });
+
+        for (const DrawItem& item : items) {
+            GameObject* go = item.go;
+            if (!item.isText) {
+                auto* sr = go->GetComponent<SpriteRenderer>();
+                std::shared_ptr<Texture> tex;
+                if (!sr->texturePath.empty()) tex = textures.Get(EngineResolvePath(sr->texturePath));
+                else tex = textures.GetBuiltin("checker");
+                if (!tex) continue;
+                list->liveTextures.push_back(tex);  // pin against LRU eviction mid-frame
+                float w = tex->width() / std::max(1.0f, sr->pixelsPerUnit);
+                float h = tex->height() / std::max(1.0f, sr->pixelsPerUnit);
+                if (sr->flipX) w = -w;
+                if (sr->flipY) h = -h;
+                MaterialGpu mat;
+                mat.albedo = tex.get();
+                mat.albedoSRGB = tex->isSRGB();
+                mat.color = sr->color;
+                mat.blend = true;
+                mat.spriteLighting = true;
+                mat.pixelPerfect = sr->pixelPerfect;
+                mat.cullMode = 0;    // a flipped sprite must not vanish
+                mat.antialias = !sr->pixelPerfect;
+                if (!sr->normalMapPath.empty()) {
+                    std::shared_ptr<Texture> nrm =
+                        textures.Get(EngineResolvePath(sr->normalMapPath), /*srgb=*/false);
+                    list->liveTextures.push_back(nrm);
+                    mat.normalMap = nrm.get();
+                }
+                Vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+                Mat4 world = go->transform().WorldMatrix();
+                Vec3 q[4];
+                q[0] = world.TransformPoint(Vec3(-w * 0.5f, -h * 0.5f, 0));
+                q[1] = world.TransformPoint(Vec3(w * 0.5f, -h * 0.5f, 0));
+                q[2] = world.TransformPoint(Vec3(w * 0.5f, h * 0.5f, 0));
+                q[3] = world.TransformPoint(Vec3(-w * 0.5f, h * 0.5f, 0));
+                FrameDrawList::Item2D out;
+                out.mat = mat;
+                out.firstVert = AppendQuad(list, q, uv);
+                out.vertCount = 6;
+                list->items2D.push_back(out);
+            } else {
+                auto* tr = go->GetComponent<TextRenderer>();
+                AppendTextQuads(*tr, go->transform().WorldMatrix(), list);
+            }
+        }
+        stats->drawCalls2D = (int)items.size();
     }
 };
+
+// Appends one world-space quad (six vertices) to the shared 2D list. Both
+// backends consume the result verbatim, so the winding and the derived plane
+// normal are decided here exactly once.
+uint32_t AppendQuad(FrameDrawList* list, const Vec3 world[4], const Vec2 uv[4]) {
+    Vec3 normal = Vec3::Cross(world[1] - world[0], world[3] - world[0]).Normalized();
+    if (normal.LengthSq() < 1e-9f) normal = Vec3(0, 0, -1);
+    const uint32_t first = (uint32_t)list->verts2D.size();
+    static const int kOrder[6] = {0, 1, 2, 0, 2, 3};
+    for (int k = 0; k < 6; ++k) {
+        Vertex2D v;
+        v.pos = world[kOrder[k]];
+        v.normal = normal;
+        v.uv = uv[kOrder[k]];
+        v.color = Color(1, 1, 1, 1);
+        list->verts2D.push_back(v);
+    }
+    return first;
+}
 
 // ---------------------------------------------------------------------------
 // Renderer public API.
@@ -1529,129 +1770,99 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
                    SrgbToLinearFast(cam.fogColor.b), 1.0f};
     R.fogDensity = cam.fogDensity;
 
-    R.ClearAndSky(cam);
-
-    // Lights.
-    R.lights.clear();
-    bool lightLimitWarned = false;
-    for (const auto& go : scene.objects) {
-        if (!go->ActiveInHierarchy()) continue;
-        auto* light = go->GetComponent<LightComponent>();
-        if (!light || !light->enabled) continue;   // disabled lights emit nothing
-        GpuLight gl;
-        gl.type = (int)light->type;
-        gl.pos = go->transform().WorldPosition();
-        gl.dir = go->transform().Forward().Normalized();
-        if (gl.dir.LengthSq() < 1e-9f) gl.dir = Vec3(0, -1, 0);
-        gl.color = light->color;
-        gl.intensity = light->intensity;
-        gl.range = light->range;
-        if ((int)light->type == (int)LightComponent::LightType::Spot) {
-            gl.type = 2;
-            gl.cosOuter = std::cos(Radians(std::clamp(light->spotAngle, 1.0f, 89.0f)));
-            gl.cosInner = std::cos(Radians(std::clamp(light->spotInnerAngle, 0.5f, light->spotAngle)));
-        }
-        gl.castShadows = light->castShadows;
-        gl.shadowBias = light->shadowBias;
-        R.lights.push_back(gl);
-        if (R.lights.size() >= kMaxLights) {
-            if (!lightLimitWarned) {
-                lightLimitWarned = true;
-                Log::Warning("light limit (%d) reached; further lights are ignored this frame", kMaxLights);
-            }
-            break;
-        }
-    }
-
-    Frustum frustum = Frustum::FromViewProj(R.viewProj);
-
-    // Directional shadows: pick the first shadow-casting directional light,
-    // fit the cascades to the view frustum and render depth only.
-    const int prevShadowSize = R.cascadeSize;
-    R.cascadeCount = std::clamp(cam.shadowCascades, 0, (int)Renderer::Impl::kMaxCascades);
-    R.cascadeSize = std::clamp(cam.shadowResolution, 256, 4096);
-    R.shadowStrength = std::clamp(cam.shadowStrength, 0.0f, 1.0f);
-    if (R.cascadeSize != prevShadowSize) {
-        R.shadowScratch.assign((size_t)R.cascadeSize * R.cascadeSize * 4, 0);
-    }
-    if (R.cascadeCount > 0) {
-        R.cascadeDepth.resize((size_t)Renderer::Impl::kMaxCascades);
-        if (R.shadowScratch.size() < (size_t)R.cascadeSize * R.cascadeSize * 4) {
-            R.shadowScratch.assign((size_t)R.cascadeSize * R.cascadeSize * 4, 0);
-        }
-        const GpuLight* sun = nullptr;
-        for (const GpuLight& li : R.lights) {
-            if (li.type == 0 && li.castShadows) { sun = &li; break; }
-        }
-        if (sun) {
-            R.RenderShadowPass(scene, *sun, cam);
-        } else {
-            // Cascades configured but no directional light casts this frame:
-            // keep the sampler off so stale maps can never darken pixels.
-            R.cascadeCount = 0;
-        }
-    }
-    R.shadows = R.shadowSampler();  // dir/bias are filled in by RenderShadowPass
-    R.shadowedPixels.store(0, std::memory_order_relaxed);
-
     MeshLibrary& meshes = EngineMeshLibrary();
     TextureLibrary& textures = EngineTextureLibrary();
     // Byte budget from the scene setting; eviction is LRU over cached files.
     textures.SetBudgetBytes((size_t)std::max(1, cam.textureMemoryMB) << 20);
-    // Textures referenced this frame are pinned here: MaterialGpu stores raw
-    // pointers, so an LRU eviction mid-frame must never destroy the underlying
-    // Texture before RasterizeParallel has finished sampling it.
-    R.liveTextures.clear();
+
+    // ---- Shared front end: one walk of the scene, one draw list.
+    FrameDrawList& list = R.drawList;
+    list = FrameDrawList{};
+    list.cam = &cam;
+    list.width = target_.width;
+    list.height = target_.height;
+    list.viewProj = R.viewProj;
+    list.camPos = R.camPos;
+    list.camRight = R.camRight;
+    list.camUp = R.camUp;
+    list.camForward = R.camForward;
+    list.ortho = R.ortho;
+    list.tanHalfFov = R.tanHalfFov;
+    list.aspect = R.aspect;
+    list.orthoSize = R.orthoSize;
+    list.lines = overlayLines;
+
+    R.CollectLights(scene, &list.lights);
+    Impl::SceneGather gather;
+    R.GatherScene(scene, Frustum::FromViewProj(R.viewProj), textures, &list, &gather);
+    gather.lightCount = (int)list.lights.size();
+
+    // Cascade fitting is shared too; only the depth rendering differs.
+    R.casterBounds.clear();
+    R.casterBounds.reserve(list.casters.size());
+    for (const auto& caster : list.casters) R.casterBounds.push_back(caster.bounds);
+    R.FitCascadeSet(list, cam);
+
+    // ---- Backend selection. `Auto` prefers the GPU and degrades silently to
+    // software; an explicit Vulkan request logs why when it cannot be honoured.
+    const bool vulkanWanted = cam.backend == RenderBackend::Vulkan ||
+                              (cam.backend == RenderBackend::Auto && VulkanBackendAvailable());
+    if (vulkanWanted && !R.vulkan) {
+        std::string error;
+        auto backend = std::make_unique<VulkanBackend>();
+        if (backend->Initialize(&error)) {
+            R.vulkan = std::move(backend);
+        } else if (cam.backend == RenderBackend::Vulkan) {
+            Log::Warning("render backend forced to Vulkan but it is unavailable (%s); using software",
+                         error.c_str());
+        }
+    }
+    if (R.vulkan && vulkanWanted) {
+        RenderStats stats;
+        R.vulkan->RenderFrame(list, &target_, &stats, cam.msaa);
+        stats.meshesSeen = gather.meshesSeen;
+        stats.clipRejected = gather.clipRejected;
+        stats.frustumCulled = gather.frustumCulled;
+        stats.drawCalls2D = gather.drawCalls2D;
+        stats.lightCount = gather.lightCount;
+        if (stats.backend == nullptr || std::string(stats.backend) != "vulkan") {
+            // The backend bailed out mid-frame; fall through to software so the
+            // host still gets a frame instead of the previous image.
+            Log::Warning("Vulkan backend could not render this frame; falling back to software");
+            R.vulkan.reset();
+        } else {
+            return stats;
+        }
+    }
+
+    // ---- Software backend.
+    R.lights = list.lights;
+    R.ClearAndSky(cam);
+
+    const int prevShadowSize = R.cascadeSize;
+    if (R.cascadeSize != prevShadowSize ||
+        R.shadowScratch.size() < (size_t)R.cascadeSize * R.cascadeSize * 4) {
+        R.shadowScratch.assign((size_t)R.cascadeSize * R.cascadeSize * 4, 0);
+    }
+    if (R.cascadeCount > 0) {
+        R.cascadeDepth.resize((size_t)kMaxCascades);
+        R.RenderShadowPassSoftware(list);
+    }
+    R.shadows = R.shadowSampler();
+    R.shadowedPixels.store(0, std::memory_order_relaxed);
+    // Textures referenced this frame are pinned in the draw list; the software
+    // rasterizer reads them through the same MaterialGpu pointers.
+    R.liveTextures = list.liveTextures;
 
     R.triVerts.clear();
     R.triMats.clear();
 
     // ---- Opaque 3D drawables.
-    int meshesSeen = 0, clipRejected = 0, frustumCulled = 0;
-    for (const auto& go : scene.objects) {
-        if (!go->ActiveInHierarchy()) continue;
-        auto* mr = go->GetComponent<MeshRenderer>();
-        if (!mr || !mr->enabled) continue;   // disabling the component hides the mesh
-        meshesSeen++;
-        std::shared_ptr<Mesh> mesh = R.ResolveMesh(mr);
-        if (!mesh) continue;
-        const Mat4 world = go->transform().WorldMatrix();
-        // Frustum culling: a mesh whose world bounds miss the view is skipped
-        // before any vertex is transformed or clipped.
-        if (!frustum.IntersectsAABB(mesh->Bounds().Transformed(world))) {
-            frustumCulled++;
-            continue;
-        }
-        MaterialGpu mat;
-        mat.color = mr->albedoColor;
-        mat.tiling = mr->tiling;
-        mat.specular = mr->specular;
-        mat.shininess = mr->shininess;
-        mat.metallic = mr->metallic;
-        mat.roughness = mr->roughness;
-        mat.normalStrength = std::max(0.0f, mr->normalStrength);
-        // Emissive is authored in sRGB like every other color; light it as data.
-        mat.emissive = Color(SrgbToLinearFast(mr->emissiveColor.r), SrgbToLinearFast(mr->emissiveColor.g),
-                             SrgbToLinearFast(mr->emissiveColor.b), 1.0f);
-        mat.unlit = mr->unlit;
-        mat.cullMode = (int)mr->cullMode;
-        mat.antialias = mr->antialias;
-        mat.castShadows = mr->castShadows;
-        mat.receiveShadows = mr->receiveShadows;
-        if (!mr->albedoTexturePath.empty()) {
-            std::shared_ptr<Texture> tex = textures.Get(EngineResolvePath(mr->albedoTexturePath));
-            R.liveTextures.push_back(tex);   // pin: eviction must not free it mid-frame
-            mat.albedo = tex.get();
-        }
-        if (!mr->normalMapPath.empty()) {
-            // Normal maps are data: sample as linear (asset .meta import
-            // settings will own color-space selection later).
-            std::shared_ptr<Texture> tex = textures.Get(EngineResolvePath(mr->normalMapPath), /*srgb=*/false);
-            R.liveTextures.push_back(tex);
-            mat.normalMap = tex.get();
-        }
+    int clipRejected = 0;
+    for (const auto& draw : list.opaque) {
+        if (!draw.mesh) continue;
         size_t before = R.triVerts.size();
-        R.EmitMesh(*mesh, world, mat);
+        R.EmitMesh(*draw.mesh, draw.model, draw.mat);
         if (R.triVerts.size() == before) clipRejected++;
     }
 
@@ -1659,94 +1870,14 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
     const int jobCount = (int)(R.triVerts.size() / 3);
     R.RasterizeParallel(0, jobCount);
 
-    // ---- 2D pass: sprites + text, sorted by layer then depth (far first).
-    struct DrawItem {
-        int sortingLayer;
-        int order;
-        float depthKey;   // distance along the view direction (far first)
-        bool isText;
-        GameObject* go;
-    };
-    std::vector<DrawItem> items;
-    for (const auto& go : scene.objects) {
-        if (!go->ActiveInHierarchy()) continue;
-        const bool sprite = go->GetComponent<SpriteRenderer>() && go->GetComponent<SpriteRenderer>()->enabled;
-        const bool text = go->GetComponent<TextRenderer>() && go->GetComponent<TextRenderer>()->enabled;
-        if (!sprite && !text) continue;
-        // Sprite/text bounds come from their component size; text uses a rough
-        // estimate that only has to be conservative.
-        AABB bounds;
-        if (sprite) {
-            auto* sp = go->GetComponent<SpriteRenderer>();
-            float w = sp->pixelsPerUnit * 0.5f;
-            bounds = AABB(Vec3(-w, -w, 0), Vec3(w, w, 0));
-        } else {
-            auto* tr = go->GetComponent<TextRenderer>();
-            float w = tr->fontSize * 0.6f * static_cast<float>(std::max<size_t>(1, tr->text.size()));
-            bounds = AABB(Vec3(-w, 0, 0), Vec3(w, tr->fontSize, 0));
-        }
-        if (!frustum.IntersectsAABB(bounds.Transformed(go->transform().WorldMatrix()))) {
-            frustumCulled++;
-            continue;
-        }
-        // Depth is measured along the view direction so transparents sort
-        // correctly for any camera orientation (world Z only worked for a
-        // camera looking down an axis).
-        const float viewDepth = Vec3::Dot(go->transform().WorldPosition() - R.camPos, R.camForward);
-        if (sprite) {
-            auto* sp = go->GetComponent<SpriteRenderer>();
-            items.push_back({sp->sortingLayer, sp->orderInLayer, viewDepth, false, go.get()});
-        } else {
-            auto* tr = go->GetComponent<TextRenderer>();
-            items.push_back({tr->sortingLayer, tr->orderInLayer, viewDepth, true, go.get()});
-        }
-    }
-    std::sort(items.begin(), items.end(), [](const DrawItem& a, const DrawItem& b) {
-        if (a.sortingLayer != b.sortingLayer) return a.sortingLayer < b.sortingLayer;
-        if (a.order != b.order) return a.order < b.order;
-        return a.depthKey > b.depthKey;  // far first
-    });
-
-    for (const DrawItem& item : items) {
-        GameObject* go = item.go;
-        // Sprites and text are rasterized immediately after their quads are
-        // emitted so layer sorting stays exact (clipped quads can fan out).
+    // ---- 2D pass: each item is rasterized immediately after its quads are
+    // emitted so the depth sort stays exact (clipped quads can fan out).
+    for (const auto& item : list.items2D) {
         size_t startIndex = R.triVerts.size();
-        if (!item.isText) {
-            auto* sr = go->GetComponent<SpriteRenderer>();
-            std::shared_ptr<Texture> tex;
-            if (!sr->texturePath.empty()) tex = textures.Get(EngineResolvePath(sr->texturePath));
-            else tex = textures.GetBuiltin("checker");
-            if (!tex) continue;
-            R.liveTextures.push_back(tex);  // pin against LRU eviction mid-frame
-            float w = tex->width() / std::max(1.0f, sr->pixelsPerUnit);
-            float h = tex->height() / std::max(1.0f, sr->pixelsPerUnit);
-            if (sr->flipX) w = -w;
-            if (sr->flipY) h = -h;
-            MaterialGpu mat;
-            mat.albedo = tex.get();
-            mat.color = sr->color;
-            mat.blend = true;
-            mat.spriteLighting = true;
-            mat.pixelPerfect = sr->pixelPerfect;
-            mat.cullMode = 0;    // a flipped sprite must not vanish
-            mat.antialias = !sr->pixelPerfect;
-            if (!sr->normalMapPath.empty()) {
-                std::shared_ptr<Texture> tex = textures.Get(EngineResolvePath(sr->normalMapPath), /*srgb=*/false);
-                R.liveTextures.push_back(tex);
-                mat.normalMap = tex.get();
-            }
-            Vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
-            Mat4 world = go->transform().WorldMatrix();
-            Vec3 q[4];
-            q[0] = world.TransformPoint(Vec3(-w * 0.5f, -h * 0.5f, 0));
-            q[1] = world.TransformPoint(Vec3(w * 0.5f, -h * 0.5f, 0));
-            q[2] = world.TransformPoint(Vec3(w * 0.5f, h * 0.5f, 0));
-            q[3] = world.TransformPoint(Vec3(-w * 0.5f, h * 0.5f, 0));
-            R.EmitQuad(q, uv, mat);
-        } else {
-            auto* tr = go->GetComponent<TextRenderer>();
-            R.DrawTextQuads(*tr, go->transform().WorldMatrix());
+        for (uint32_t v = 0; v < item.vertCount; v += 6) {
+            const Vertex2D* quad = list.verts2D.data() + item.firstVert + v;
+            if (v + 6 > item.vertCount) break;
+            R.EmitQuadVerts(quad, item.mat);
         }
         int from = (int)(startIndex / 3);
         int to = (int)(R.triVerts.size() / 3);
@@ -1763,14 +1894,15 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
     // the finished display-referred frame and single-threaded. Skipped
     // entirely when every effect is at its neutral default.
     RenderStats stats;
+    stats.backend = "software";
     stats.postPasses = R.RunPostChain(cam);
-    stats.drawCalls = jobCount + (int)items.size() + 1;
+    stats.drawCalls = jobCount + gather.drawCalls2D + 1;
     stats.triangles = jobCount;
-    stats.meshesSeen = meshesSeen;
+    stats.meshesSeen = gather.meshesSeen;
     stats.clipRejected = clipRejected;
-    stats.frustumCulled = frustumCulled;
-    stats.drawCalls2D = (int)items.size();
-    stats.lightCount = (int)R.lights.size();
+    stats.frustumCulled = gather.frustumCulled;
+    stats.drawCalls2D = gather.drawCalls2D;
+    stats.lightCount = gather.lightCount;
     stats.shadowedPixels = R.shadowedPixels.load(std::memory_order_relaxed);
     return stats;
 }

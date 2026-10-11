@@ -37,9 +37,14 @@ for (const [name, index] of Object.entries(MOUSE_BUTTONS)) MOUSE_BUTTON_INDEX[na
 const SCENE_SETTINGS = ['name', 'gravity', 'ambient', 'background', 'fogEnabled', 'fogColor', 'fogDensity',
     'tonemap', 'exposure', 'shadows', 'shadowResolution', 'shadowDistance',
     'postVignette', 'postVignetteRadius', 'postVignetteSoftness', 'postContrast', 'postSaturation',
-    'postBloomStrength', 'postBloomThreshold', 'postFxaa', 'textureMemoryMB'];
+    'postBloomStrength', 'postBloomThreshold', 'postFxaa', 'textureMemoryMB',
+    'renderBackend', 'msaa'];
 
 const TONEMAPS = { none: 0, reinhard: 1, aces: 2, filmic: 3 };
+
+// Scene setting renderBackend: auto prefers the GPU and falls back to software,
+// vulkan forces the GPU, software forces the CPU rasteriser.
+const RENDER_BACKENDS = { auto: 0, vulkan: 1, software: 2 };
 
 const LOG_LEVELS = { 0: 'info', 1: 'warning', 2: 'error' };
 
@@ -74,5 +79,5 @@ function mouseButton(value) {
 
 module.exports = {
     PRIMITIVES, COMPONENTS, KEY_NAMES, KEY_CODES, MOUSE_BUTTONS,
-    SCENE_SETTINGS, TONEMAPS, LOG_LEVELS, keyCode, mouseButton,
+    SCENE_SETTINGS, TONEMAPS, RENDER_BACKENDS, LOG_LEVELS, keyCode, mouseButton,
 };

@@ -402,6 +402,8 @@ Json Scene::Serialize() const {
     settings.set("postBloomThreshold", (double)postBloomThreshold);
     settings.set("postFxaa", postFxaa);
     settings.set("textureMemoryMB", (double)textureMemoryMB);
+    settings.set("renderBackend", (double)renderBackend);
+    settings.set("msaa", (double)msaa);
     doc.set("settings", std::move(settings));
 
     Json entities = Json::MakeArray();
@@ -435,6 +437,8 @@ std::shared_ptr<Scene> Scene::Deserialize(const Json& doc, std::string* error) {
         scene->postBloomThreshold = settings["postBloomThreshold"].asFloat(0.85f);
         scene->postFxaa = settings["postFxaa"].asBool(false);
         scene->textureMemoryMB = (int)settings["textureMemoryMB"].asNumber(256.0);
+        scene->renderBackend = (int)settings["renderBackend"].asNumber(0.0);
+        scene->msaa = (int)settings["msaa"].asNumber(4.0);
     }
     const Json& entities = doc["entities"];
     if (entities.isArray()) {

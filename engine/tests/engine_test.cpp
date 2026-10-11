@@ -141,6 +141,110 @@ static void TestRender() {
     CHECK(hit == cube->m_id);
 }
 
+// The GPU backend has to reach the same picture as the CPU rasteriser, honour
+// an explicit software request, and keep reporting which backend really ran.
+static void TestRenderBackendSelection() {
+    auto renderCube = [](Engine& engine) {
+        Scene& scene = engine.scene();
+        GameObject* cube = scene.CreateEntity("Cube");
+        cube->AddComponent<MeshRenderer>();
+        // A light, because the GPU path carries the light list in a uniform
+        // block: a scene with no light never reads it, so it would not notice
+        // a malformed block.
+        GameObject* sun = scene.CreateEntity("Sun");
+        sun->transform().position = Vec3(3, 5, 2);
+        sun->AddComponent<LightComponent>();
+        return engine.RenderEditorFrame();
+    };
+    auto litPixels = [](Engine& engine) {
+        const FrameTarget& t = engine.frame();
+        size_t lit = 0;
+        for (size_t i = 0; i < t.color.size(); i += 4)
+            if (t.color[i] > 60 || t.color[i + 1] > 60) lit++;
+        return lit;
+    };
+    const char* expected = VulkanBackendAvailable() ? "vulkan" : "software";
+
+    // Forcing software must never reach for the GPU.
+    {
+        Engine engine;
+        engine.SetViewportSize(160, 120);
+        engine.scene().renderBackend = 2;
+        RenderStats stats = renderCube(engine);
+        CHECK(std::string(stats.backend) == "software");
+        CHECK(litPixels(engine) > 200);
+    }
+    // Forcing Vulkan on a machine without a usable device degrades to software
+    // rather than failing the frame.
+    {
+        Engine engine;
+        engine.SetViewportSize(160, 120);
+        engine.scene().renderBackend = 1;
+        RenderStats stats = renderCube(engine);
+        CHECK(std::string(stats.backend) == expected);
+        CHECK(litPixels(engine) > 200);
+    }
+    // Auto prefers the GPU when there is one. CAIRN_RENDER_BACKEND may pin
+    // the machine-level default to software, so only the *choice* is asserted
+    // here, not which backend won.
+    {
+        Engine engine;
+        engine.SetViewportSize(160, 120);
+        engine.scene().renderBackend = 0;
+        RenderStats stats = renderCube(engine);
+        std::string ran = stats.backend ? stats.backend : "";
+        CHECK(ran == "vulkan" || ran == "software");
+        CHECK(litPixels(engine) > 200);
+    }
+}
+
+// A lit scene with a sprite, debug lines and a post pass has to come out of
+// either backend looking the same. This is the cross-backend regression net:
+// every feature the GPU path carries in a uniform block or a texture is
+// exercised here, and both backends are held to producing a real image.
+static void TestRenderBackendsAgree() {
+    auto build = [](Engine& engine, int backend) {
+        engine.SetViewportSize(160, 120);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.postBloomStrength = 0.4f;
+
+        GameObject* cube = scene.CreateEntity("Cube");
+        auto* cubeMr = cube->AddComponent<MeshRenderer>();
+        cubeMr->albedoColor = Color(0.9f, 0.9f, 0.9f, 1.0f);
+        GameObject* sun = scene.CreateEntity("Sun");
+        sun->transform().position = Vec3(3, 5, 2);
+        sun->AddComponent<LightComponent>();
+        GameObject* sprite = scene.CreateEntity("Label");
+        auto* spriteMr = sprite->AddComponent<SpriteRenderer>();
+        spriteMr->color = Color(1.0f, 0.4f, 0.2f, 1.0f);
+    };
+    auto litPixels = [](Engine& engine) {
+        const FrameTarget& t = engine.frame();
+        size_t lit = 0;
+        for (size_t i = 0; i < t.color.size(); i += 4)
+            if (t.color[i] > 40 || t.color[i + 1] > 40 || t.color[i + 2] > 40) lit++;
+        return lit;
+    };
+
+    Engine cpu;
+    build(cpu, 2);  // software
+    RenderStats cpuStats = cpu.RenderEditorFrame();
+    const size_t cpuLit = litPixels(cpu);
+    CHECK(std::string(cpuStats.backend) == "software");
+    CHECK(cpuLit > 500);
+
+    Engine gpu;
+    build(gpu, 1);  // forced Vulkan; degrades to software without a device
+    RenderStats gpuStats = gpu.RenderEditorFrame();
+    const size_t gpuLit = litPixels(gpu);
+    CHECK(std::string(gpuStats.backend) == (VulkanBackendAvailable() ? "vulkan" : "software"));
+    CHECK(gpuLit > 500);
+    // Both rasterisers light the same scene, so they cannot disagree wildly.
+    if (VulkanBackendAvailable())
+        CHECK(gpuLit * 2 > cpuLit && cpuLit * 2 > gpuLit);
+}
+
 static void TestPhysics() {
     Engine engine;
     Scene& scene = engine.scene();
@@ -309,6 +413,8 @@ static void TestSortingOrder() {
 static void TestCullingAndAA() {
     Engine engine;
     Scene& scene = engine.scene();
+    // Pixel-exact AA/culling counts are the CPU rasteriser's contract.
+    scene.renderBackend = 2;
     scene.ambient = Color(1, 1, 1, 1);
     scene.background = Color(0, 0, 0, 1);
 
@@ -540,6 +646,8 @@ static void TestShadows() {
     Engine engine;
     engine.SetViewportSize(320, 240);
     Scene& scene = engine.scene();
+    // Per-pixel shadow bookkeeping only exists on the CPU rasteriser.
+    scene.renderBackend = 2;
     scene.shadows = 2;
     scene.shadowResolution = 512;
     scene.shadowDistance = 60.0f;
@@ -674,6 +782,8 @@ static void TestPostProcessing() {
     Engine engine;
     engine.SetViewportSize(160, 120);
     Scene& scene = engine.scene();
+    // Byte-exact post-processing expectations are CPU-path only.
+    scene.renderBackend = 2;
 
     GameObject* floor = scene.CreateEntity("Floor");
     floor->transform().scale = Vec3(20, 1, 20);
@@ -893,6 +1003,8 @@ static void TestObjSharing() {
 static void TestPbrMaterials() {
     Engine engine;
     Scene& scene = engine.scene();
+    // Exact dielectric/metal pixel comparisons are CPU-path only.
+    scene.renderBackend = 2;
     GameObject* go = scene.CreateEntity("Mat");
     auto* mr = go->AddComponent<MeshRenderer>();
     mr->metallic = 0.8f;
@@ -1027,6 +1139,8 @@ int main() {
     TestObjSharing();
     TestScene();
     TestRender();
+    TestRenderBackendSelection();
+    TestRenderBackendsAgree();
     TestShadows();
     TestPostProcessing();
     TestPhysics();

@@ -1,7 +1,11 @@
-// Cairn Engine - multithreaded software rasterizer.
-// Renders a Scene into a CPU framebuffer (RGBA8 + depth) that the host blits.
-// 3D path: per-pixel Blinn-Phong, sky gradient, fog, debug lines.
-// 2D path: alpha-blended sprites/text with optional tangent-space normal maps.
+// Cairn Engine - renderers. Renders a Scene into a framebuffer (RGBA8 + depth)
+// that the host blits. Two backends share one draw-list front end:
+//   software - multithreaded CPU rasterizer (always available, deterministic);
+//   vulkan   - offscreen GPU rendering via a dynamically loaded Vulkan loader
+//              (optional at build time; falls back to software when the
+//              machine has no Vulkan 1.3 driver).
+// 3D path: PBR (GGX + Lambert), sky gradient, fog, cascaded shadow maps,
+// debug lines. 2D path: alpha-blended sprites/text with optional normal maps.
 #pragma once
 
 #include "cairn/math.h"
@@ -26,6 +30,16 @@ struct FrameTarget {
 // Display transform applied to shaded pixels (all math happens in linear
 // space; these run once per shaded pixel before the RGBA8 store).
 enum class Tonemap : int { None = 0, Reinhard = 1, ACES = 2, Filmic = 3 };
+
+// Which renderer executes the frame. `Auto` prefers the Vulkan GPU backend
+// and falls back to software when it is unavailable; the explicit values
+// force one backend (an unavailable forced Vulkan degrades to software with
+// a logged warning). RenderStats::backend always reports what actually ran.
+enum class RenderBackend : int { Auto = 0, Vulkan = 1, Software = 2 };
+
+// True when the build includes the Vulkan backend AND the runtime machine
+// exposes a usable Vulkan 1.3 device. Cached after the first call.
+bool VulkanBackendAvailable();
 
 struct CameraView {
     Vec3 position;
@@ -64,6 +78,11 @@ struct CameraView {
     float postBloomThreshold = 0.85f;  // 0..1 bright-pass cutoff (display luma)
     bool postFxaa = false;             // luma-edge AA over the final image
     int textureMemoryMB = 256;         // texture cache budget (LRU above it)
+    // Backend selection and MSAA sample count (0 = off; 2/4/8 are snapped to
+    // what the GPU supports). MSAA only affects the Vulkan backend; the
+    // software rasterizer always uses per-pixel coverage antialiasing.
+    RenderBackend backend = RenderBackend::Auto;
+    int msaa = 4;
 };
 
 struct RenderStats {
@@ -74,8 +93,9 @@ struct RenderStats {
     int frustumCulled = 0;  // mesh renderers skipped by frustum culling
     int drawCalls2D = 0;    // sprites + text items drawn
     int lightCount = 0;     // lights collected this frame
-    int shadowedPixels = 0; // pixels darkened by the shadow map
+    int shadowedPixels = 0; // pixels darkened by the shadow map (software only)
     int postPasses = 0;     // post-processing effects applied this frame (0-4)
+    const char* backend = "software";  // backend that actually ran this frame
 };
 
 // The six planes of a view frustum, extracted from a view-projection matrix.

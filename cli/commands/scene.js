@@ -167,13 +167,15 @@ def('scene.settings.set', {
     summary: 'Set one scene setting by name.',
     args: {
         key: { type: 'enum', enum: constants.SCENE_SETTINGS, required: true, desc: 'Setting name.' },
-        value: { type: 'json', required: true, desc: 'Value: vector/array for colors and gravity, number, bool or string.' },
+        value: { type: 'json', required: true, desc: 'Value: vector/array for colors and gravity, number, bool, or a name for tonemap/renderBackend.' },
     },
     returns: '{key, value, settings}',
     needsEngine: true,
     examples: [
         'cairn scene.settings.set --key gravity --value \'[0,-20,0]\'',
         'cairn scene.settings.set --key fogEnabled --value true',
+        'cairn scene.settings.set --key renderBackend --value vulkan',
+        'cairn scene.settings.set --key msaa --value 4',
     ],
     run(ctx, args) {
         const engine = ctx.session.engine();
@@ -185,6 +187,21 @@ def('scene.settings.set', {
             if (typeof value !== 'number') {
                 throw invalidArg('--value must be a tone mapping name or index',
                     { names: Object.keys(constants.TONEMAPS) });
+            }
+        }
+        if (args.key === 'renderBackend') {
+            const named = String(value).toLowerCase();
+            value = constants.RENDER_BACKENDS[named] !== undefined
+                ? constants.RENDER_BACKENDS[named] : value;
+            if (typeof value !== 'number' || value < 0 || value > 2) {
+                throw invalidArg('--value must be a backend name or index',
+                    { names: Object.keys(constants.RENDER_BACKENDS) });
+            }
+        }
+        if (args.key === 'msaa') {
+            value = Number(value);
+            if (![1, 2, 4, 8].includes(value)) {
+                throw invalidArg('--value must be one of 1, 2, 4, 8');
             }
         }
         if ((args.key === 'gravity' || args.key.startsWith('Color') || args.key === 'ambient' || args.key === 'background')

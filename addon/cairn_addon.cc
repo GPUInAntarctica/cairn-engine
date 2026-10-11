@@ -459,6 +459,8 @@ private:
         else if (name == "postBloomThreshold") s.postBloomThreshold = (float)v.ToNumber().DoubleValue();
         else if (name == "postFxaa") s.postFxaa = v.ToBoolean();
         else if (name == "textureMemoryMB") s.textureMemoryMB = (int)v.ToNumber().DoubleValue();
+        else if (name == "renderBackend") s.renderBackend = (int)v.ToNumber().DoubleValue();
+        else if (name == "msaa") s.msaa = (int)v.ToNumber().DoubleValue();
         else if (name == "name") s.name = v.ToString().Utf8Value();
         else return Napi::Boolean::New(env, false);
         return Napi::Boolean::New(env, true);
@@ -495,6 +497,8 @@ private:
         o.Set("postBloomThreshold", s.postBloomThreshold);
         o.Set("postFxaa", s.postFxaa);
         o.Set("textureMemoryMB", s.textureMemoryMB);
+        o.Set("renderBackend", s.renderBackend);
+        o.Set("msaa", s.msaa);
         return o;
     }
 
