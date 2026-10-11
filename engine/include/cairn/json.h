@@ -63,6 +63,10 @@ public:
     const Json* find(const std::string& key) const;
     Json& operator[](const std::string& key);          // creates missing keys
     const Json& operator[](const std::string& key) const { return at(key); }
+    // Without this pair, indexing a mutable Json with a string literal leaves
+    // MSVC choosing between the string and size_t overloads (C2666). The
+    // const char* form is an exact match, so the ambiguity disappears.
+    Json& operator[](const char* key) { return (*this)[std::string(key)]; }
     const Json& operator[](const char* key) const { return at(key); }
     const Json& at(const std::string& key) const;      // null if missing
     void set(const std::string& key, Json v);
