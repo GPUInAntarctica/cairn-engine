@@ -31,15 +31,19 @@ jobs:
 
   windows:
     runs-on: windows-latest
-    continue-on-error: true   # engine + tests; addon linking tracked separately
+    continue-on-error: true   # MSVC dev-env wiring is best-effort on CI
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Configure and build engine (MSVC)
-        run: |
-          cmake -S engine -B engine/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build engine/build --config Release
+      - name: Enter MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install npm dependencies
+        run: npm ci
+      - name: Build engine, addon and renderer
+        run: npm run build
       - name: Engine unit tests
-        run: ./engine/build/Release/cairn_engine_test.exe
+        run: node scripts/run-engine-tests.js
+      - name: CLI end-to-end
+        run: node test/cli.js

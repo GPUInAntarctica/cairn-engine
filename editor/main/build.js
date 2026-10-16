@@ -33,15 +33,23 @@ function collectSources(projectDir) {
     return out.sort();
 }
 
-// Parses "file:line:col: severity: message" compiler diagnostics.
+// Parses "file:line:col: severity: message" (GCC/Clang) and
+// "file(line,col): error C1234: message" (MSVC) diagnostics.
 function parseDiagnostics(stderr, projectDir) {
     const out = [];
     for (const line of String(stderr).split('\n')) {
-        const m = line.match(/^(.+?):(\d+):(\d+):\s*(fatal error|error|warning):\s*(.*)$/);
-        if (m) {
-            let file = m[1];
+        const gcc = line.match(/^(.+?):(\d+):(\d+):\s*(fatal error|error|warning):\s*(.*)$/);
+        if (gcc) {
+            let file = gcc[1];
             if (fs.existsSync(file)) file = path.relative(projectDir, file) || file;
-            out.push({ file, line: +m[2], column: +m[3], severity: m[4].startsWith('warn') ? 'warning' : 'error', message: m[5] });
+            out.push({ file, line: +gcc[2], column: +gcc[3], severity: gcc[4].startsWith('warn') ? 'warning' : 'error', message: gcc[5] });
+            continue;
+        }
+        const msvc = line.match(/^(.*?)\((\d+),(\d+)\)\s*:\s*(fatal error|error|warning)\s*[A-Z]*\d*\s*:\s*(.*)$/);
+        if (msvc) {
+            let file = msvc[1].trim();
+            if (fs.existsSync(file)) file = path.relative(projectDir, file) || file;
+            out.push({ file, line: +msvc[2], column: +msvc[3], severity: msvc[4].startsWith('warn') ? 'warning' : 'error', message: msvc[5] });
         }
     }
     return out;
@@ -74,19 +82,35 @@ function buildScripts(projectDir, compiler) {
         }
         fs.mkdirSync(path.dirname(output), { recursive: true });
 
-        const args = [
-            '-std=c++17', '-O2', '-fPIC', '-shared', '-fvisibility=hidden',
-            '-fno-gnu-unique',   // registries must die with the library (hot reload)
-            `-I${ENGINE_INCLUDE}`,
-            `-I${path.join(projectDir, 'Assets', 'Scripts')}`,
-            `-L${ENGINE_LIB_DIR}`, '-lcairn_engine',
-            `-Wl,-rpath,${ENGINE_LIB_DIR}`,
-            '-o', output,
-            ...sources,
-        ];
-        if (process.platform === 'darwin') {
-            args.splice(args.indexOf('-fno-gnu-unique'), 1);
-            args.push('-undefined', 'dynamic_lookup');
+        const msvc = process.platform === 'win32' && /(^|[\\/])cl(\.exe)?$/i.test(compiler || 'cl');
+        let args;
+        if (msvc) {
+            const objDir = path.join(projectDir, 'Library', 'obj');
+            fs.mkdirSync(objDir, { recursive: true });
+            args = [
+                '/nologo', '/std:c++17', '/O2', '/EHsc', '/MD', '/LD',
+                `/I${ENGINE_INCLUDE}`,
+                `/I${path.join(projectDir, 'Assets', 'Scripts')}`,
+                ...sources,
+                `/Fe:${output}`,
+                `/Fo:${objDir}${path.sep}`,
+                '/link', '/DLL', `/LIBPATH:${ENGINE_LIB_DIR}`, 'cairn_engine.lib',
+            ];
+        } else {
+            args = [
+                '-std=c++17', '-O2', '-fPIC', '-shared', '-fvisibility=hidden',
+                '-fno-gnu-unique',   // registries must die with the library (hot reload)
+                `-I${ENGINE_INCLUDE}`,
+                `-I${path.join(projectDir, 'Assets', 'Scripts')}`,
+                `-L${ENGINE_LIB_DIR}`, '-lcairn_engine',
+                `-Wl,-rpath,${ENGINE_LIB_DIR}`,
+                '-o', output,
+                ...sources,
+            ];
+            if (process.platform === 'darwin') {
+                args.splice(args.indexOf('-fno-gnu-unique'), 1);
+                args.push('-undefined', 'dynamic_lookup');
+            }
         }
 
         const started = Date.now();

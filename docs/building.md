@@ -55,13 +55,16 @@ GPU 帧以 `vkCmdCopyImageToBuffer` 阻塞回读结束，宿主拿到的仍是�
 
 ### Windows
 
-**目前不支持一键构建。** 引擎库本身可以用 CMake + MSVC 或 MinGW 配置，但 N-API 插件的构建脚本会直接报错退出：
+一键构建使用 MSVC。请从 **“Developer Command Prompt for VS”**（或先运行 `vcvars64.bat`）里执行，让 `cl.exe` 进入 `PATH`：
 
-```
-Windows: build the addon with MSVC (see docs/building.md); node-gyp route planned.
+```bat
+npm install
+npm run build
 ```
 
-编辑器、CLI 与插件都依赖这个 `.node` 文件，所以在补上 Windows 链接路径之前，Windows 上无法运行。模板与编辑器逻辑本身是跨平台的。
+构建流程：CMake 用 MSVC 生成 `cairn_engine.dll` + `cairn_engine.lib`（`WINDOWS_EXPORT_ALL_SYMBOLS` 导出全部符号）；插件用 `cl /LD` 编译、链接 `cairn_engine.lib` 与 Node 自带的 `node.lib`；玩法脚本（`editor/main/build.js`）同样走 `cl /LD`。需要 Node 安装包含头文件（`<node>\include\node`）与 `node.lib`；若缺失，脚本会明确提示。
+
+若看到 `cl.exe not found. Open a "Developer Command Prompt for VS"...`，说明当前不是 VS 开发者环境；用上述命令提示符重开终端即可。避免在 Play 模式下重新编译脚本——Windows 会锁定已加载的 `GameScripts.dll`。
 
 ## 故障排查 / Troubleshooting
 

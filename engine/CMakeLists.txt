@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cairn-engine VERSION 0.1.4 LANGUAGES CXX)
+project(cairn-engine VERSION 0.1.5 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -146,6 +146,13 @@ set_target_properties(cairn_engine PROPERTIES
     VERSION ${PROJECT_VERSION}
     SOVERSION 0
 )
+
+# Windows shared libraries export nothing by default; gameplay scripts and the
+# addon link against cairn_engine.lib, so every public symbol must be exported.
+if(WIN32)
+    target_compile_definitions(cairn_engine PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    set_target_properties(cairn_engine PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
 
 # --------------------------------------------------------------------------
 # Native headless test binary (math, serialization, rasterizer, physics).

@@ -2,6 +2,16 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.5] - 2026-10-16
+
+### Windows one-click build (MSVC)
+- **The addon builds on Windows.** `scripts/build.js` now has an MSVC path: it locates `cl.exe` (must be in a VS *Developer Command Prompt*), compiles the addon with `cl /std:c++20 /LD` and links it against the engine import library plus Node's `node.lib`. Missing toolchain or `node.lib` produces actionable guidance instead of the old hard failure.
+- **The engine DLL exports its symbols.** `cairn_engine` gets `WINDOWS_EXPORT_ALL_SYMBOLS` (plus `NOMINMAX`/`WIN32_LEAN_AND_MEAN`) so the addon and gameplay scripts can link the import library.
+- **Gameplay scripts build with MSVC too.** `editor/main/build.js` emits `cl /LD` with the right include/lib paths and parses MSVC `file(line,col): error Cxxxx` diagnostics for the code editor.
+- **Build staging is portable.** The engine library is staged with Node `fs` (DLL + `.lib` on Windows, SONAME symlink chain on Linux) and stale copies from previous versions are pruned.
+- **CI.** The Windows job now enters the MSVC environment and runs the engine tests and the CLI suite (still non-blocking while the environment wiring settles).
+- **Note.** The Windows path could not be executed on the Linux development machine; it is written to the documented MSVC contract and is the first thing to verify on a Windows host.
+
 ## [0.1.4] - 2026-10-16
 
 ### Physics: broadphase, layers, queries, friction and angular motion

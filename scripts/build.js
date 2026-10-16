@@ -54,28 +54,107 @@ function buildEngine() {
     if (!fs.existsSync(path.join(buildDir, 'CMakeCache.txt')) || force || defines.length)
         run('cmake', cmakeArgs);
     run('cmake', ['--build', buildDir, '-j', String(Math.max(2, require('os').cpus().length - 1))]);
-    const soName = fs.existsSync(path.join(buildDir, 'libcairn_engine.so')) ? 'libcairn_engine.so'
-        : fs.existsSync(path.join(buildDir, 'libcairn_engine.dylib')) ? 'libcairn_engine.dylib'
-        : null;
-    if (!soName) fail('engine library output not found');
-    // Copy the library with its versioned SONAME symlinks intact so the
-    // addon's DT_NEEDED (libcairn_engine.so.0) resolves inside build/.
-    run('cp', ['-a',
-        ...fs.readdirSync(buildDir).filter(f => f.startsWith('libcairn_engine.so')).map(f => path.join(buildDir, f)),
-        buildOut + '/']);
+
+    // Stage only the current library chain. CMake leaves older versioned files
+    // in the build dir across version bumps, so match the symlink chain rather
+    // than every libcairn_engine.* file.
+    const soLink = path.join(buildDir, 'libcairn_engine.so');
+    const soMajor = path.join(buildDir, 'libcairn_engine.so.0');
+    let toCopy;
+    if (fs.existsSync(soLink) && fs.existsSync(soMajor)) {
+        const real = path.basename(fs.realpathSync(soMajor));
+        toCopy = ['libcairn_engine.so', 'libcairn_engine.so.0', real];
+    } else if (fs.existsSync(path.join(buildDir, 'libcairn_engine.dylib'))) {
+        toCopy = ['libcairn_engine.dylib'];
+    } else if (fs.existsSync(path.join(buildDir, 'cairn_engine.dll'))) {
+        toCopy = ['cairn_engine.dll', 'cairn_engine.lib'];
+    } else {
+        fail('engine library output not found');
+    }
+    // Drop stale copies from previous versions before staging.
+    for (const f of fs.readdirSync(buildOut)) {
+        if (f.startsWith('libcairn_engine.') || f === 'cairn_engine.dll' || f === 'cairn_engine.lib')
+            fs.rmSync(path.join(buildOut, f), { force: true });
+    }
+    for (const f of toCopy) {
+        // Resolve symlinks to their real file, then recreate the symlink name.
+        const src = path.join(buildDir, f);
+        const dest = path.join(buildOut, f);
+        if (!fs.existsSync(src)) continue;
+        try {
+            if (fs.lstatSync(dest, { throwIfNoEntry: false })) fs.rmSync(dest, { force: true });
+            if (fs.lstatSync(src).isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(src), dest);
+            else fs.copyFileSync(src, dest);
+        } catch (err) {
+            fail(`could not stage ${f}: ${err.message}`);
+        }
+    }
+    const soName = toCopy.find(f => f.endsWith('.so') || f.endsWith('.dylib') || f.endsWith('.dll'));
     log(`engine -> build/${soName}`);
     return path.join(buildOut, soName);
+}
+
+// Locates cl.exe (MSVC). It is only on PATH inside a "Developer Command
+// Prompt"; there is no reliable way to synthesize that environment here, so we
+// fail with instructions instead of a cryptic linker error.
+function findCl() {
+    const r = spawnSync('where', ['cl'], { encoding: 'utf8', shell: true });
+    if (r.status === 0 && r.stdout.trim()) return 'cl';
+    return null;
+}
+
+// Directory holding node.lib (the N-API import library) for the running Node.
+function nodeLibDirCandidates() {
+    const home = path.dirname(process.execPath);
+    const out = [home, path.join(home, 'lib')];
+    if (process.env.LOCALAPPDATA) out.push(path.join(process.env.LOCALAPPDATA, 'node-gyp', 'Cache'));
+    return out.filter(p => fs.existsSync(path.join(p, 'node.lib')));
+}
+
+function buildAddonWindows(out, inc) {
+    const cl = findCl();
+    if (!cl) {
+        fail('Windows: cl.exe not found. Open a "Developer Command Prompt for VS"\n' +
+             '       (or run vcvars64.bat) and re-run `npm run build`.');
+    }
+    const libDirs = nodeLibDirCandidates();
+    if (libDirs.length === 0) {
+        fail('Windows: node.lib not found. Install Node.js with the native module\n' +
+             '       headers/npm tools, or set LOCALAPPDATA for the node-gyp cache.');
+    }
+    const objDir = path.join(buildOut, 'obj');
+    fs.mkdirSync(objDir, { recursive: true });
+    const winInc = inc.map(i => '/I' + i.replace(/^-I/, ''));
+    // /LD builds a DLL; /Fe names the output; /Fo sends objects to a scratch dir.
+    const args = [
+        '/nologo', '/std:c++20', '/O2', '/EHsc', '/MD', '/LD',
+        ...winInc,
+        path.join(root, 'addon', 'cairn_addon.cc'),
+        '/Fe:' + out,
+        '/Fo:' + objDir + path.sep,
+        '/link', '/DLL',
+        '/LIBPATH:' + buildOut,
+        'cairn_engine.lib',
+        path.join(libDirs[0], 'node.lib'),
+    ];
+    run(cl, args);
 }
 
 function buildAddon(engineLib) {
     const out = path.join(buildOut, 'cairn_engine_addon.node');
     const inc = [
-        '-I' + path.join(root, 'engine', 'include'),
-        '-I' + path.join(root, 'engine', 'src'),
-        '-I' + path.join(root, 'engine', 'thirdparty'),
-        '-I' + path.join(root, 'node_modules', 'node-addon-api'),
-        '-I' + nodeIncludeDir(),
+        path.join(root, 'engine', 'include'),
+        path.join(root, 'engine', 'src'),
+        path.join(root, 'engine', 'thirdparty'),
+        path.join(root, 'node_modules', 'node-addon-api'),
+        nodeIncludeDir(),
     ];
+    if (process.platform === 'win32') {
+        buildAddonWindows(out, inc);
+        log(`addon  -> build/cairn_engine_addon.node`);
+        return out;
+    }
+    const incFlags = inc.map(i => '-I' + i);
     const cxx = process.env.CXX || 'g++';
     const std = ['-std=c++20', '-O2', '-fPIC', '-fvisibility=hidden'];
     if (process.platform === 'linux') std.push('-fno-gnu-unique');
@@ -83,12 +162,10 @@ function buildAddon(engineLib) {
     const isMac = process.platform === 'darwin';
     if (isMac) {
         args = [...std, '-dynamiclib', '-undefined', 'dynamic_lookup',
-            ...inc, 'addon/cairn_addon.cc', '-o', out,
+            ...incFlags, 'addon/cairn_addon.cc', '-o', out,
             `-L${buildOut}`, '-lcairn_engine', '-Wl,-rpath,@loader_path'];
-    } else if (process.platform === 'win32') {
-        fail('Windows: build the addon with MSVC (see docs/building.md); node-gyp route planned.');
     } else {
-        args = [...std, '-shared', ...inc, 'addon/cairn_addon.cc', '-o', out,
+        args = [...std, '-shared', ...incFlags, 'addon/cairn_addon.cc', '-o', out,
             `-L${buildOut}`, '-lcairn_engine', '-Wl,-rpath,$ORIGIN', '-pthread'];
     }
     run(cxx, args);
