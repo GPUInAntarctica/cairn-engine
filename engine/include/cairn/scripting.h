@@ -390,15 +390,19 @@ public:
     bool isKinematic = false;       // collides but is not pushed
     float drag = 0.0f;              // linear damping per second
     float restitution = 0.0f;       // bounciness 0..1
+    float friction = 0.4f;          // tangential damping on contact 0..1
+    Vec3 angularVelocity{0, 0, 0};  // radians/second (integrated each step)
     bool freezeZ = false;           // lock motion along Z (2D games)
 
     void AddForce(const Vec3& force) { m_accumForce += force; }
     void AddImpulse(const Vec3& impulse) { velocity += impulse; }
+    void AddTorque(const Vec3& torque) { m_accumTorque += torque; }
 
     const char* TypeName() const override { return "RigidBody"; }
     ComponentTypeId TypeId() const override { return ComponentTypeId::RigidBody; }
 
     Vec3 m_accumForce{0, 0, 0};     // engine-internal accumulator
+    Vec3 m_accumTorque{0, 0, 0};    // engine-internal accumulator
 };
 
 // ---------------------------------------------------------------------------
@@ -476,6 +480,7 @@ public:
     std::string name = "GameObject";
     bool active = true;
     std::string tag;                // "MainCamera" picks the play camera
+    int layer = 0;                  // 0..31, used with the scene layer matrix
 
     EntityId id() const { return m_id; }
     // Stable identity that survives save/load (and which prefabs, object
@@ -592,6 +597,26 @@ void SetTimeScale(float scale);
 namespace Audio {
 void Play(const std::string& clipPath, float volume = 1.0f, float pitch = 1.0f);
 }
+
+// ---------------------------------------------------------------------------
+// Physics queries - cast and overlap against colliders in the active scene.
+// ---------------------------------------------------------------------------
+namespace Physics {
+struct RaycastHit {
+    EntityId entity = kInvalidEntity;  // hit GameObject's runtime id
+    std::string guid;                  // hit GameObject's stable GUID
+    std::string name;                  // hit GameObject's name
+    Vec3 point;
+    Vec3 normal;
+    float distance = 0.0f;
+};
+// Nearest collider along the ray; false when nothing is hit within maxDistance.
+bool Raycast(const Vec3& origin, const Vec3& direction, float maxDistance, RaycastHit* hit);
+// Every collider along the ray, nearest first.
+std::vector<RaycastHit> RaycastAll(const Vec3& origin, const Vec3& direction, float maxDistance);
+// Entities whose collider overlaps the sphere.
+std::vector<EntityId> OverlapSphere(const Vec3& center, float radius);
+}  // namespace Physics
 
 // ---------------------------------------------------------------------------
 // Debug.

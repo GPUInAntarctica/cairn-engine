@@ -1288,6 +1288,83 @@ static void TestPrefabs() {
     std::filesystem::remove_all(dir);
 }
 
+// Physics queries: raycast / raycast-all / overlap against colliders.
+static void TestPhysicsQueries() {
+    Engine engine;
+    Scene& scene = engine.scene();
+    GameObject* floor = scene.CreateEntity("Floor");
+    floor->AddComponent<BoxCollider>()->size = Vec3(10, 1, 10);
+    GameObject* box = scene.CreateEntity("Box");
+    box->transform().position = Vec3(0, 3, 0);
+    box->AddComponent<BoxCollider>()->size = Vec3(1, 1, 1);
+
+    Physics::RaycastHit hit;
+    CHECK(Physics::Raycast(Vec3(0, 10, 0), Vec3(0, -1, 0), 100.0f, &hit));
+    CHECK(NearlyEqual(hit.distance, 6.5f, 1e-2f));   // box top at y=3.5
+    CHECK(hit.entity == box->m_id);
+    CHECK(NearlyEqual(hit.normal.y, 1.0f, 1e-2f));
+
+    auto all = Physics::RaycastAll(Vec3(0, 10, 0), Vec3(0, -1, 0), 100.0f);
+    CHECK(all.size() >= 2);
+    CHECK(all.front().entity == box->m_id);          // nearest first
+
+    auto overlap = Physics::OverlapSphere(Vec3(0, 3, 0), 0.75f);
+    CHECK(std::find(overlap.begin(), overlap.end(), box->m_id) != overlap.end());
+    CHECK(std::find(overlap.begin(), overlap.end(), floor->m_id) == overlap.end());
+
+    // Nothing along an upward ray.
+    CHECK(!Physics::Raycast(Vec3(0, 10, 0), Vec3(0, 1, 0), 100.0f, &hit));
+}
+
+// The collision layer matrix filters which pairs the solver sees.
+static void TestCollisionLayers() {
+    Scene scene;
+    GameObject* ground = scene.CreateEntity("Ground");
+    ground->AddComponent<BoxCollider>()->size = Vec3(10, 1, 10);  // top at y=0.5
+    GameObject* a = scene.CreateEntity("A");
+    a->layer = 1;
+    a->transform().position = Vec3(0, 3, 0);
+    a->AddComponent<BoxCollider>()->size = Vec3(1, 1, 1);
+    auto* rb = a->AddComponent<RigidBody>();
+    rb->restitution = 0.0f;
+
+    scene.SetLayerCollision(0, 1, false);
+    for (int i = 0; i < 120; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(a->transform().position.y < -1.0f);  // fell straight through
+
+    scene.SetLayerCollision(0, 1, true);
+    a->transform().position = Vec3(0, 3, 0);
+    rb->velocity = Vec3();
+    for (int i = 0; i < 180; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(a->transform().position.y > 0.5f);   // landed on the ground
+}
+
+// Angular velocity spins a body; friction damps sliding.
+static void TestRigidbodyFrictionAngular() {
+    Scene scene;
+    GameObject* ground = scene.CreateEntity("Ground");
+    ground->AddComponent<BoxCollider>()->size = Vec3(20, 1, 20);
+    GameObject* a = scene.CreateEntity("A");
+    a->transform().position = Vec3(0, 1.0f, 0);
+    a->AddComponent<BoxCollider>()->size = Vec3(1, 1, 1);
+    auto* rb = a->AddComponent<RigidBody>();
+    rb->useGravity = true;
+    rb->restitution = 0.0f;
+
+    // Angular integration: one second at PI rad/s should rotate the body.
+    rb->angularVelocity = Vec3(0, kPi, 0);
+    const Quat before = a->transform().rotation;
+    for (int i = 0; i < 60; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(std::fabs(a->transform().rotation.w - before.w) > 0.5f);
+
+    // Friction: a sliding body on the ground slows noticeably.
+    rb->angularVelocity = Vec3();
+    rb->velocity = Vec3(5, 0, 0);
+    rb->friction = 1.0f;
+    for (int i = 0; i < 60; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(rb->velocity.x < 3.0f);
+}
+
 int main() {
     Log::SetEchoStdout(false);
     TestMath();
@@ -1316,6 +1393,9 @@ int main() {
     TestAssetDatabase();
     TestEntityIdentity();
     TestPrefabs();
+    TestPhysicsQueries();
+    TestCollisionLayers();
+    TestRigidbodyFrictionAngular();
     if (g_failures == 0) {
         std::printf("engine tests passed\n");
         return 0;

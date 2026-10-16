@@ -131,6 +131,7 @@ public:
             InstanceMethod("setEntityName", &EngineWrap::SetEntityName),
             InstanceMethod("setEntityActive", &EngineWrap::SetEntityActive),
             InstanceMethod("setEntityTag", &EngineWrap::SetEntityTag),
+            InstanceMethod("setEntityLayer", &EngineWrap::SetEntityLayer),
             InstanceMethod("setEntityParent", &EngineWrap::SetEntityParent),
             InstanceMethod("getEntityJSON", &EngineWrap::GetEntityJSON),
             InstanceMethod("getSceneTree", &EngineWrap::GetSceneTree),
@@ -154,6 +155,10 @@ public:
             InstanceMethod("instantiatePrefab", &EngineWrap::InstantiatePrefab),
             InstanceMethod("applyPrefab", &EngineWrap::ApplyPrefab),
             InstanceMethod("revertPrefab", &EngineWrap::RevertPrefab),
+            InstanceMethod("getLayerMatrix", &EngineWrap::GetLayerMatrix),
+            InstanceMethod("setLayerCollision", &EngineWrap::SetLayerCollision),
+            InstanceMethod("physicsRaycast", &EngineWrap::PhysicsRaycast),
+            InstanceMethod("physicsOverlapSphere", &EngineWrap::PhysicsOverlapSphere),
             InstanceMethod("loadScriptLibrary", &EngineWrap::LoadScriptLibrary),
             InstanceMethod("play", &EngineWrap::Play),
             InstanceMethod("pause", &EngineWrap::Pause),
@@ -326,6 +331,12 @@ private:
         if (GameObject* go = engine_->FindEntity((EntityId)GetNumber(info, 0, 0)))
             go->tag = GetString(info, 1);
     }
+    void SetEntityLayer(const Napi::CallbackInfo& info) {
+        if (GameObject* go = engine_->FindEntity((EntityId)GetNumber(info, 0, 0))) {
+            int layer = (int)GetNumber(info, 1, 0);
+            go->layer = layer < 0 ? 0 : (layer > 31 ? 31 : layer);
+        }
+    }
     void SetEntityParent(const Napi::CallbackInfo& info) {
         GameObject* go = engine_->FindEntity((EntityId)GetNumber(info, 0, 0));
         GameObject* parent = GetNumber(info, 1, 0) > 0 ? engine_->FindEntity((EntityId)GetNumber(info, 1, 0)) : nullptr;
@@ -340,6 +351,7 @@ private:
         o.Set("name", go->name);
         o.Set("active", go->active);
         o.Set("tag", go->tag);
+        o.Set("layer", go->layer);
         o.Set("parent", go->transform().m_parent ? (double)go->transform().m_parent->m_id : 0.0);
         const Transform& t = go->transform();
         Napi::Object tr = Napi::Object::New(env);
@@ -645,6 +657,47 @@ private:
         return o;
     }
 
+    // -- physics queries + layers -------------------------------------------
+    static bool ReadVec3(const Napi::Value& v, Vec3* out) {
+        if (!v.IsArray()) return false;
+        Napi::Array a = v.As<Napi::Array>();
+        if (a.Length() < 3) return false;
+        *out = Vec3(a.Get((uint32_t)0).As<Napi::Number>().FloatValue(),
+                    a.Get(1).As<Napi::Number>().FloatValue(),
+                    a.Get(2).As<Napi::Number>().FloatValue());
+        return true;
+    }
+    Napi::Value PhysicsRaycast(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        Vec3 origin, dir;
+        if (!ReadVec3(info[0], &origin) || !ReadVec3(info[1], &dir)) return env.Null();
+        float maxDistance = (float)GetNumber(info, 2, 1e30);
+        bool all = GetBool(info, 3, false);
+        Json result = all ? engine_->QueryRaycastAll(origin, dir, maxDistance)
+                          : engine_->QueryRaycast(origin, dir, maxDistance);
+        return JsonToValue(env, result);
+    }
+    Napi::Value PhysicsOverlapSphere(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        Vec3 center;
+        if (!ReadVec3(info[0], &center)) return env.Null();
+        float radius = (float)GetNumber(info, 1, 1.0);
+        return JsonToValue(env, engine_->QueryOverlapSphere(center, radius));
+    }
+    Napi::Value GetLayerMatrix(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        Napi::Array arr = Napi::Array::New(env, 32);
+        for (int i = 0; i < 32; ++i) arr.Set((uint32_t)i, (double)engine_->scene().layerMatrix[(size_t)i]);
+        return arr;
+    }
+    Napi::Value SetLayerCollision(const Napi::CallbackInfo& info) {
+        int a = (int)GetNumber(info, 0, 0);
+        int b = (int)GetNumber(info, 1, 0);
+        bool on = GetBool(info, 2, true);
+        engine_->scene().SetLayerCollision(a, b, on);
+        return Napi::Boolean::New(info.Env(), true);
+    }
+
     // -- scripting -----------------------------------------------------------
     Napi::Value LoadScriptLibrary(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
@@ -788,7 +841,7 @@ Napi::FunctionReference EngineWrap::constructor;
 
 Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
     EngineWrap::Init(env, exports);
-    exports.Set("engineVersion", Napi::String::New(env, "0.1.3"));
+    exports.Set("engineVersion", Napi::String::New(env, "0.1.4"));
     return exports;
 }
 

@@ -245,7 +245,7 @@ the document with `--image FILE`). `image.open`, `image.layer.*`,
 | `entity.duplicate` | `--id` (int, required) | Duplicate an entity (deep copy including children). |
 | `entity.get` | `--id` (int, required) | Full description of one entity: transform, components, properties and editor metadata. |
 | `entity.highlight` | `--id` (int, default 0) | Set or clear the editor selection outline entity. |
-| `entity.set` | `--id` (int, required)<br>`--name` (string)<br>`--active` (bool)<br>`--tag` (string)<br>`--parent` (int)<br>`--fields` (json) | Change entity name, active flag, tag, parent or several at once. |
+| `entity.set` | `--id` (int, required)<br>`--name` (string)<br>`--active` (bool)<br>`--tag` (string)<br>`--layer` (int)<br>`--parent` (int)<br>`--fields` (json) | Change entity name, active flag, tag, parent or several at once. |
 | `entity.transform` | `--id` (int, required)<br>`--position` (json)<br>`--rotation` (json)<br>`--scale` (json)<br>`--move` (json) | Set local position, rotation (Euler degrees) and/or scale. |
 
 ### `exec`
@@ -292,6 +292,13 @@ the document with `--image FILE`). `image.open`, `image.layer.*`,
 | `input.mouseMove` | `--x` (number, required)<br>`--y` (number, required) | Move the mouse cursor (origin is bottom-left, y grows upward). |
 | `input.mouseUp` | `--button` (string, default "left") | Release a mouse button. |
 | `input.tap` | `--key` (string, required)<br>`--hold` (number, default 1)<br>`--dt` (number, default 0.016666666666666666)<br>`--render` (bool, default false) | Press and release a key, then run one frame so GetKeyDown/GetKeyUp fire. |
+
+### `physics`
+
+| Command | Arguments | Description |
+| --- | --- | --- |
+| `physics.overlapSphere` | `--center` (json, required)<br>`--radius` (number, required) | Return the entities whose collider overlaps a sphere. |
+| `physics.raycast` | `--origin` (json, required)<br>`--direction` (json, required)<br>`--maxDistance` (number, default 1000)<br>`--all` (bool, default false) | Cast a ray against colliders and return the nearest hit (or every hit with --all). |
 
 ### `prefab`
 
@@ -356,6 +363,8 @@ the document with `--image FILE`). `image.open`, `image.layer.*`,
 | `scene.find` | `--name` (string)<br>`--tag` (string) | Find entities by name or tag. |
 | `scene.hierarchy` | — | Scene tree nested by parent/child relationships. |
 | `scene.json` | `--pretty` (bool, default true)<br>`--file` (path) | Serialize the scene to a .cscene JSON document. |
+| `scene.layerMatrix.get` | — | Read the 32x32 collision layer matrix (row i is a bitmask of layers colliding with i). |
+| `scene.layerMatrix.set` | `--a` (int, required)<br>`--b` (int, required)<br>`--collide` (bool, default true) | Enable or disable collision between two layers (mutual, persisted in the scene). |
 | `scene.load` | `--file` (string) | Load a .cscene file into the session. |
 | `scene.new` | `--name` (string, default "Scene") | Create an empty in-memory scene. |
 | `scene.save` | `--file` (string) | Write the loaded scene back to a .cscene file. |

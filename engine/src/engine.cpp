@@ -121,6 +121,44 @@ void Play(const std::string& clipPath, float volume, float pitch) {
 }
 }  // namespace Audio
 
+namespace Physics {
+static void Fill(RaycastHit* out, const Cairn::PhysicsHit& h) {
+    out->entity = h.go ? h.go->m_id : kInvalidEntity;
+    out->guid = h.go ? h.go->m_guid : std::string();
+    out->name = h.go ? h.go->name : std::string();
+    out->point = h.point;
+    out->normal = h.normal;
+    out->distance = h.distance;
+}
+bool Raycast(const Vec3& origin, const Vec3& direction, float maxDistance, RaycastHit* hit) {
+    Scene* s = EngineActiveScene();
+    if (!s) return false;
+    Cairn::PhysicsHit h;
+    if (!Cairn::PhysicsRaycast(*s, origin, direction, maxDistance, &h)) return false;
+    if (hit) Fill(hit, h);
+    return true;
+}
+std::vector<RaycastHit> RaycastAll(const Vec3& origin, const Vec3& direction, float maxDistance) {
+    std::vector<RaycastHit> out;
+    Scene* s = EngineActiveScene();
+    if (!s) return out;
+    for (const Cairn::PhysicsHit& h : Cairn::PhysicsRaycastAll(*s, origin, direction, maxDistance)) {
+        RaycastHit rh;
+        Fill(&rh, h);
+        out.push_back(rh);
+    }
+    return out;
+}
+std::vector<EntityId> OverlapSphere(const Vec3& center, float radius) {
+    std::vector<EntityId> out;
+    Scene* s = EngineActiveScene();
+    if (!s) return out;
+    for (GameObject* go : Cairn::PhysicsOverlapSphere(*s, center, radius))
+        if (go) out.push_back(go->m_id);
+    return out;
+}
+}  // namespace Physics
+
 namespace Debug {
 void Log(const char* fmt, ...) {
     char buf[1024];
@@ -905,6 +943,47 @@ Json Engine::DebugCollectStats() {
     out.set("emittedNames", std::move(names));
     out.set("viewport", Json::MakeArray({(double)renderer_.target().width, (double)renderer_.target().height}));
     return out;
+}
+
+Json Engine::QueryRaycast(const Vec3& origin, const Vec3& direction, float maxDistance) {
+    PhysicsHit h;
+    if (!PhysicsRaycast(*scene_, origin, direction, maxDistance, &h)) return Json();
+    Json o = Json::MakeObject();
+    o.set("entity", (double)(h.go ? h.go->m_id : 0));
+    o.set("guid", h.go ? h.go->m_guid : std::string());
+    o.set("name", h.go ? h.go->name : std::string());
+    o.set("point", Json::MakeArray({h.point.x, h.point.y, h.point.z}));
+    o.set("normal", Json::MakeArray({h.normal.x, h.normal.y, h.normal.z}));
+    o.set("distance", (double)h.distance);
+    return o;
+}
+
+Json Engine::QueryRaycastAll(const Vec3& origin, const Vec3& direction, float maxDistance) {
+    Json arr = Json::MakeArray();
+    for (const PhysicsHit& h : PhysicsRaycastAll(*scene_, origin, direction, maxDistance)) {
+        Json o = Json::MakeObject();
+        o.set("entity", (double)(h.go ? h.go->m_id : 0));
+        o.set("guid", h.go ? h.go->m_guid : std::string());
+        o.set("name", h.go ? h.go->name : std::string());
+        o.set("point", Json::MakeArray({h.point.x, h.point.y, h.point.z}));
+        o.set("normal", Json::MakeArray({h.normal.x, h.normal.y, h.normal.z}));
+        o.set("distance", (double)h.distance);
+        arr.push(std::move(o));
+    }
+    return arr;
+}
+
+Json Engine::QueryOverlapSphere(const Vec3& center, float radius) {
+    Json arr = Json::MakeArray();
+    for (GameObject* go : PhysicsOverlapSphere(*scene_, center, radius)) {
+        if (!go) continue;
+        Json o = Json::MakeObject();
+        o.set("id", (double)go->m_id);
+        o.set("guid", go->m_guid);
+        o.set("name", go->name);
+        arr.push(std::move(o));
+    }
+    return arr;
 }
 
 bool Engine::SaveFramePNG(const std::string& path) const {    const FrameTarget& t = renderer_.target();

@@ -25,7 +25,8 @@ struct Shape {
     RigidBody* rb = nullptr;
     bool isTrigger = false;
     bool isStatic = true;
-    Vec3 min, max;      // boxes, world space
+    int layer = 0;
+    Vec3 min, max;      // world AABB (boxes exact; spheres bounding box)
     Vec3 center;        // boxes: center; spheres: center
     float radius = 0;   // spheres
 
@@ -112,6 +113,42 @@ bool Collide(const Shape& a, const Shape& b, Contact* out) {
     return true;
 }
 
+// Nearest ray hit against one shape. `d` must be normalized; returns the
+// distance and outward normal at the entry point.
+bool RayShape(const Shape& s, const Vec3& o, const Vec3& d, float maxT, float* tOut, Vec3* nOut) {
+    if (s.kind == Shape::Sphere3) {
+        Vec3 oc = o - s.center;
+        float b = Vec3::Dot(oc, d);
+        float c = Vec3::Dot(oc, oc) - s.radius * s.radius;
+        float disc = b * b - c;
+        if (disc < 0) return false;
+        float sq = std::sqrt(disc);
+        float t = -b - sq;
+        if (t < 0) t = -b + sq;
+        if (t < 0 || t > maxT) return false;
+        *tOut = t;
+        *nOut = (o + d * t - s.center).Normalized();
+        return true;
+    }
+    // Slab test against the world AABB.
+    auto inv = [](float v) { return std::fabs(v) > 1e-8f ? 1.0f / v : (v >= 0 ? 1e30f : -1e30f); };
+    float ix = inv(d.x), iy = inv(d.y), iz = inv(d.z);
+    float t1 = (s.min.x - o.x) * ix, t2 = (s.max.x - o.x) * ix;
+    float t3 = (s.min.y - o.y) * iy, t4 = (s.max.y - o.y) * iy;
+    float t5 = (s.min.z - o.z) * iz, t6 = (s.max.z - o.z) * iz;
+    float tmin = std::max({std::min(t1, t2), std::min(t3, t4), std::min(t5, t6)});
+    float tmax = std::min({std::max(t1, t2), std::max(t3, t4), std::max(t5, t6)});
+    if (tmax < 0 || tmin > tmax || tmin > maxT) return false;
+    float t = tmin < 0 ? 0.0f : tmin;
+    Vec3 n(0, 0, 0);
+    if (tmin == std::min(t1, t2)) n = Vec3(t1 < t2 ? -1.f : 1.f, 0, 0);
+    else if (tmin == std::min(t3, t4)) n = Vec3(0, t3 < t4 ? -1.f : 1.f, 0);
+    else n = Vec3(0, 0, t5 < t6 ? -1.f : 1.f);
+    *tOut = t;
+    *nOut = n;
+    return true;
+}
+
 uint64_t PairKey(Component* a, Component* b) {
     uint64_t ka = a ? a->m_componentId : 0;
     uint64_t kb = b ? b->m_componentId : 0;
@@ -173,6 +210,7 @@ void GatherShapes(Scene& scene, std::vector<Shape>* out) {
             s.go = go.get();
             s.isStatic = !dynamic;
             s.rb = dynamic ? rb : nullptr;
+            s.layer = go->layer;
             out->push_back(s);
         };
         if (auto* c = go->GetComponent<BoxCollider>(); c && c->enabled) {
@@ -191,6 +229,8 @@ void GatherShapes(Scene& scene, std::vector<Shape>* out) {
             s.isTrigger = c->isTrigger;
             s.center = TransformPoint(world, c->center);
             s.radius = c->radius * WorldMaxScale(t);
+            s.min = s.center - Vec3(s.radius);
+            s.max = s.center + Vec3(s.radius);
             add(s);
         }
         if (auto* c = go->GetComponent<Collider2D>(); c && c->enabled) {
@@ -240,6 +280,21 @@ void ResolveContact(Shape& a, Shape& b, const Contact& ct) {
         if (invMassA > 0 && a.rb) a.rb->velocity += impulse * invMassA;
         if (invMassB > 0 && b.rb) b.rb->velocity -= impulse * invMassB;
     }
+
+    // Friction: damp the tangential relative velocity by the contact's
+    // coefficient. Recomputed after the normal impulse so it acts on the
+    // post-bounce sliding velocity.
+    Vec3 rel2;
+    if (invMassA > 0 && a.rb) rel2 += a.rb->velocity;
+    if (invMassB > 0 && b.rb) rel2 -= b.rb->velocity;
+    Vec3 tangent = rel2 - ct.normal * Vec3::Dot(rel2, ct.normal);
+    float tl = tangent.Length();
+    if (tl > 1e-5f) {
+        float mu = std::clamp(std::max(a.rb ? a.rb->friction : 0.0f, b.rb ? b.rb->friction : 0.0f), 0.0f, 1.0f);
+        Vec3 imp = tangent * (-mu / invSum);
+        if (invMassA > 0 && a.rb) a.rb->velocity += imp * invMassA;
+        if (invMassB > 0 && b.rb) b.rb->velocity -= imp * invMassB;
+    }
 }
 
 }  // namespace
@@ -264,46 +319,78 @@ void PhysicsStep(Scene& scene, float dt) {
         if (rb->drag > 0) rb->velocity *= std::max(0.0f, 1.0f - rb->drag * dt);
         if (rb->freezeZ) rb->velocity.z = 0.0f;
         MoveWorld(go->transform(), rb->velocity * dt);
+
+        // Angular motion: torque feeds angular velocity, which spins the
+        // transform. A simple isotropic inertia keeps it stable.
+        Vec3 w = rb->angularVelocity + (rb->m_accumTorque / std::max(1e-4f, mass * 0.4f)) * dt;
+        rb->m_accumTorque = Vec3();
+        if (rb->drag > 0) w *= std::max(0.0f, 1.0f - rb->drag * dt);
+        rb->angularVelocity = w;
+        if (w.LengthSq() > 1e-12f) {
+            Transform& t = go->transform();
+            t.rotation = (Quat::FromAxisAngle(w.Normalized(), w.Length() * dt) * t.rotation).Normalized();
+            t.MarkWorldDirty();
+        }
     }
 
     // Shapes are gathered once, after integration.
     std::vector<Shape> shapes;
     GatherShapes(scene, &shapes);
 
-    // Narrow phase: contacts and trigger overlaps in one sweep.
+    // Broadphase: sort-and-sweep on the X axis. Sorting the candidate pairs
+    // back into index order keeps callback ordering identical to the old
+    // brute-force sweep while skipping distant pairs.
     std::unordered_map<uint64_t, PairRecord> seenPairs;
-    for (size_t a = 0; a < shapes.size(); ++a) {
-        for (size_t b = a + 1; b < shapes.size(); ++b) {
-            Shape& A = shapes[a];
-            Shape& B = shapes[b];
-            if (!A.comp || !B.comp) continue;
-            // Only two solid colliders push each other; a trigger reports
-            // events but never turns the pair into a non-solid contact.
-            bool solidPair = A.IsSolid() && B.IsSolid();
-            if (!solidPair && A.isStatic && B.isStatic && A.Is2D() == B.Is2D()) continue;
+    std::vector<std::pair<size_t, size_t>> candidates;
+    if (shapes.size() > 1) {
+        std::vector<size_t> order(shapes.size());
+        for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::sort(order.begin(), order.end(),
+                  [&](size_t l, size_t r) { return shapes[l].min.x < shapes[r].min.x; });
+        for (size_t i = 0; i < order.size(); ++i) {
+            const size_t a = order[i];
+            for (size_t j = i + 1; j < order.size(); ++j) {
+                const size_t b = order[j];
+                if (shapes[b].min.x > shapes[a].max.x) break;
+                candidates.emplace_back(std::min(a, b), std::max(a, b));
+            }
+        }
+        std::sort(candidates.begin(), candidates.end());
+    }
 
-            Contact ct;
-            if (!Collide(A, B, &ct)) continue;
+    // Narrow phase: contacts and trigger overlaps over the broadphase pairs.
+    for (const auto& pr : candidates) {
+        Shape& A = shapes[pr.first];
+        Shape& B = shapes[pr.second];
+        if (!A.comp || !B.comp) continue;
+        // Layer matrix: skip pairs the scene says never interact.
+        if (!scene.LayerCollides(A.layer, B.layer)) continue;
+        // Only two solid colliders push each other; a trigger reports
+        // events but never turns the pair into a non-solid contact.
+        bool solidPair = A.IsSolid() && B.IsSolid();
+        if (!solidPair && A.isStatic && B.isStatic && A.Is2D() == B.Is2D()) continue;
 
-            uint64_t key = PairKey(A.comp, B.comp);
-            if (solidPair) {
-                bool first = seenPairs.find(key) == seenPairs.end();
-                if (first) {
-                    NotifyCollision(nullptr, A, B, CollisionPhase::Enter);
-                    NotifyCollision(nullptr, B, A, CollisionPhase::Enter);
-                } else {
-                    NotifyCollision(nullptr, A, B, CollisionPhase::Stay);
-                    NotifyCollision(nullptr, B, A, CollisionPhase::Stay);
-                }
-                seenPairs[key] = PairRecord{A.comp, B.comp, false};
-                if (!(A.isStatic && B.isStatic)) ResolveContact(A, B, ct);
+        Contact ct;
+        if (!Collide(A, B, &ct)) continue;
+
+        uint64_t key = PairKey(A.comp, B.comp);
+        if (solidPair) {
+            bool first = seenPairs.find(key) == seenPairs.end();
+            if (first) {
+                NotifyCollision(nullptr, A, B, CollisionPhase::Enter);
+                NotifyCollision(nullptr, B, A, CollisionPhase::Enter);
             } else {
-                bool was = scene.physicsPairs.count(key) > 0;
-                seenPairs[key] = PairRecord{A.comp, B.comp, true};
-                if (!was) {
-                    NotifyTrigger(A, B, true);
-                    NotifyTrigger(B, A, true);
-                }
+                NotifyCollision(nullptr, A, B, CollisionPhase::Stay);
+                NotifyCollision(nullptr, B, A, CollisionPhase::Stay);
+            }
+            seenPairs[key] = PairRecord{A.comp, B.comp, false};
+            if (!(A.isStatic && B.isStatic)) ResolveContact(A, B, ct);
+        } else {
+            bool was = scene.physicsPairs.count(key) > 0;
+            seenPairs[key] = PairRecord{A.comp, B.comp, true};
+            if (!was) {
+                NotifyTrigger(A, B, true);
+                NotifyTrigger(B, A, true);
             }
         }
     }
@@ -334,6 +421,72 @@ void PhysicsStep(Scene& scene, float dt) {
         }
     }
     scene.physicsPairs.swap(seenPairs);
+}
+
+// ---------------------------------------------------------------------------
+// Queries.
+// ---------------------------------------------------------------------------
+bool PhysicsRaycast(Scene& scene, const Vec3& origin, const Vec3& direction, float maxDistance,
+                    PhysicsHit* hit) {
+    std::vector<Shape> shapes;
+    GatherShapes(scene, &shapes);
+    Vec3 d = direction.Normalized();
+    float best = maxDistance > 0.0f ? maxDistance : 1e30f;
+    bool found = false;
+    for (const Shape& s : shapes) {
+        float t;
+        Vec3 n;
+        if (!RayShape(s, origin, d, best, &t, &n)) continue;
+        if (t <= best) {
+            best = t;
+            found = true;
+            if (hit) {
+                hit->go = s.go;
+                hit->point = origin + d * t;
+                hit->normal = n;
+                hit->distance = t;
+            }
+        }
+    }
+    return found;
+}
+
+std::vector<PhysicsHit> PhysicsRaycastAll(Scene& scene, const Vec3& origin, const Vec3& direction,
+                                          float maxDistance) {
+    std::vector<Shape> shapes;
+    GatherShapes(scene, &shapes);
+    Vec3 d = direction.Normalized();
+    const float maxT = maxDistance > 0.0f ? maxDistance : 1e30f;
+    std::vector<PhysicsHit> hits;
+    for (const Shape& s : shapes) {
+        float t;
+        Vec3 n;
+        if (!RayShape(s, origin, d, maxT, &t, &n)) continue;
+        hits.push_back({s.go, origin + d * t, n, t});
+    }
+    std::sort(hits.begin(), hits.end(),
+              [](const PhysicsHit& a, const PhysicsHit& b) { return a.distance < b.distance; });
+    return hits;
+}
+
+std::vector<GameObject*> PhysicsOverlapSphere(Scene& scene, const Vec3& center, float radius) {
+    std::vector<Shape> shapes;
+    GatherShapes(scene, &shapes);
+    std::vector<GameObject*> out;
+    for (const Shape& s : shapes) {
+        bool overlap = false;
+        if (s.kind == Shape::Sphere3) {
+            overlap = (center - s.center).Length() <= radius + s.radius;
+        } else {
+            Vec3 closest(std::clamp(center.x, s.min.x, s.max.x),
+                         std::clamp(center.y, s.min.y, s.max.y),
+                         std::clamp(center.z, s.min.z, s.max.z));
+            overlap = (center - closest).Length() <= radius;
+        }
+        if (!overlap || !s.go) continue;
+        if (std::find(out.begin(), out.end(), s.go) == out.end()) out.push_back(s.go);
+    }
+    return out;
 }
 
 }  // namespace Cairn

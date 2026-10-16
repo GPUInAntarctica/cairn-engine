@@ -279,6 +279,36 @@ check(afterStep && Math.abs(afterStep.result.value[0] - 0.8) < 1e-3,
     'prefab.revert restores the prefab value', afterStep && afterStep.result.value);
 
 
+// ---------------------------------------------------------------------------
+console.log('cli: physics queries + layers');
+// ---------------------------------------------------------------------------
+const physBatch = path.join(scratch, 'physics.jsonl');
+fs.writeFileSync(physBatch, [
+    { command: 'scene.new', args: { name: 'Phys' } },
+    { command: 'entity.createPrimitive', args: { mesh: 'Plane', name: 'Floor', position: [0, 0, 0], scale: [40, 1, 40] }, id: 'floor' },
+    { command: 'component.add', args: { id: '$ref:floor', type: 'BoxCollider', props: { size: [40, 1, 40] } } },
+    { command: 'entity.createPrimitive', args: { mesh: 'Cube', name: 'Box', position: [0, 3, 0] }, id: 'box' },
+    { command: 'component.add', args: { id: '$ref:box', type: 'BoxCollider', props: { size: [1, 1, 1] } } },
+    { command: 'entity.set', args: { id: '$ref:box', layer: 2 } },
+    { command: 'physics.raycast', args: { origin: [0, 10, 0], direction: [0, -1, 0], maxDistance: 100 }, id: 'hit' },
+    { command: 'physics.overlapSphere', args: { center: [0, 3, 0], radius: 1 }, id: 'overlap' },
+    { command: 'scene.layerMatrix.set', args: { a: 2, b: 2, collide: false } },
+    { command: 'scene.layerMatrix.get', args: {}, id: 'lm' },
+].map(s => JSON.stringify(s)).join('\n'));
+const physRun = spawnSync(process.execPath, [cli, '--project', projectDir, 'exec.run', '--file', physBatch],
+    { encoding: 'utf8', cwd: scratch, env: batchEnv() });
+const physLines = physRun.stdout.trim().split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+check(physLines.every(l => l.ok !== false), 'physics batch is clean', physRun.stdout + physRun.stderr);
+const hitStep = physLines.find(l => l.id === 'hit');
+check(hitStep && hitStep.result.name === 'Box' && Math.abs(hitStep.result.distance - 6.5) < 0.05,
+    'physics.raycast finds the nearest collider', hitStep && hitStep.result);
+const overlapStep = physLines.find(l => l.id === 'overlap');
+check(overlapStep && overlapStep.result.some(e => e.name === 'Box'),
+    'physics.overlapSphere returns overlapping entities', overlapStep && overlapStep.result);
+const lmStep = physLines.find(l => l.id === 'lm');
+check(lmStep && lmStep.result[2] === 4294967291, 'scene.layerMatrix.set clears the layer bit', lmStep && lmStep.result[2]);
+
+
 const build = expectOk(['--project', projectDir, 'script.build']);
 check(build && build.ok === true && build.output.endsWith('.so'),
     'script.build compiles the template scripts', build && build.diagnostics);

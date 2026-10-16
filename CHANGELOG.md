@@ -2,6 +2,17 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.4] - 2026-10-16
+
+### Physics: broadphase, layers, queries, friction and angular motion
+- **Broadphase.** The per-step collision sweep is now sort-and-sweep on the X axis instead of O(n²); candidate pairs are sorted back into index order so callback ordering is unchanged for existing scenes.
+- **Collision layers.** `GameObject::layer` (0..31) plus a per-scene 32×32 layer matrix (`Scene::SetLayerCollision`, persisted in the scene only when non-default) decide which pairs the solver sees. All layers collide by default.
+- **Query API.** `Physics::Raycast` (nearest hit with entity/GUID/name/point/normal/distance), `Physics::RaycastAll` (nearest first) and `Physics::OverlapSphere`, against boxes and spheres in the active scene.
+- **Friction + angular motion.** `RigidBody::friction` damps tangential contact velocity; `RigidBody::angularVelocity`/`AddTorque` integrate rotation from torque.
+- **New CLI commands.** `physics.raycast`, `physics.overlapSphere`, `scene.layerMatrix.get`, `scene.layerMatrix.set`; `entity.set` gains `--layer`.
+- **Tests.** `TestPhysicsQueries`, `TestCollisionLayers` and `TestRigidbodyFrictionAngular` plus a CLI physics section.
+- **Still to come** (next increment): capsule colliders, a character controller, joints and sleeping.
+
 ## [0.1.3] - 2026-10-16
 
 ### Prefabs

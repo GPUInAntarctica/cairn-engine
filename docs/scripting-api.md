@@ -76,11 +76,27 @@ Input::GetMousePosition();          // pixels, origin bottom-left
 ```cpp
 auto* rb = gameObject().GetComponent<RigidBody>();
 rb->velocity;             // read/write
+rb->friction = 0.8f;      // tangential damping on contact (0..1)
+rb->angularVelocity = Vec3(0, 3.14f, 0);  // radians/second
 rb->AddForce(Vec3(0, 10, 0));   // accumulated, applied next step
 rb->AddImpulse(Vec3(0, 5, 0));  // immediate velocity change
+rb->AddTorque(Vec3(0, 1, 0));   // accumulated angular acceleration
 ```
 
 Colliders: `BoxCollider` (3D AABB), `SphereCollider`, `Collider2D` (XY plane). A collider without a `RigidBody` is static. `isTrigger` colliders fire the trigger callbacks instead of resolving.
+
+Queries run against colliders in the active scene:
+
+```cpp
+Physics::RaycastHit hit;
+if (Physics::Raycast(origin, direction, 100.0f, &hit)) {
+    // hit.entity, hit.guid, hit.name, hit.point, hit.normal, hit.distance
+}
+auto all = Physics::RaycastAll(origin, direction, 100.0f);  // nearest first
+auto nearby = Physics::OverlapSphere(center, 2.0f);          // [EntityId]
+```
+
+Collision layers: `gameObject().layer` (0..31) plus the scene's layer matrix decide which pairs interact. Toggle a pair with the editor/CLI (`scene.layerMatrix.set`) or `Scene::SetLayerCollision`; all layers collide by default.
 
 ## Gameplay helpers
 

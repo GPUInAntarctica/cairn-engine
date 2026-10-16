@@ -184,6 +184,7 @@ const std::vector<PropertyDef>& RigidBodyDefs() {
         Field<RigidBody, &RigidBody::isKinematic>("isKinematic", "Is Kinematic", EditorPropKind::Bool),
         Field<RigidBody, &RigidBody::drag>("drag", "Drag", EditorPropKind::Float),
         Field<RigidBody, &RigidBody::restitution>("restitution", "Bounciness", EditorPropKind::Float),
+        Field<RigidBody, &RigidBody::friction>("friction", "Friction", EditorPropKind::Float),
         Field<RigidBody, &RigidBody::freezeZ>("freezeZ", "Freeze Z", EditorPropKind::Bool),
     };
     return defs;

@@ -4,6 +4,7 @@
 #include "cairn/scripting.h"
 #include "cairn/asset.h"
 
+#include <array>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -76,6 +77,15 @@ public:
 
     uint32_t nextComponentId = 1;
     std::unordered_map<uint64_t, PairRecord> physicsPairs;  // triggers + contacts
+
+    // Collision layer matrix: bit j of layerMatrix[i] set means layer i
+    // collides with layer j. All pairs collide by default.
+    std::array<uint32_t, 32> layerMatrix = AllCollide();
+    bool LayerCollides(int a, int b) const;
+    void SetLayerCollision(int a, int b, bool on);
+    bool layerMatrixIsDefault() const;
+
+    static std::array<uint32_t, 32> AllCollide();
 
     Scene() = default;
     ~Scene() = default;

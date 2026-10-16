@@ -267,6 +267,33 @@ def('scene.stats', {
     },
 });
 
+def('scene.layerMatrix.get', {
+    summary: 'Read the 32x32 collision layer matrix (row i is a bitmask of layers colliding with i).',
+    args: {},
+    returns: '[number x32]',
+    needsEngine: true,
+    examples: ['cairn --project ./game scene.layerMatrix.get'],
+    run(ctx) {
+        return ctx.session.engine().getLayerMatrix();
+    },
+});
+
+def('scene.layerMatrix.set', {
+    summary: 'Enable or disable collision between two layers (mutual, persisted in the scene).',
+    args: {
+        a: { type: 'int', required: true, desc: 'First layer 0..31.' },
+        b: { type: 'int', required: true, desc: 'Second layer 0..31.' },
+        collide: { type: 'bool', default: true, desc: 'Whether the two layers collide.' },
+    },
+    returns: '{a, b, collide}',
+    needsEngine: true,
+    examples: ['cairn --project ./game scene.layerMatrix.set --a 1 --b 2 --no-collide'],
+    run(ctx, args) {
+        ctx.session.engine().setLayerCollision(args.a, args.b, args.collide);
+        return { a: args.a, b: args.b, collide: args.collide };
+    },
+});
+
 function readRef(ref) {
     return ref === '@-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(ref.slice(1), 'utf8');
 }

@@ -156,6 +156,11 @@ public:
     Vec3 ScreenRayDir(int pixelX, int pixelY);        // direction through pixel
     Vec3 ScreenRayOrigin(int pixelX, int pixelY);
 
+    // --- Physics queries against colliders (scripts use namespace Physics).
+    Json QueryRaycast(const Vec3& origin, const Vec3& direction, float maxDistance);
+    Json QueryRaycastAll(const Vec3& origin, const Vec3& direction, float maxDistance);
+    Json QueryOverlapSphere(const Vec3& center, float radius);
+
     // --- Console & telemetry.
     std::vector<LogEntry> PollLogs(uint64_t afterId) { return Log::Poll(afterId); }
     std::vector<AudioEvent>& audioEvents() { return audioEvents_; }

@@ -123,10 +123,11 @@ def('entity.set', {
         name: { type: 'string', desc: 'New name.' },
         active: { type: 'bool', desc: 'New active flag.' },
         tag: { type: 'string', desc: 'New tag (empty string clears it).' },
+        layer: { type: 'int', desc: 'Collision layer 0..31 (used with the scene layer matrix).' },
         parent: { type: 'int', desc: 'New parent entity id (0 detaches to the scene root).' },
-        fields: { type: 'json', desc: 'Object with any of name/active/tag/parent applied together.' },
+        fields: { type: 'json', desc: 'Object with any of name/active/tag/layer/parent applied together.' },
     },
-    returns: '{id, name, active, tag, parent}',
+    returns: '{id, name, active, tag, layer, parent}',
     needsEngine: true,
     examples: ['cairn entity.set --id 3 --tag Enemy --no-active'],
     run(ctx, args) {
@@ -136,18 +137,20 @@ def('entity.set', {
         if (args.name !== undefined) fields.name = args.name;
         if (args.active !== undefined) fields.active = args.active;
         if (args.tag !== undefined) fields.tag = args.tag;
+        if (args.layer !== undefined) fields.layer = args.layer;
         if (args.parent !== undefined) fields.parent = args.parent;
         for (const key of Object.keys(fields)) {
-            if (!['name', 'active', 'tag', 'parent'].includes(key)) {
-                throw invalidArg(`entity.set cannot change '${key}'`, { allowed: ['name', 'active', 'tag', 'parent'] });
+            if (!['name', 'active', 'tag', 'layer', 'parent'].includes(key)) {
+                throw invalidArg(`entity.set cannot change '${key}'`, { allowed: ['name', 'active', 'tag', 'layer', 'parent'] });
             }
         }
         if (fields.name !== undefined) engine.setEntityName(args.id, String(fields.name));
         if (fields.active !== undefined) engine.setEntityActive(args.id, !!fields.active);
         if (fields.tag !== undefined) engine.setEntityTag(args.id, String(fields.tag));
+        if (fields.layer !== undefined) engine.setEntityLayer(args.id, Number(fields.layer) || 0);
         if (fields.parent !== undefined) engine.setEntityParent(args.id, Number(fields.parent) || 0);
         const entity = requireEntity(ctx, args.id);
-        return { id: entity.id, name: entity.name, active: entity.active, tag: entity.tag, parent: entity.parent };
+        return { id: entity.id, name: entity.name, active: entity.active, tag: entity.tag, layer: entity.layer, parent: entity.parent };
     },
 });
 

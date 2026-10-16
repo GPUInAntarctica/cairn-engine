@@ -175,6 +175,34 @@ std::vector<Component*> GameObject::GetComponentList() const {
 // ---------------------------------------------------------------------------
 // Scene.
 // ---------------------------------------------------------------------------
+std::array<uint32_t, 32> Scene::AllCollide() {
+    std::array<uint32_t, 32> m;
+    m.fill(0xFFFFFFFFu);
+    return m;
+}
+
+bool Scene::LayerCollides(int a, int b) const {
+    if (a < 0 || a > 31 || b < 0 || b > 31) return true;
+    return ((layerMatrix[(size_t)a] >> b) & 1u) != 0;
+}
+
+void Scene::SetLayerCollision(int a, int b, bool on) {
+    if (a < 0 || a > 31 || b < 0 || b > 31) return;
+    if (on) {
+        layerMatrix[(size_t)a] |= (1u << b);
+        layerMatrix[(size_t)b] |= (1u << a);
+    } else {
+        layerMatrix[(size_t)a] &= ~(1u << b);
+        layerMatrix[(size_t)b] &= ~(1u << a);
+    }
+}
+
+bool Scene::layerMatrixIsDefault() const {
+    for (uint32_t v : layerMatrix)
+        if (v != 0xFFFFFFFFu) return false;
+    return true;
+}
+
 GameObject* Scene::CreateEntity(const std::string& name, GameObject* parent) {
     auto go = std::make_unique<GameObject>();
     go->m_id = m_nextEntityId++;
@@ -290,6 +318,7 @@ Json Scene::SerializeEntity(const GameObject* go) const {
     e.set("name", go->name);
     e.set("active", go->active);
     if (!go->tag.empty()) e.set("tag", go->tag);
+    if (go->layer != 0) e.set("layer", (double)go->layer);
     if (go->transform().m_parent) e.set("parent", (double)go->transform().m_parent->m_id);
 
     Json comps = Json::MakeArray();
@@ -351,6 +380,7 @@ GameObject* Scene::DeserializeEntitySubtree(const Json& entityJson, GameObject* 
     GameObject* go = CreateEntity(entityJson["name"].asString("GameObject"), parent);
     go->active = entityJson["active"].asBool(true);
     go->tag = entityJson["tag"].asString();
+    go->layer = (int)entityJson["layer"].asNumber(0.0);
 
     const Json& comps = entityJson["components"];
     if (comps.isArray()) {
@@ -421,6 +451,11 @@ Json Scene::Serialize() const {
     settings.set("textureMemoryMB", (double)textureMemoryMB);
     settings.set("renderBackend", (double)renderBackend);
     settings.set("msaa", (double)msaa);
+    if (!layerMatrixIsDefault()) {
+        Json lm = Json::MakeArray();
+        for (uint32_t v : layerMatrix) lm.push((double)v);
+        settings.set("layerMatrix", std::move(lm));
+    }
     doc.set("settings", std::move(settings));
 
     Json entities = Json::MakeArray();
@@ -456,6 +491,9 @@ std::shared_ptr<Scene> Scene::Deserialize(const Json& doc, std::string* error) {
         scene->textureMemoryMB = (int)settings["textureMemoryMB"].asNumber(256.0);
         scene->renderBackend = (int)settings["renderBackend"].asNumber(0.0);
         scene->msaa = (int)settings["msaa"].asNumber(4.0);
+        const Json& lm = settings["layerMatrix"];
+        if (lm.isArray() && lm.size() >= 32)
+            for (int i = 0; i < 32; ++i) scene->layerMatrix[(size_t)i] = (uint32_t)lm[i].asNumber(4294967295.0);
     }
     const Json& entities = doc["entities"];
     if (entities.isArray()) {
@@ -484,6 +522,7 @@ std::shared_ptr<Scene> Scene::Deserialize(const Json& doc, std::string* error) {
             }
             go->active = e["active"].asBool(true);
             go->tag = e["tag"].asString();
+            go->layer = (int)e["layer"].asNumber(0.0);
             const Json& comps = e["components"];
             if (comps.isArray()) {
                 for (const Json& cj : comps.arrayItems()) {
