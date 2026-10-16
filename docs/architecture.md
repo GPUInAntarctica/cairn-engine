@@ -52,7 +52,7 @@ Cairn 由四个主要部分组成：**C++ 引擎运行时**、**N-API 插件**�
 | `engine/shaders/*.vert,frag` | GLSL 源，构建时由 `glslc` 编译为 SPIR-V 并嵌入库（`engine/cmake/embed_spirv.cmake`）；缺少 Vulkan 头文件或编译器时整个后端被裁掉 |
 | `engine/src/physics.cpp` | 半隐式欧拉积分，AABB/球碰撞（3D）与 XY 平面盒（2D），触发器事件回调脚本 |
 | `engine/src/script_host.cpp` | `dlopen` 玩法库、注册表查询、热重载（复制到唯一文件名避免加载器缓存） |
-| `engine/src/engine.cpp` | 门面：场景/资产/输入/播放状态机/拾取/投影，编辑器与 Player 共用 |
+| `engine/src/engine.cpp` | 门面：场景/资产/输入/播放状态机/拾取/投影，编辑器与 Player 共用；预制体（`.prefab` 读写、实例化、apply/revert）也在此层 |
 | `addon/cairn_addon.cc` | N-API 绑定，暴露引擎门面并共享帧缓冲 |
 | `editor/main/` | Electron 主进程：窗口、原生对话框、项目系统、脚本编译管线、Player 导出、偏好 |
 | `editor/renderer/` | 编辑器 UI（esbuild 打包为 CJS 以使用 Node 集成） |

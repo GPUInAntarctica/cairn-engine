@@ -293,6 +293,16 @@ the document with `--image FILE`). `image.open`, `image.layer.*`,
 | `input.mouseUp` | `--button` (string, default "left") | Release a mouse button. |
 | `input.tap` | `--key` (string, required)<br>`--hold` (number, default 1)<br>`--dt` (number, default 0.016666666666666666)<br>`--render` (bool, default false) | Press and release a key, then run one frame so GetKeyDown/GetKeyUp fire. |
 
+### `prefab`
+
+| Command | Arguments | Description |
+| --- | --- | --- |
+| `prefab.apply` | `--id` (int, required) | Push an instance's current state back into its .prefab file. |
+| `prefab.create` | `--id` (int, required)<br>`--file` (string, required) | Save an entity (and its children) as a .prefab asset and link it. |
+| `prefab.info` | `--file` (string, required) | Inspect a .prefab asset: name, top-level entity count and asset GUID. |
+| `prefab.instantiate` | `--file` (string, required)<br>`--parent` (int, default 0) | Instantiate a .prefab asset into the current scene (rooted at an optional parent). |
+| `prefab.revert` | `--id` (int, required) | Replace a prefab instance with a fresh copy from its .prefab file. |
+
 ### `project`
 
 | Command | Arguments | Description |

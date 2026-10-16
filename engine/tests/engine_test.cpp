@@ -1230,6 +1230,64 @@ static void TestEntityIdentity() {
     CHECK(engine.scene().FindByGuid(dup->guid()) == dup);
 }
 
+// Prefabs: author a subtree, instantiate it, apply/revert overrides.
+static void TestPrefabs() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-prefabs").string();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir + "/Assets/Prefabs");
+    Engine engine;
+    engine.SetProjectRoot(dir);
+    engine.NewScene("P");
+
+    GameObject* root = engine.scene().CreateEntity("Crate");
+    root->AddComponent<MeshRenderer>();
+    GameObject* child = engine.scene().CreateEntity("Lid", root);
+    child->AddComponent<MeshRenderer>();
+
+    std::string err;
+    CHECK(engine.CreatePrefabFromEntity(root->m_id, "Assets/Prefabs/Crate.prefab", &err));
+    auto* link = root->GetComponent<PrefabInstance>();
+    CHECK(link != nullptr && link->prefabPath == "Assets/Prefabs/Crate.prefab");
+    CHECK(std::filesystem::exists(dir + "/Assets/Prefabs/Crate.prefab"));
+    CHECK(std::filesystem::exists(dir + "/Assets/Prefabs/Crate.prefab.meta"));
+
+    EntityId inst = engine.InstantiatePrefab("Assets/Prefabs/Crate.prefab", 0);
+    CHECK(inst != 0);
+    GameObject* instRoot = engine.FindEntity(inst);
+    CHECK(instRoot != nullptr && instRoot->name == "Crate");
+    CHECK(instRoot->GetComponent<PrefabInstance>() != nullptr);
+    CHECK(instRoot->GetChildren().size() == 1);  // "Lid" came along
+
+    // Revert restores the file's state, discarding the local override.
+    instRoot->GetComponent<MeshRenderer>()->albedoColor = Color(0, 1, 0, 1);
+    EntityId rev = engine.RevertPrefab(inst, &err);
+    CHECK(rev != 0 && rev != inst);
+    GameObject* revRoot = engine.FindEntity(rev);
+    CHECK(revRoot != nullptr);
+    CHECK(NearlyEqual(revRoot->GetComponent<MeshRenderer>()->albedoColor.r, 0.78f, 1e-3f));
+
+    // Apply writes the override back into the file; a new instance sees it.
+    revRoot->GetComponent<MeshRenderer>()->albedoColor = Color(0.1f, 0.2f, 0.3f, 1);
+    CHECK(engine.ApplyPrefab(rev, &err));
+    EntityId inst2 = engine.InstantiatePrefab("Assets/Prefabs/Crate.prefab", 0);
+    GameObject* i2 = engine.FindEntity(inst2);
+    CHECK(i2 != nullptr);
+    CHECK(NearlyEqual(i2->GetComponent<MeshRenderer>()->albedoColor.r, 0.1f, 1e-3f));
+
+    // Saving and loading the scene preserves the prefab link.
+    std::filesystem::create_directories(dir + "/Assets/Scenes");
+    const std::string scenePath = dir + "/Assets/Scenes/P.cscene";
+    CHECK(engine.SaveSceneFile(scenePath, &err));
+    CHECK(engine.LoadSceneFile(scenePath, &err));
+    GameObject* found = nullptr;
+    for (const auto& g : engine.scene().objects)
+        if (g->GetComponent<PrefabInstance>()) { found = g.get(); break; }
+    CHECK(found != nullptr);
+    CHECK(found->GetComponent<PrefabInstance>()->prefabPath == "Assets/Prefabs/Crate.prefab");
+
+    std::filesystem::remove_all(dir);
+}
+
 int main() {
     Log::SetEchoStdout(false);
     TestMath();
@@ -1257,6 +1315,7 @@ int main() {
     TestTextureCache();
     TestAssetDatabase();
     TestEntityIdentity();
+    TestPrefabs();
     if (g_failures == 0) {
         std::printf("engine tests passed\n");
         return 0;

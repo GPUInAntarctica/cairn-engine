@@ -264,6 +264,9 @@ export class ContentBrowser {
         if (ext === '.cscene') {
             return this.tile({ name, thumb: icon('scene', TILE_ICON), open: () => emit('open-scene', full) });
         }
+        if (ext === '.prefab') {
+            return this.tile({ name, thumb: icon('scene', TILE_ICON), open: () => emit('instantiate-prefab', full) });
+        }
         const ic = ext === '.obj' ? 'mesh' : ext === '.wav' ? 'physics' : 'image';
         return this.tile({ name, thumb: icon(ic, TILE_ICON), open: () => {} });
     }
@@ -339,6 +342,7 @@ export class ContentBrowser {
         const items = [];
         if (!isDir && CODE_EXT.has(ext)) items.push({ label: 'ctx.open', run: () => this.openFile(full) });
         if (!isDir && ext === '.cscene') items.push({ label: 'ctx.open', run: () => emit('open-scene', full) });
+        if (!isDir && ext === '.prefab') items.push({ label: 'ctx.instantiatePrefab', run: () => emit('instantiate-prefab', full) });
         items.push(
             { label: 'ctx.rename', run: () => {
                 const tile = this.tiles.find(x => x.dataset.name === name);

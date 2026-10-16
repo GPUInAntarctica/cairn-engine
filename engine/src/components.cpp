@@ -225,6 +225,13 @@ const std::vector<PropertyDef>& ScriptDefs() {
     return defs;
 }
 
+const std::vector<PropertyDef>& PrefabInstanceDefs() {
+    static const std::vector<PropertyDef> defs = {
+        AssetField<PrefabInstance, &PrefabInstance::prefabPath>("prefabPath", "Prefab", "prefab"),
+    };
+    return defs;
+}
+
 const std::vector<PropertyDef>* DefsForTypeName(const std::string& typeName) {
     if (typeName == "Camera") return &CameraDefs();
     if (typeName == "Light") return &LightDefs();
@@ -235,6 +242,7 @@ const std::vector<PropertyDef>* DefsForTypeName(const std::string& typeName) {
     if (typeName == "BoxCollider") return &BoxColliderDefs();
     if (typeName == "SphereCollider") return &SphereColliderDefs();
     if (typeName == "Collider2D") return &Collider2DDefs();
+    if (typeName == "PrefabInstance") return &PrefabInstanceDefs();
     if (typeName == "Script") return &ScriptDefs();
     return nullptr;
 }

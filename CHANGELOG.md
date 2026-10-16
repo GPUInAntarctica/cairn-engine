@@ -2,6 +2,16 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.3] - 2026-10-16
+
+### Prefabs
+- **`.prefab` assets.** A prefab is a `cairn-prefab` JSON document holding a serialized subtree (`root`), reusable across scenes. `Engine::{CreatePrefabFromEntity, InstantiatePrefab, ApplyPrefab, RevertPrefab}` author, spawn, push and pull instances; prefab files get a `.meta` and therefore a stable GUID like any other asset.
+- **`PrefabInstance` component.** An instantiated root carries a `PrefabInstance` recording its source `.prefab`, so `apply` writes local changes back to the file and `revert` pulls a fresh copy. The link survives scene save/load (keyed on the asset GUID).
+- **New CLI commands.** `prefab.create`, `prefab.instantiate`, `prefab.apply`, `prefab.revert`, `prefab.info` (all in the new `prefab` group).
+- **Editor.** Double-clicking a `.prefab` in the content browser (or its context menu → *Instantiate in Scene*) drops an instance into the current scene, undo-aware; the import/rename/delete flows carry the `.meta` so prefab GUIDs stay stable.
+- **Tests.** `TestPrefabs` covers authoring, instantiation (with children), revert, apply and save/load of the link; the CLI suite adds a prefab section.
+- **Note.** This is the reusable-template foundation: per-property *prefab overrides* (Unity's override list with per-object diffing) are the next step, not yet implemented.
+
 ## [0.1.2] - 2026-10-16
 
 ### Stable entity identity + richer reflection

@@ -189,6 +189,8 @@ export const dict = {
     'status.saved': '已保存',
     'status.noCompiler': '未找到 C++ 编译器。请安装 g++ 或在偏好设置中指定。',
     'status.sceneCreated': '场景"{name}"已创建',
+    'status.prefabInstantiated': '预制体已实例化',
+    'status.prefabFailed': '无法实例化预制体',
     'status.sceneSaved': '场景已保存',
     'status.sceneLoaded': '场景已加载',
     'status.exportOk': 'Player 已导出到 {dir}',
@@ -226,6 +228,7 @@ export const dict = {
     'ctx.newScene': '新建场景',
     'ctx.importTexture': '导入纹理...',
     'ctx.open': '打开',
+    'ctx.instantiatePrefab': '在场景中实例化',
     'ctx.showInFolder': '在文件管理器中显示',
 
     // image editor

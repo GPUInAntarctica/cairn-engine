@@ -60,6 +60,7 @@ class BoxCollider;
 class SphereCollider;
 class Collider2D;
 class ScriptComponent;
+class PrefabInstance;
 struct ScriptMeta;
 
 // ---------------------------------------------------------------------------
@@ -108,7 +109,7 @@ inline bool RegisterScriptRecord(const char* name, Component* (*create)()) {
 // ---------------------------------------------------------------------------
 enum class ComponentTypeId : int {
     Transform = 1, Camera, Light, MeshRenderer, SpriteRenderer, TextRenderer,
-    RigidBody, BoxCollider, SphereCollider, Collider2D, Script, Other = 99,
+    RigidBody, BoxCollider, SphereCollider, Collider2D, Script, PrefabInstance, Other = 99,
 };
 
 template <typename T>
@@ -130,6 +131,7 @@ CAIRN_COMPONENT_TYPE(BoxCollider, BoxCollider)
 CAIRN_COMPONENT_TYPE(SphereCollider, SphereCollider)
 CAIRN_COMPONENT_TYPE(Collider2D, Collider2D)
 CAIRN_COMPONENT_TYPE(ScriptComponent, Script)
+CAIRN_COMPONENT_TYPE(PrefabInstance, PrefabInstance)
 
 // ---------------------------------------------------------------------------
 // Component - base class for all behaviour. Gameplay scripts subclass this.
@@ -451,6 +453,19 @@ public:
     // more than once; the engine calls this whenever a Script component or its
     // GameObject leaves the scene so instances never leak.
     void DestroyInstance();
+};
+
+// ---------------------------------------------------------------------------
+// PrefabInstance - marks the root of a subtree instantiated from a .prefab
+// asset. It records the source so the instance can be re-applied or reverted.
+// It is normally created automatically and should not be added by hand.
+// ---------------------------------------------------------------------------
+class PrefabInstance : public Component {
+public:
+    std::string prefabPath;  // project-relative .prefab path
+
+    const char* TypeName() const override { return "PrefabInstance"; }
+    ComponentTypeId TypeId() const override { return ComponentTypeId::PrefabInstance; }
 };
 
 // ---------------------------------------------------------------------------

@@ -99,6 +99,15 @@ public:
     EntityId DuplicateEntity(EntityId id);
     GameObject* FindEntity(EntityId id);
 
+    // --- Prefabs. Prefab files live under Assets (usually Assets/Prefabs) and
+    // hold a serialized subtree. An instance's root carries a PrefabInstance
+    // component recording its source so it can be re-applied or reverted.
+    EntityId InstantiatePrefab(const std::string& prefabProjectPath, EntityId parent);
+    bool CreatePrefabFromEntity(EntityId id, const std::string& prefabProjectPath, std::string* error);
+    bool ApplyPrefab(EntityId id, std::string* error);
+    // Replaces the instance with a fresh copy; returns the new entity id.
+    EntityId RevertPrefab(EntityId id, std::string* error);
+
     // --- Components.
     bool AddComponent(EntityId id, const std::string& typeName);
     bool RemoveComponent(EntityId id, const std::string& typeName);

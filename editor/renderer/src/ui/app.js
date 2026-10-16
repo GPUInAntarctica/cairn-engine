@@ -10,7 +10,7 @@ import { icon } from '../icons.js';
 import {
     editor, engineInstance, openProject, saveScene, openScene, newScene,
     undo, redo, selectEntity, entityList, duplicateEntity, destroyEntity,
-    markDirty, setScriptClasses, scriptClassMeta, sceneName, loadAddon,
+    markDirty, setScriptClasses, scriptClassMeta, sceneName, loadAddon, pushUndo,
 } from '../state.js';
 import { on, emit } from '../events.js';
 import { MenuBar } from './menubar.js';
@@ -226,6 +226,19 @@ export function mountEditor(root, prefs) {
         }
     });
     on('asset-changed', () => engineInstance().reloadAssets());
+    on('instantiate-prefab', absPath => {
+        const rel = path.relative(editor.project.path, absPath).split(path.sep).join('/');
+        pushUndo();
+        const id = engineInstance().instantiatePrefab(rel, 0);
+        if (id) {
+            selectEntity(id);
+            markDirty();
+            emit('scene-changed');
+            status(t('status.prefabInstantiated'));
+        } else {
+            status(t('status.prefabFailed'));
+        }
+    });
     on('open-scene', async absPath => {
         if (await openScene(absPath)) {
             status(t('status.sceneLoaded'));

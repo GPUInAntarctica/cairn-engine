@@ -21,6 +21,7 @@ require('./commands/project');
 require('./commands/scene');
 require('./commands/entity');
 require('./commands/component');
+require('./commands/prefab');
 require('./commands/runtime');
 require('./commands/render');
 require('./commands/script');
@@ -29,7 +30,7 @@ require('./commands/image');
 const GLOBAL_USAGE = `cairn <command> [args] [global options]
 
 Commands are grouped: engine, project, assets, scene, entity, component,
-runtime, input, render, script, image, exec.
+prefab, runtime, input, render, script, image, exec.
 
 Global options
   --project <dir>     project directory (default: $CAIRN_PROJECT or the cwd)

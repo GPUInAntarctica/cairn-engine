@@ -229,8 +229,56 @@ check(schemaResult && pbrProps.every(p => schemaResult.components[0].schema.some
     'component.schema lists the PBR material props', schemaResult && schemaResult.components[0].schema.map(d => d.name));
 
 // ---------------------------------------------------------------------------
-console.log('cli: scripts + headless play mode');
+console.log('cli: prefabs');
 // ---------------------------------------------------------------------------
+const prefabBatch = path.join(scratch, 'prefab.jsonl');
+fs.writeFileSync(prefabBatch, [
+    { command: 'scene.new', args: { name: 'PF' } },
+    { command: 'entity.createPrimitive', args: { mesh: 'Cube', name: 'Crate', position: [0, 1, 0] }, id: 'crate' },
+    { command: 'entity.createPrimitive', args: { mesh: 'Cube', name: 'Lid', position: [0, 0.5, 0] }, id: 'lid' },
+    { command: 'entity.set', args: { id: '$ref:lid', parent: '$ref:crate' } },
+    { command: 'component.setProps', args: { id: '$ref:crate', type: 'MeshRenderer', props: { albedoColor: [0.8, 0.3, 0.2, 1] } } },
+    { command: 'prefab.create', args: { id: '$ref:crate', file: 'Assets/Prefabs/Crate.prefab' }, id: 'create' },
+    { command: 'scene.save', args: { file: 'Assets/Scenes/Pf.cscene' } },
+].map(s => JSON.stringify(s)).join('\n'));
+const prefabRun = spawnSync(process.execPath, [cli, '--project', projectDir, 'exec.run', '--file', prefabBatch],
+    { encoding: 'utf8', cwd: scratch, env: batchEnv() });
+const prefabLines = prefabRun.stdout.trim().split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } });
+check(prefabLines.filter(Boolean).every(l => l.ok !== false), 'prefab batch runs clean', prefabRun.stdout + prefabRun.stderr);
+const prefabCreated = prefabLines.find(l => l.command === 'prefab.create');
+check(prefabCreated && prefabCreated.result.ok && /^[0-9a-f]{32}$/.test(prefabCreated.result.guid),
+    'prefab.create writes a .prefab with a GUID', prefabCreated && prefabCreated.result);
+
+const pfInfo = expectOk(['--project', projectDir, 'prefab.info', '--file', 'Assets/Prefabs/Crate.prefab']);
+check(pfInfo && pfInfo.entities === 2 && pfInfo.guid === prefabCreated.result.guid,
+    'prefab.info counts the subtree and reports the GUID', pfInfo);
+
+// Instantiate / override / revert in one engine session, then check the results.
+const pfRunBatch = path.join(scratch, 'prefab-run.jsonl');
+fs.writeFileSync(pfRunBatch, [
+    { command: 'scene.load', args: { file: 'Assets/Scenes/Pf.cscene' } },
+    { command: 'prefab.instantiate', args: { file: 'Assets/Prefabs/Crate.prefab' }, id: 'inst' },
+    { command: 'entity.get', args: { id: '$ref:inst' }, id: 'before' },
+    { command: 'component.setProps', args: { id: '$ref:inst', type: 'MeshRenderer', props: { albedoColor: [0, 1, 0, 1] } } },
+    { command: 'prefab.revert', args: { id: '$ref:inst' }, id: 'rev' },
+    { command: 'component.getProp', args: { id: '$ref:rev', type: 'MeshRenderer', prop: 'albedoColor' }, id: 'after' },
+].map(s => JSON.stringify(s)).join('\n'));
+const pfRun = spawnSync(process.execPath, [cli, '--project', projectDir, 'exec.run', '--file', pfRunBatch],
+    { encoding: 'utf8', cwd: scratch, env: batchEnv() });
+const pfRunLines = pfRun.stdout.trim().split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+check(pfRunLines.every(l => l.ok !== false), 'prefab run batch is clean', pfRun.stdout + pfRun.stderr);
+const instStep = pfRunLines.find(l => l.command === 'prefab.instantiate');
+check(instStep && instStep.result.id > 0 && instStep.result.name === 'Crate', 'prefab.instantiate adds an instance', instStep);
+const beforeStep = pfRunLines.find(l => l.id === 'before');
+check(beforeStep && beforeStep.result.components.some(c => c.type === 'PrefabInstance'),
+    'instantiated root carries a PrefabInstance component', beforeStep && beforeStep.result.components.map(c => c.type));
+const revStep = pfRunLines.find(l => l.command === 'prefab.revert');
+check(revStep && revStep.result.id !== instStep.result.id, 'prefab.revert returns a fresh entity', revStep);
+const afterStep = pfRunLines.find(l => l.id === 'after');
+check(afterStep && Math.abs(afterStep.result.value[0] - 0.8) < 1e-3,
+    'prefab.revert restores the prefab value', afterStep && afterStep.result.value);
+
+
 const build = expectOk(['--project', projectDir, 'script.build']);
 check(build && build.ok === true && build.output.endsWith('.so'),
     'script.build compiles the template scripts', build && build.diagnostics);

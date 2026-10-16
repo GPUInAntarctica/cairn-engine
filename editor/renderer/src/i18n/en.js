@@ -189,6 +189,8 @@ export const dict = {
     'status.saved': 'Saved',
     'status.noCompiler': 'No C++ compiler found. Install g++ or set one in Preferences.',
     'status.sceneCreated': 'Scene "{name}" created',
+    'status.prefabInstantiated': 'Prefab instantiated',
+    'status.prefabFailed': 'Could not instantiate prefab',
     'status.sceneSaved': 'Scene saved',
     'status.sceneLoaded': 'Scene loaded',
     'status.exportOk': 'Player exported to {dir}',
@@ -226,6 +228,7 @@ export const dict = {
     'ctx.newScene': 'New Scene',
     'ctx.importTexture': 'Import Texture...',
     'ctx.open': 'Open',
+    'ctx.instantiatePrefab': 'Instantiate in Scene',
     'ctx.showInFolder': 'Show in File Manager',
 
     // image editor

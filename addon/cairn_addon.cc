@@ -150,6 +150,10 @@ public:
             InstanceMethod("assetMove", &EngineWrap::AssetMove),
             InstanceMethod("assetDelete", &EngineWrap::AssetDelete),
             InstanceMethod("assetsList", &EngineWrap::AssetsList),
+            InstanceMethod("createPrefab", &EngineWrap::CreatePrefab),
+            InstanceMethod("instantiatePrefab", &EngineWrap::InstantiatePrefab),
+            InstanceMethod("applyPrefab", &EngineWrap::ApplyPrefab),
+            InstanceMethod("revertPrefab", &EngineWrap::RevertPrefab),
             InstanceMethod("loadScriptLibrary", &EngineWrap::LoadScriptLibrary),
             InstanceMethod("play", &EngineWrap::Play),
             InstanceMethod("pause", &EngineWrap::Pause),
@@ -604,6 +608,43 @@ private:
         return arr;
     }
 
+    // -- prefabs -------------------------------------------------------------
+    Napi::Value CreatePrefab(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        std::string err;
+        bool ok = engine_->CreatePrefabFromEntity((EntityId)GetNumber(info, 0, 0), GetString(info, 1), &err);
+        Napi::Object o = Napi::Object::New(env);
+        o.Set("ok", ok);
+        if (!ok) o.Set("error", err);
+        else o.Set("guid", engine_->assets().GuidForPath(GetString(info, 1)));
+        o.Set("path", GetString(info, 1));
+        return o;
+    }
+    Napi::Value InstantiatePrefab(const Napi::CallbackInfo& info) {
+        EntityId parent = (EntityId)GetNumber(info, 1, 0);
+        EntityId id = engine_->InstantiatePrefab(GetString(info, 0), parent);
+        return Napi::Number::New(info.Env(), (double)id);
+    }
+    Napi::Value ApplyPrefab(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        std::string err;
+        bool ok = engine_->ApplyPrefab((EntityId)GetNumber(info, 0, 0), &err);
+        Napi::Object o = Napi::Object::New(env);
+        o.Set("ok", ok);
+        if (!ok) o.Set("error", err);
+        return o;
+    }
+    Napi::Value RevertPrefab(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        std::string err;
+        EntityId id = engine_->RevertPrefab((EntityId)GetNumber(info, 0, 0), &err);
+        Napi::Object o = Napi::Object::New(env);
+        o.Set("ok", id != 0);
+        if (id == 0) o.Set("error", err);
+        o.Set("id", (double)id);
+        return o;
+    }
+
     // -- scripting -----------------------------------------------------------
     Napi::Value LoadScriptLibrary(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
@@ -747,7 +788,7 @@ Napi::FunctionReference EngineWrap::constructor;
 
 Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
     EngineWrap::Init(env, exports);
-    exports.Set("engineVersion", Napi::String::New(env, "0.1.2"));
+    exports.Set("engineVersion", Napi::String::New(env, "0.1.3"));
     return exports;
 }
 

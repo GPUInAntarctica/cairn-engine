@@ -134,6 +134,7 @@ bool GameObject::AddComponentByName(const std::string& typeName) {
     else if (typeName == "SphereCollider") owned.reset(new (std::nothrow) SphereCollider());
     else if (typeName == "Collider2D") owned.reset(new (std::nothrow) Collider2D());
     else if (typeName == "Script") owned.reset(new (std::nothrow) ScriptComponent());
+    else if (typeName == "PrefabInstance") owned.reset(new (std::nothrow) PrefabInstance());
     if (!owned) return false;
     AttachComponent(std::move(owned));
     return true;
