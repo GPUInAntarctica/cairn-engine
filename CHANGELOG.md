@@ -2,6 +2,16 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.1] - 2026-10-16
+
+### Asset database: stable GUIDs + `.meta` import settings
+- **Every asset now has a stable identity.** A `cairn-asset` `.meta` sidecar is created next to each file under `Assets/` (GUID, importer, settings, version), and the engine indexes the project into a GUID ↔ path database (`engine/include/cairn/asset.h`, `engine/src/asset.cpp`). Scans are idempotent and reuse the GUID already on disk.
+- **Renaming a file no longer breaks a scene.** Asset-reference properties (`MeshRenderer::albedoTexturePath`, `meshPath`, `normalMapPath`, `SpriteRenderer::texturePath`, `normalMapPath`) are serialized as `{"path","guid"}` and resolved by GUID at load time, so a moved or renamed asset still binds. Scenes without a `.meta` keep the plain path string, so existing projects load unchanged.
+- **New engine API.** `Engine::assets()` / `RefreshAssets()`, plus `AssetDatabase::{Scan, GuidForPath, PathForGuid, ReadMeta, WriteMeta, EnsureMeta, ImportFile, MoveAsset, DeleteAsset}` exposed through the addon.
+- **New CLI commands.** `assets.database`, `assets.guid`, `assets.resolve`, `assets.meta.get`, `assets.meta.set`, `assets.import`, `assets.move`, `assets.delete`.
+- **Editor.** The content browser carries a `.meta` along on rename, removes it on delete, and re-indexes on import so GUIDs stay stable for editor users too.
+- **Tests.** `TestAssetDatabase` covers GUID stability, `.meta` settings round-trip, move-preserves-GUID and the scene GUID-reference round trip; the CLI suite adds an asset-database section.
+
 ## [Unreleased]
 
 ### Vulkan GPU rendering backend (default)

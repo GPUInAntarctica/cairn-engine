@@ -2,6 +2,7 @@
 // host and asset libraries. This is the surface the editor addon drives.
 #pragma once
 
+#include "cairn/asset.h"
 #include "cairn/log.h"
 #include "cairn/mesh.h"
 #include "cairn/renderer.h"
@@ -110,6 +111,12 @@ public:
     void ReloadAssets();
     void ReloadScriptLibraries();
 
+    // --- Asset database (stable GUIDs + .meta import settings).
+    AssetDatabase& assets() { return assets_; }
+    const AssetDatabase& assets() const { return assets_; }
+    // Re-scans <project>/Assets and (re)indexes every asset GUID.
+    void RefreshAssets();
+
     // --- Scripting.
     // Loads/reloads the compiled script library. Returns false with a message.
     bool LoadScriptLibrary(const std::string& absolutePath, std::string* error);
@@ -176,6 +183,7 @@ private:
     std::shared_ptr<Scene> scene_;
     ViewportCamera viewCam_;
     InputState input_;
+    AssetDatabase assets_;
     std::string projectRoot_ = ".";
     std::unique_ptr<ScriptHost> scriptHost_;
     EntityId highlightEntity_ = 0;

@@ -113,6 +113,58 @@ check(info && info.scripts.includes('Rotator.cpp'), 'project.info lists script s
 const assets = expectOk(['--project', projectDir, 'assets.list', '--kind', 'texture']);
 check(Array.isArray(assets) && assets.includes('Assets/Textures/checker.png'), 'assets.list finds seeded textures', assets);
 
+// ---------------------------------------------------------------------------
+console.log('cli: asset database + GUID references');
+// ---------------------------------------------------------------------------
+const imported = expectOk(['--project', projectDir, 'assets.import',
+    '--source', path.join(projectDir, 'Assets', 'Textures', 'checker.png'),
+    '--dest', 'Assets/Textures/db_test.png']);
+check(imported && /^[0-9a-f]{32}$/.test(imported.guid) && imported.path === 'Assets/Textures/db_test.png',
+    'assets.import copies a file and assigns a 32-hex GUID', imported);
+
+const dbGuid = expectOk(['--project', projectDir, 'assets.guid', '--asset', 'Assets/Textures/db_test.png']);
+check(dbGuid && dbGuid.guid === imported.guid, 'assets.guid returns the same stable GUID', dbGuid);
+
+const dbList = expectOk(['--project', projectDir, 'assets.database']);
+check(Array.isArray(dbList) && dbList.some(e => e.guid === imported.guid && e.importer === 'texture'),
+    'assets.database indexes the imported texture', dbList);
+
+const meta = expectOk(['--project', projectDir, 'assets.meta.get', '--asset', 'Assets/Textures/db_test.png']);
+check(meta && meta.importer === 'texture' && meta.guid === imported.guid, 'assets.meta.get reads the sidecar', meta);
+expectOk(['--project', projectDir, 'assets.meta.set', '--asset', 'Assets/Textures/db_test.png',
+    '--settings', '{"colorSpace":"linear"}']);
+const meta2 = expectOk(['--project', projectDir, 'assets.meta.get', '--asset', 'Assets/Textures/db_test.png']);
+check(meta2 && meta2.settings && meta2.settings.colorSpace === 'linear',
+    'assets.meta.set persists importer settings', meta2);
+
+const assetRefBatch = path.join(scratch, 'assetref.jsonl');
+fs.writeFileSync(assetRefBatch, [
+    { command: 'scene.new', args: { name: 'AssetRef' } },
+    { command: 'entity.createPrimitive', args: { mesh: 'Cube', name: 'TexCube' }, id: 'c' },
+    { command: 'component.setProps', args: { id: '$ref:c', type: 'MeshRenderer',
+        props: { albedoTexturePath: 'Assets/Textures/db_test.png' } } },
+    { command: 'scene.save', args: { file: 'Assets/Scenes/AssetRef.cscene' } },
+].map(s => JSON.stringify(s)).join('\n'));
+expectOk(['--project', projectDir, 'exec.run', '--file', assetRefBatch]);
+
+const savedRef = fs.readFileSync(path.join(projectDir, 'Assets', 'Scenes', 'AssetRef.cscene'), 'utf8');
+check(savedRef.includes(imported.guid), 'scene serializes the asset GUID alongside the path', savedRef);
+
+// Rename the asset; the GUID must keep the reference alive.
+const moved = expectOk(['--project', projectDir, 'assets.move',
+    '--from', 'Assets/Textures/db_test.png', '--to', 'Assets/Textures/db_test_moved.png']);
+check(moved && moved.guid === imported.guid && moved.path === 'Assets/Textures/db_test_moved.png',
+    'assets.move preserves the GUID', moved);
+
+const resolved = expectOk(['--project', projectDir, 'assets.resolve', '--guid', imported.guid]);
+check(resolved && resolved.path === 'Assets/Textures/db_test_moved.png',
+    'assets.resolve follows a renamed asset', resolved);
+
+const afterMove = expectOk(['--project', projectDir, '--scene', 'Assets/Scenes/AssetRef.cscene',
+    'component.getProp', '--id', '1', '--type', 'MeshRenderer', '--prop', 'albedoTexturePath']);
+check(afterMove && afterMove.value === 'Assets/Textures/db_test_moved.png',
+    'the scene reference survives the rename', afterMove);
+
 const batchPath = path.join(scratch, 'batch.jsonl');
 fs.writeFileSync(batchPath, [
     { command: 'scene.load', args: { file: 'Assets/Scenes/Main.cscene' }, id: 'scene' },

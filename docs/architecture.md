@@ -44,6 +44,7 @@ Cairn 由四个主要部分组成：**C++ 引擎运行时**、**N-API 插件**�
 | --- | --- |
 | `engine/include/cairn/math.h` | 纯头文件线性代数（Vec2/3/4、Quat、Mat4、AABB、Color），右手系、Y 向上、列主序 |
 | `engine/src/json.*` | 保序 JSON 解析/序列化，用于场景、项目与编辑器通信 |
+| `engine/src/asset.*` | 资产数据库：`Assets/` 下每个文件一个 `.meta` 边车（稳定 GUID、importer、导入设置），维护 GUID↔路径索引；场景引用按 GUID 解析，重命名/移动资产不断链 |
 | `engine/src/scene.cpp` | GameObject/Component 容器、Transform 父子链、延迟销毁、`.cscene` 读写 |
 | `engine/src/components.cpp` | 反射表：每个引擎组件暴露 属性名/类型/get/set，检视器与序列化共用 |
 | `engine/src/renderer.cpp` | 渲染前端 + 多线程软件光栅化：场景收集（`GatherScene`）、阴影视锥拟合（`FitCascadeSet`）、后端分发、裁剪（六面体）、透视校正插值、GGX、天空、雾、2D 精灵/文本、调试线 |

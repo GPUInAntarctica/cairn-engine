@@ -65,8 +65,14 @@ constexpr PropertyDef EnumField(const char* name, const char* label, const char*
 }
 
 template <typename C, auto Member>
+void AssetMemberSet(Component* c, const Json& j) {
+    // Accepts a bare path (inspector / CLI) or a {"path","guid"} scene reference.
+    static_cast<C*>(c)->*Member = AssetRefFromJson(j);
+}
+
+template <typename C, auto Member>
 constexpr PropertyDef AssetField(const char* name, const char* label, const char* assetKind) {
-    return PropertyDef{name, label, EditorPropKind::Asset, &MemberGet<C, Member>, &MemberSet<C, Member>,
+    return PropertyDef{name, label, EditorPropKind::Asset, &MemberGet<C, Member>, &AssetMemberSet<C, Member>,
                        nullptr, 0, assetKind};
 }
 

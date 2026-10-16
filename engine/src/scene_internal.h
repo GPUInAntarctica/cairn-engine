@@ -2,6 +2,7 @@
 #pragma once
 
 #include "cairn/scripting.h"
+#include "cairn/asset.h"
 
 #include <memory>
 #include <unordered_map>

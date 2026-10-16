@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cairn-engine VERSION 0.1.0 LANGUAGES CXX)
+project(cairn-engine VERSION 0.1.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -107,6 +107,7 @@ endif()
 add_library(cairn_engine SHARED
     src/json.cpp
     src/log.cpp
+    src/asset.cpp
     src/texture.cpp
     src/mesh.cpp
     src/font.cpp

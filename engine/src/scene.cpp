@@ -300,7 +300,14 @@ Json Scene::SerializeEntity(const GameObject* go) const {
         } else {
             Json props = Json::MakeObject();
             if (const auto* defs = ComponentPropertyDefs(c.get())) {
-                for (const auto& def : *defs) props.set(def.name, def.get(c.get()));
+                for (const auto& def : *defs) {
+                    Json v = def.get(c.get());
+                    // Asset references carry a stable GUID alongside the path so
+                    // a rename never breaks the scene.
+                    if (def.kind == EditorPropKind::Asset && v.isString())
+                        v = AssetRefToJson(v.asString());
+                    props.set(def.name, v);
+                }
             }
             cj.set("properties", std::move(props));
         }

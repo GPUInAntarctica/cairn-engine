@@ -311,10 +311,13 @@ export class ContentBrowser {
         if (fs.existsSync(dest)) { this.renderGrid(); return; }
         try {
             fs.renameSync(full, dest);
+            // Carry the .meta sidecar so the asset keeps its stable GUID.
+            if (fs.existsSync(full + '.meta')) fs.renameSync(full + '.meta', dest + '.meta');
         } catch {
             // In use, or permission denied: leave the row as it was rather
             // than showing a name that does not exist on disk.
         }
+        emit('asset-changed', dest);
         this.render();
     }
 
@@ -344,6 +347,8 @@ export class ContentBrowser {
             { label: 'ctx.delete', run: async () => {
                 if (await deleteConfirm('asset', name)) {
                     fs.rmSync(full, { recursive: isDir, force: true });
+                    fs.rmSync(full + '.meta', { force: true });
+                    emit('asset-changed', full);
                     this.render();
                 }
             } },
@@ -383,6 +388,7 @@ export class ContentBrowser {
         if (!src) return;
         const dest = path.join(this.currentDir(), path.basename(src));
         fs.copyFileSync(src, dest);
+        emit('asset-changed', dest);
         this.render();
     }
 

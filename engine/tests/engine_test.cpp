@@ -1130,6 +1130,80 @@ static void TestTextureCache() {
     CHECK(tb2 == tb3);
 }
 
+// Asset database: stable GUIDs, .meta import settings, rename tracking.
+static void TestAssetDatabase() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-assets").string();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    { std::ofstream(dir + "/Assets/Textures/a.png", std::ios::binary) << "not-a-real-png"; }
+
+    AssetDatabase db(dir);
+    db.Scan();
+    const std::string rel = "Assets/Textures/a.png";
+    const std::string guid = db.GuidForPath(rel);
+    CHECK(guid.size() == 32);
+    CHECK(db.PathForGuid(guid) == rel);
+    CHECK(db.HasPath(rel) && db.HasGuid(guid));
+
+    // Re-scanning reuses the GUID already written into the .meta.
+    db.Scan();
+    CHECK(db.GuidForPath(rel) == guid);
+
+    // Importer settings round-trip through the sidecar.
+    Cairn::AssetMeta meta;
+    CHECK(db.ReadMeta(rel, &meta));
+    meta.settings = Json::MakeObject();
+    meta.settings.set("colorSpace", "linear");
+    CHECK(db.WriteMeta(rel, meta));
+    Cairn::AssetMeta reread;
+    CHECK(db.ReadMeta(rel, &reread));
+    CHECK(reread.settings["colorSpace"].asString() == "linear");
+
+    // A move preserves the GUID and reindexes the path.
+    CHECK(db.MoveAsset(rel, "Assets/Textures/b.png"));
+    CHECK(db.GuidForPath("Assets/Textures/b.png") == guid);
+    CHECK(!db.HasPath(rel));
+    CHECK(db.PathForGuid(guid) == "Assets/Textures/b.png");
+    CHECK(db.EnsureMeta("Assets/Textures/b.png") == guid);  // idempotent
+
+    // No engine: a reference stays a bare path string.
+    CHECK(AssetRefToJson("Assets/Textures/b.png").isString());
+
+    Engine engine;
+    engine.SetProjectRoot(dir);
+    // With the project indexed, a reference carries the GUID inline...
+    Json ref = AssetRefToJson("Assets/Textures/b.png");
+    CHECK(ref.isObject() && ref["guid"].asString() == guid);
+    CHECK(AssetRefFromJson(ref) == "Assets/Textures/b.png");
+
+    // ...so a rename still resolves through the stored GUID.
+    engine.assets().MoveAsset("Assets/Textures/b.png", "Assets/Textures/c.png");
+    engine.RefreshAssets();
+    CHECK(AssetRefFromJson(ref) == "Assets/Textures/c.png");
+
+    // A saved scene stores the GUID, and loading resolves a later rename.
+    engine.NewScene("Assets");
+    GameObject* cube = engine.scene().CreateEntity("Cube");
+    auto* mr = cube->AddComponent<MeshRenderer>();
+    CHECK(mr != nullptr);
+    mr->albedoTexturePath = "Assets/Textures/c.png";
+    std::filesystem::create_directories(dir + "/Assets/Scenes");
+    const std::string scenePath = dir + "/Assets/Scenes/S.cscene";
+    std::string saveErr;
+    CHECK(engine.SaveSceneFile(scenePath, &saveErr));
+    std::string sceneText;
+    { std::ifstream in(scenePath); std::stringstream ss; ss << in.rdbuf(); sceneText = ss.str(); }
+    CHECK(sceneText.find(guid) != std::string::npos);
+
+    engine.assets().MoveAsset("Assets/Textures/c.png", "Assets/Textures/d.png");
+    CHECK(engine.LoadSceneFile(scenePath, &saveErr));
+    GameObject* loaded = engine.scene().FindByName("Cube");
+    CHECK(loaded != nullptr);
+    CHECK(loaded->GetComponent<MeshRenderer>()->albedoTexturePath == "Assets/Textures/d.png");
+
+    std::filesystem::remove_all(dir);
+}
+
 int main() {
     Log::SetEchoStdout(false);
     TestMath();
@@ -1155,6 +1229,7 @@ int main() {
     TestScripts();
     TestPbrMaterials();
     TestTextureCache();
+    TestAssetDatabase();
     if (g_failures == 0) {
         std::printf("engine tests passed\n");
         return 0;

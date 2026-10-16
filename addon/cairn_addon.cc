@@ -139,6 +139,15 @@ public:
             InstanceMethod("setSceneSetting", &EngineWrap::SetSceneSetting),
             InstanceMethod("getSceneSettings", &EngineWrap::GetSceneSettings),
             InstanceMethod("reloadAssets", &EngineWrap::ReloadAssets),
+            InstanceMethod("refreshAssets", &EngineWrap::RefreshAssets),
+            InstanceMethod("assetGuid", &EngineWrap::AssetGuid),
+            InstanceMethod("assetPath", &EngineWrap::AssetPath),
+            InstanceMethod("assetMeta", &EngineWrap::AssetMeta),
+            InstanceMethod("assetMetaSet", &EngineWrap::AssetMetaSet),
+            InstanceMethod("assetImport", &EngineWrap::AssetImport),
+            InstanceMethod("assetMove", &EngineWrap::AssetMove),
+            InstanceMethod("assetDelete", &EngineWrap::AssetDelete),
+            InstanceMethod("assetsList", &EngineWrap::AssetsList),
             InstanceMethod("loadScriptLibrary", &EngineWrap::LoadScriptLibrary),
             InstanceMethod("play", &EngineWrap::Play),
             InstanceMethod("pause", &EngineWrap::Pause),
@@ -504,6 +513,93 @@ private:
 
     // -- assets --------------------------------------------------------------
     void ReloadAssets(const Napi::CallbackInfo& info) { engine_->ReloadAssets(); }
+    void RefreshAssets(const Napi::CallbackInfo& info) { engine_->RefreshAssets(); }
+
+    Napi::Value AssetGuid(const Napi::CallbackInfo& info) {
+        const std::string path = GetString(info, 0);
+        const std::string guid = engine_->assets().GuidForPath(path);
+        if (guid.empty()) return info.Env().Null();
+        return Napi::String::New(info.Env(), guid);
+    }
+    Napi::Value AssetPath(const Napi::CallbackInfo& info) {
+        const std::string path = engine_->assets().PathForGuid(GetString(info, 0));
+        if (path.empty()) return info.Env().Null();
+        return Napi::String::New(info.Env(), path);
+    }
+    Napi::Value AssetMeta(const Napi::CallbackInfo& info) {
+        Cairn::AssetMeta meta;
+        if (!engine_->assets().ReadMeta(GetString(info, 0), &meta)) return info.Env().Null();
+        Napi::Env env = info.Env();
+        Napi::Object o = Napi::Object::New(env);
+        o.Set("guid", meta.guid);
+        o.Set("importer", meta.importer);
+        o.Set("version", meta.version);
+        o.Set("settings", JsonToValue(env, meta.settings));
+        return o;
+    }
+    Napi::Value AssetMetaSet(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        const std::string path = GetString(info, 0);
+        Cairn::AssetMeta meta;
+        if (!engine_->assets().ReadMeta(path, &meta)) {
+            meta.guid = engine_->assets().EnsureMeta(path);
+            if (meta.guid.empty()) return MakeError(env, "cannot create meta for " + path);
+            engine_->assets().ReadMeta(path, &meta);
+        }
+        if (info.Length() > 1 && info[1].IsObject()) meta.settings = JsonFromValue(env, info[1]);
+        std::string err;
+        bool ok = engine_->assets().WriteMeta(path, meta, &err);
+        if (ok) engine_->RefreshAssets();
+        Napi::Object o = Napi::Object::New(env);
+        o.Set("ok", ok);
+        if (!ok) o.Set("error", err);
+        else o.Set("guid", meta.guid);
+        return o;
+    }
+    Napi::Value AssetImport(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        std::string err;
+        const std::string guid =
+            engine_->assets().ImportFile(GetString(info, 0), GetString(info, 1), &err);
+        Napi::Object o = Napi::Object::New(env);
+        o.Set("ok", !guid.empty());
+        if (guid.empty()) o.Set("error", err);
+        o.Set("guid", guid);
+        o.Set("path", GetString(info, 1));
+        return o;
+    }
+    Napi::Value AssetMove(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        std::string err;
+        bool ok = engine_->assets().MoveAsset(GetString(info, 0), GetString(info, 1), &err);
+        Napi::Object o = Napi::Object::New(env);
+        o.Set("ok", ok);
+        if (!ok) o.Set("error", err);
+        else { o.Set("guid", engine_->assets().GuidForPath(GetString(info, 1))); o.Set("path", GetString(info, 1)); }
+        return o;
+    }
+    Napi::Value AssetDelete(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        std::string err;
+        bool ok = engine_->assets().DeleteAsset(GetString(info, 0), &err);
+        Napi::Object o = Napi::Object::New(env);
+        o.Set("ok", ok);
+        if (!ok) o.Set("error", err);
+        return o;
+    }
+    Napi::Value AssetsList(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        Napi::Array arr = Napi::Array::New(env);
+        uint32_t i = 0;
+        for (const AssetEntry& e : engine_->assets().entries()) {
+            Napi::Object o = Napi::Object::New(env);
+            o.Set("guid", e.guid);
+            o.Set("path", e.path);
+            o.Set("importer", e.importer);
+            arr.Set(i++, o);
+        }
+        return arr;
+    }
 
     // -- scripting -----------------------------------------------------------
     Napi::Value LoadScriptLibrary(const Napi::CallbackInfo& info) {
@@ -647,7 +743,7 @@ Napi::FunctionReference EngineWrap::constructor;
 
 Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
     EngineWrap::Init(env, exports);
-    exports.Set("engineVersion", Napi::String::New(env, "0.1.0"));
+    exports.Set("engineVersion", Napi::String::New(env, "0.1.1"));
     return exports;
 }
 

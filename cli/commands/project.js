@@ -144,6 +144,170 @@ def('assets.assetsReload', {
     },
 });
 
+def('assets.database', {
+    summary: 'List the asset database: stable GUID, project-relative path and importer.',
+    args: {},
+    returns: '[{guid, path, importer}]',
+    needsProject: true,
+    needsEngine: true,
+    examples: ['cairn --project ./game assets.database'],
+    run(ctx) {
+        return ctx.session.engine().assetsList();
+    },
+});
+
+def('assets.guid', {
+    summary: 'Return the stable GUID of an asset (creates its .meta on first use).',
+    args: {
+        asset: { type: 'string', required: true, desc: 'Project-relative asset path, e.g. Assets/Textures/checker.png.' },
+    },
+    returns: '{guid, path}',
+    needsProject: true,
+    needsEngine: true,
+    examples: ['cairn --project ./game assets.guid --asset Assets/Textures/checker.png'],
+    run(ctx, args) {
+        const engine = ctx.session.engine();
+        const rel = ctx.session.toProjectRelative(ctx.session.resolveAssetPath(args.asset));
+        let guid = engine.assetGuid(rel);
+        if (!guid) {
+            engine.assetImport(ctx.session.resolveAssetPath(args.asset), rel);
+            guid = engine.assetGuid(rel);
+        }
+        if (!guid) throw notFound(`cannot resolve asset '${args.asset}'`, { asset: args.asset });
+        return { guid, path: rel };
+    },
+});
+
+def('assets.resolve', {
+    summary: 'Resolve a GUID back to its current project-relative path (survives renames).',
+    args: {
+        guid: { type: 'string', required: true, desc: '32-hex asset GUID from a .meta file.' },
+    },
+    returns: '{guid, path}',
+    needsProject: true,
+    needsEngine: true,
+    examples: ['cairn --project ./game assets.resolve --guid 3f2a...'],
+    run(ctx, args) {
+        const path = ctx.session.engine().assetPath(args.guid);
+        if (!path) throw notFound(`no asset with guid '${args.guid}'`, { guid: args.guid });
+        return { guid: args.guid, path };
+    },
+});
+
+def('assets.meta.get', {
+    summary: 'Read the .meta sidecar (GUID, importer, settings) of an asset.',
+    args: {
+        asset: { type: 'string', required: true, desc: 'Project-relative asset path.' },
+    },
+    returns: '{guid, importer, version, settings}',
+    needsProject: true,
+    needsEngine: true,
+    examples: ['cairn --project ./game assets.meta.get --asset Assets/Textures/checker.png'],
+    run(ctx, args) {
+        const engine = ctx.session.engine();
+        const rel = ctx.session.toProjectRelative(ctx.session.resolveAssetPath(args.asset));
+        engine.assetGuid(rel);  // ensure the meta exists
+        const meta = engine.assetMeta(rel);
+        if (!meta) throw notFound(`asset '${args.asset}' has no meta`, { asset: args.asset });
+        return meta;
+    },
+});
+
+def('assets.meta.set', {
+    summary: 'Write importer settings into an asset .meta (e.g. {"colorSpace":"linear"}).',
+    args: {
+        asset: { type: 'string', required: true, desc: 'Project-relative asset path.' },
+        settings: { type: 'json', required: true, desc: 'Settings object merged into the meta.' },
+    },
+    returns: '{ok, guid}',
+    needsProject: true,
+    needsEngine: true,
+    examples: ['cairn --project ./game assets.meta.set --asset Assets/Textures/n.png --settings \'{"colorSpace":"linear"}\''],
+    run(ctx, args) {
+        const engine = ctx.session.engine();
+        const rel = ctx.session.toProjectRelative(ctx.session.resolveAssetPath(args.asset));
+        engine.assetGuid(rel);
+        const result = engine.assetMetaSet(rel, args.settings);
+        if (!result || !result.ok) throw invalidArg(result && result.error || 'meta write failed', { asset: args.asset });
+        return { ok: true, guid: result.guid };
+    },
+});
+
+def('assets.import', {
+    summary: 'Copy an external file into the project Assets tree and create its .meta.',
+    args: {
+        source: { type: 'path', required: true, desc: 'File to import from anywhere on disk.' },
+        dest: { type: 'string', desc: 'Project-relative destination, e.g. Assets/Textures/rock.png.' },
+    },
+    returns: '{ok, guid, path}',
+    needsProject: true,
+    needsEngine: true,
+    examples: ['cairn --project ./game assets.import --source ~/rock.png --dest Assets/Textures/rock.png'],
+    run(ctx, args) {
+        const engine = ctx.session.engine();
+        const source = ctx.session.resolveAssetPath(args.source);
+        if (!fs.existsSync(source)) throw notFound(`source not found: ${args.source}`, { source });
+        const dest = args.dest || defaultImportDest(args.source);
+        const rel = ctx.session.toProjectRelative(path.resolve(ctx.session.tryProject(), dest));
+        const result = engine.assetImport(source, rel);
+        if (!result.ok) throw invalidArg(result.error, { source, dest });
+        return { ok: true, guid: result.guid, path: rel };
+    },
+});
+
+def('assets.move', {
+    summary: 'Rename/move an asset inside the project; its GUID (and scene references) survive.',
+    args: {
+        from: { type: 'string', required: true, desc: 'Current project-relative path.' },
+        to: { type: 'string', required: true, desc: 'New project-relative path.' },
+    },
+    returns: '{ok, guid, path}',
+    needsProject: true,
+    needsEngine: true,
+    examples: ['cairn --project ./game assets.move --from Assets/Textures/a.png --to Assets/Textures/b.png'],
+    run(ctx, args) {
+        const from = ctx.session.toProjectRelative(ctx.session.resolveAssetPath(args.from));
+        const to = ctx.session.toProjectRelative(path.resolve(ctx.session.tryProject(), args.to));
+        const result = ctx.session.engine().assetMove(from, to);
+        if (!result.ok) throw notFound(result.error, { from, to });
+        return { ok: true, guid: result.guid, path: result.path };
+    },
+});
+
+def('assets.delete', {
+    summary: 'Delete an asset and its .meta sidecar.',
+    args: {
+        asset: { type: 'string', required: true, desc: 'Project-relative asset path.' },
+    },
+    returns: '{ok}',
+    needsProject: true,
+    needsEngine: true,
+    examples: ['cairn --project ./game assets.delete --asset Assets/Textures/old.png'],
+    run(ctx, args) {
+        const rel = ctx.session.toProjectRelative(ctx.session.resolveAssetPath(args.asset));
+        const result = ctx.session.engine().assetDelete(rel);
+        if (!result.ok) throw notFound(result.error, { asset: args.asset });
+        return { ok: true };
+    },
+});
+
+const IMPORT_DIRS = {
+    texture: 'Textures', model: 'Models', audio: 'Audio', script: 'Scripts', scene: 'Scenes',
+};
+
+function defaultImportDest(source) {
+    const ext = path.extname(source).toLowerCase();
+    const sub = ['Assets', IMPORT_DIRS[importerOf(ext)] || 'Raw'].filter(Boolean).join('/');
+    return `${sub}/${path.basename(source)}`;
+}
+
+function importerOf(ext) {
+    if (['.png', '.jpg', '.jpeg', '.bmp', '.tga'].includes(ext)) return 'texture';
+    if (['.obj', '.gltf', '.glb', '.fbx'].includes(ext)) return 'model';
+    if (['.wav', '.ogg', '.mp3'].includes(ext)) return 'audio';
+    return 'other';
+}
+
 def('project.exportPlayer', {
     summary: 'Build gameplay scripts and package a standalone Electron player directory.',
     args: {

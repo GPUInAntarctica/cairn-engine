@@ -37,6 +37,7 @@ std::string EngineResolvePath(const std::string& projectPath) {
     if (projectPath.empty()) return g_engine->projectRoot();
     return g_engine->projectRoot() + "/" + projectPath;
 }
+AssetDatabase* EngineAssetDatabase() { return g_engine ? &g_engine->assets() : nullptr; }
 void EngineQueueDebugLine(const Vec3& a, const Vec3& b, Color color) {
     if (g_engine) g_engine->debugLines_.push_back({a, b, color});
 }
@@ -180,7 +181,14 @@ Engine::~Engine() {
     if (g_engine == this) g_engine = nullptr;
 }
 
-void Engine::SetProjectRoot(const std::string& absolutePath) { projectRoot_ = absolutePath; }
+void Engine::SetProjectRoot(const std::string& absolutePath) {
+    projectRoot_ = absolutePath;
+    assets_.SetProjectRoot(absolutePath);
+    // Index the project up front so GUID references resolve during scene loads.
+    assets_.Scan();
+}
+
+void Engine::RefreshAssets() { assets_.Scan(); }
 
 void Engine::SetViewportSize(int w, int h) { renderer_.Resize(w, h); }
 
@@ -192,6 +200,9 @@ void Engine::NewScene(const std::string& name) {
 }
 
 bool Engine::LoadSceneFile(const std::string& path, std::string* error) {
+    // Pick up any assets added/renamed since the last scan so GUID references
+    // resolve against the current project layout.
+    assets_.Scan();
     auto loaded = Scene::LoadFromFile(path, error);
     if (!loaded) return false;
     StopScripts();
@@ -224,6 +235,7 @@ void Engine::ApplyScriptPropDefaults() {
 }
 
 bool Engine::SaveSceneFile(const std::string& path, std::string* error) {
+    assets_.Scan();  // ensure newly imported assets have a GUID to serialize
     return scene_->SaveToFile(path, error);
 }
 
@@ -383,6 +395,7 @@ bool Engine::GetComponentProp(EntityId id, const std::string& typeName, const st
 void Engine::ReloadAssets() {
     // Only drop textures whose file actually changed on disk; a blanket clear
     // would thrash the LRU cache for unchanged assets.
+    assets_.Scan();
     EngineTextureLibrary().ReloadChanged();
     EngineMeshLibrary().ClearObj();
 }

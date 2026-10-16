@@ -197,8 +197,16 @@ the document with `--image FILE`). `image.open`, `image.layer.*`,
 | Command | Arguments | Description |
 | --- | --- | --- |
 | `assets.assetsReload` | — | Drop cached textures and meshes so the next access re-reads from disk. |
+| `assets.database` | — | List the asset database: stable GUID, project-relative path and importer. |
+| `assets.delete` | `--asset` (string, required) | Delete an asset and its .meta sidecar. |
+| `assets.guid` | `--asset` (string, required) | Return the stable GUID of an asset (creates its .meta on first use). |
+| `assets.import` | `--source` (path, required)<br>`--dest` (string) | Copy an external file into the project Assets tree and create its .meta. |
 | `assets.info` | `--asset` (string, required) | Check that an asset reference resolves, and report its size. |
 | `assets.list` | `--kind` (enum, default "texture", one of texture \| model \| all) | List project assets (textures or models) as project-relative paths. |
+| `assets.meta.get` | `--asset` (string, required) | Read the .meta sidecar (GUID, importer, settings) of an asset. |
+| `assets.meta.set` | `--asset` (string, required)<br>`--settings` (json, required) | Write importer settings into an asset .meta (e.g. {"colorSpace":"linear"}). |
+| `assets.move` | `--from` (string, required)<br>`--to` (string, required) | Rename/move an asset inside the project; its GUID (and scene references) survive. |
+| `assets.resolve` | `--guid` (string, required) | Resolve a GUID back to its current project-relative path (survives renames). |
 
 ### `component`
 
