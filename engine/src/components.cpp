@@ -13,6 +13,7 @@ inline Json ToJson(bool v) { return v; }
 inline Json ToJson(const std::string& v) { return v; }
 inline Json ToJson(const Vec2& v) { return Json::MakeArray({v.x, v.y}); }
 inline Json ToJson(const Vec3& v) { return Json::MakeArray({v.x, v.y, v.z}); }
+inline Json ToJson(const Vec4& v) { return Json::MakeArray({v.x, v.y, v.z, v.w}); }
 inline Json ToJson(const Color& c) { return Json::MakeArray({c.r, c.g, c.b, c.a}); }
 
 template <typename T>
@@ -27,6 +28,10 @@ T FromJson(const Json& j, T def) {
         return j.isArray() && j.size() >= 2 ? Vec2{j[0].asFloat(), j[1].asFloat()} : def;
     } else if constexpr (std::is_same_v<T, Vec3>) {
         return j.isArray() && j.size() >= 3 ? Vec3{j[0].asFloat(), j[1].asFloat(), j[2].asFloat()} : def;
+    } else if constexpr (std::is_same_v<T, Vec4>) {
+        return j.isArray() && j.size() >= 4
+                   ? Vec4{j[0].asFloat(), j[1].asFloat(), j[2].asFloat(), j[3].asFloat()}
+                   : def;
     } else if constexpr (std::is_same_v<T, Color>) {
         return j.isArray() && j.size() >= 4
                    ? Color{j[0].asFloat(), j[1].asFloat(), j[2].asFloat(), j[3].asFloat()}
@@ -74,6 +79,13 @@ template <typename C, auto Member>
 constexpr PropertyDef AssetField(const char* name, const char* label, const char* assetKind) {
     return PropertyDef{name, label, EditorPropKind::Asset, &MemberGet<C, Member>, &AssetMemberSet<C, Member>,
                        nullptr, 0, assetKind};
+}
+
+// A GameObject reference stored as the target's stable GUID string.
+template <typename C, auto Member>
+constexpr PropertyDef ObjectField(const char* name, const char* label) {
+    return PropertyDef{name, label, EditorPropKind::Object, &MemberGet<C, Member>, &MemberSet<C, Member>,
+                       nullptr, 0, ""};
 }
 
 const char* const kMeshSources[] = {"Cube", "Sphere", "Plane", "Quad", "Cylinder", "Cone", "Torus", "Custom (OBJ)"};

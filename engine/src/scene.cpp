@@ -177,6 +177,7 @@ std::vector<Component*> GameObject::GetComponentList() const {
 GameObject* Scene::CreateEntity(const std::string& name, GameObject* parent) {
     auto go = std::make_unique<GameObject>();
     go->m_id = m_nextEntityId++;
+    go->m_guid = AssetDatabase::NewGuid();
     go->m_scene = this;
     go->name = name;
     auto* raw = go.get();
@@ -224,6 +225,13 @@ void Scene::ProcessDeferred() {
 GameObject* Scene::FindEntity(EntityId id) {
     for (const auto& go : objects)
         if (go->m_id == id) return go.get();
+    return nullptr;
+}
+
+GameObject* Scene::FindByGuid(const std::string& guid) {
+    if (guid.empty()) return nullptr;
+    for (const auto& go : objects)
+        if (go->m_guid == guid) return go.get();
     return nullptr;
 }
 
@@ -277,6 +285,7 @@ static Color JsonToColor(const Json& j, Color def = Color()) {
 Json Scene::SerializeEntity(const GameObject* go) const {
     Json e = Json::MakeObject();
     e.set("id", (double)go->m_id);
+    if (!go->m_guid.empty()) e.set("guid", go->m_guid);
     e.set("name", go->name);
     e.set("active", go->active);
     if (!go->tag.empty()) e.set("tag", go->tag);
@@ -455,6 +464,10 @@ std::shared_ptr<Scene> Scene::Deserialize(const Json& doc, std::string* error) {
         for (const Json& e : entities.arrayItems()) {
             GameObject* go = scene->CreateEntity(e["name"].asString("GameObject"), nullptr);
             go->m_id = (EntityId)e["id"].asUint(go->m_id);
+            // Preserve the stored GUID (stable identity); older scenes without
+            // one keep the fresh GUID CreateEntity just generated.
+            std::string storedGuid = e["guid"].asString();
+            if (!storedGuid.empty()) go->m_guid = storedGuid;
             if (go->m_id >= scene->m_nextEntityId) scene->m_nextEntityId = go->m_id + 1;
             byId[go->m_id] = go;
             pending.push_back({&e, go});

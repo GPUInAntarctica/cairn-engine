@@ -2,6 +2,13 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.2] - 2026-10-16
+
+### Stable entity identity + richer reflection
+- **Every GameObject has a stable GUID.** Generated on creation and serialized as `"guid"`, it survives save/load and scene snapshots; deep copies (`Instantiate`, duplicate) get a fresh identity. `GameObject::guid()` and `Scene::FindByGuid()` expose it. This is the identity prefabs and object references key on.
+- **Reflection types extended.** `PropType` gains `Vec4`, `Enum`, `Asset` and `Object` (appended, so existing numeric values are unchanged), with `PropVec4/PropEnum/PropAsset/PropObject` readers. `EditorPropKind` gains `Vec4` and `Object`; the inspector renders a 4-wide vector control for `vec4`, and the addon reports the new kinds. `components.cpp` serializes `Vec4`.
+- **Tests.** `TestEntityIdentity` covers GUID generation, save/load preservation, lookup and copy-in-isolation; the CLI suite checks the entity GUID round-trips.
+
 ## [0.1.1] - 2026-10-16
 
 ### Asset database: stable GUIDs + `.meta` import settings

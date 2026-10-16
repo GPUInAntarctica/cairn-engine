@@ -245,9 +245,11 @@ export class Inspector {
             case 'string': return textRow(md.label, read, commit);
             case 'vec2': return vectorRow(md.label, read, commit, false, 2);
             case 'vec3': return vectorRow(md.label, read, commit, false, 3);
+            case 'vec4': return vectorRow(md.label, read, commit, false, 4);
             case 'color': return colorRow(md.label, read, commit);
             case 'enum': return enumRow(md.label, read, md.options, commit);
             case 'asset': return assetRow(md.label, read, md.assetKind, commit);
+            case 'object': return textRow(md.label, read, commit);
             default: return textRow(md.label, read, commit);
         }
     }

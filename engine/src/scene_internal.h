@@ -11,7 +11,7 @@
 namespace Cairn {
 
 // Editor-facing property kinds (superset of PropType).
-enum class EditorPropKind : int { Float, Int, Bool, String, Vec2, Vec3, Color, Enum, Asset };
+enum class EditorPropKind : int { Float, Int, Bool, String, Vec2, Vec3, Vec4, Color, Enum, Asset, Object };
 
 struct PropertyDef {
     const char* name = nullptr;      // canonical key (serialization + editor)
@@ -87,6 +87,7 @@ public:
     void QueueDestroy(GameObject* go);
     void ProcessDeferred();
     GameObject* FindEntity(EntityId id);
+    GameObject* FindByGuid(const std::string& guid);
     GameObject* FindByName(const std::string& name);
     std::vector<GameObject*> FindByTag(const std::string& tag);
     CameraComponent* MainCamera();

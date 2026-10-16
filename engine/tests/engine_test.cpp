@@ -1204,6 +1204,32 @@ static void TestAssetDatabase() {
     std::filesystem::remove_all(dir);
 }
 
+// Stable entity identity: GUIDs survive save/load, copies get new ones.
+static void TestEntityIdentity() {
+    Engine engine;
+    engine.NewScene("Ids");
+    GameObject* a = engine.scene().CreateEntity("A");
+    GameObject* b = engine.scene().CreateEntity("B");
+    CHECK(a->guid().size() == 32);
+    CHECK(a->guid() != b->guid());
+    const std::string guidA = a->guid();
+
+    std::string json = engine.SerializeSceneJson();
+    CHECK(json.find(guidA) != std::string::npos);
+    CHECK(engine.RestoreSceneJson(json));
+    GameObject* ra = engine.scene().FindByGuid(guidA);
+    CHECK(ra != nullptr && ra->name == "A");
+
+    // Clearing a stale id must not confuse GUID lookup.
+    CHECK(engine.scene().FindByGuid("") == nullptr);
+    CHECK(engine.scene().FindByGuid("deadbeef") == nullptr);
+
+    // A duplicate (deep copy) is a distinct identity.
+    GameObject* dup = engine.scene().InstantiateCopy(ra);
+    CHECK(dup != nullptr && dup->guid() != guidA);
+    CHECK(engine.scene().FindByGuid(dup->guid()) == dup);
+}
+
 int main() {
     Log::SetEchoStdout(false);
     TestMath();
@@ -1230,6 +1256,7 @@ int main() {
     TestPbrMaterials();
     TestTextureCache();
     TestAssetDatabase();
+    TestEntityIdentity();
     if (g_failures == 0) {
         std::printf("engine tests passed\n");
         return 0;

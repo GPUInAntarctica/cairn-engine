@@ -65,7 +65,14 @@ struct ScriptMeta;
 // ---------------------------------------------------------------------------
 // Component metadata (script-exposed fields shown in the editor inspector).
 // ---------------------------------------------------------------------------
-enum class PropType : int { Float, Int, Bool, String, Vec2, Vec3, Color };
+enum class PropType : int {
+    Float, Int, Bool, String, Vec2, Vec3, Color,
+    // Added in 0.1.2. Appended so existing numeric values stay stable.
+    Vec4,     // four-component vector
+    Enum,     // integer index into a named option list
+    Asset,    // project asset reference (path or {path,guid})
+    Object,   // GameObject reference, stored as the target's stable GUID
+};
 
 struct ScriptProperty {
     std::string name;
@@ -181,6 +188,16 @@ public:
         const Json& j = GetProp(name);
         return {j[0].asFloat(), j[1].asFloat(), j[2].asFloat(), j[3].asFloat()};
     }
+    Vec4 PropVec4(const std::string& name) const {
+        const Json& j = GetProp(name);
+        return {j[0].asFloat(), j[1].asFloat(), j[2].asFloat(), j[3].asFloat()};
+    }
+    // Enum fields are stored as their integer index.
+    int PropEnum(const std::string& name) const { return GetProp(name).asInt(); }
+    // Asset fields read back as a project-relative path string.
+    std::string PropAsset(const std::string& name) const { return GetProp(name).asString(); }
+    // Object fields read back as the target GameObject's stable GUID.
+    std::string PropObject(const std::string& name) const { return GetProp(name).asString(); }
 
     // Structured helper used by ScriptMeta below.
     const Json& GetProp(const std::string& name) const {
@@ -446,6 +463,9 @@ public:
     std::string tag;                // "MainCamera" picks the play camera
 
     EntityId id() const { return m_id; }
+    // Stable identity that survives save/load (and which prefabs, object
+    // references and scene merges key on). 32-hex, generated on creation.
+    const std::string& guid() const { return m_guid; }
     Scene& scene() const { return *m_scene; }
     Transform& transform() const { return *m_transform; }
 
@@ -496,6 +516,7 @@ public:
 
     // Internal.
     EntityId m_id = kInvalidEntity;
+    std::string m_guid;
     Scene* m_scene = nullptr;
     Transform* m_transform = nullptr;
     std::vector<std::unique_ptr<Component>> m_components;

@@ -37,6 +37,7 @@ CAIRN_SCRIPT(PlayerController)
 
 - `GameObject& gameObject()` / `Transform& transform()`
 - `PropFloat/Int/Bool/String/Vec2/Vec3/Color(name)` — read inspector fields declared in `DescribeProps`
+- `PropVec4(name)` → `Vec4`; `PropEnum(name)` → `int` index; `PropAsset(name)` → project-relative path; `PropObject(name)` → target GameObject's stable GUID
 - `bool enabled` — disabled components skip lifecycle callbacks
 
 ## GameObject
@@ -45,6 +46,7 @@ CAIRN_SCRIPT(PlayerController)
 - `GetComponent<T>()` — engine components (`RigidBody`, `BoxCollider`, …) by type; gameplay scripts by class via `dynamic_cast`
 - `AddComponent<T>()` — engine components only (scripts attach via `ScriptComponent`)
 - `name`, `active`, `tag` — `"MainCamera"` marks the play camera
+- `id()` — runtime handle for the current session; `guid()` — stable 32-hex identity that survives save/load (use it for references that must outlive a reload)
 
 ## Transform
 
@@ -115,6 +117,10 @@ void DescribeProps(ScriptMeta& meta) override {
     meta.Add("nickname", PropType::String, "player");
     meta.Add("offset",  PropType::Vec2,   Json::MakeArray({0.f, 1.f}));
     meta.Add("target",  PropType::Vec3,   Json::MakeArray({0.f, 0.f, 0.f}));
+    meta.Add("bounds",  PropType::Vec4,   Json::MakeArray({0.f, 0.f, 1.f, 1.f}));
     meta.Add("tint",    PropType::Color,  Json::MakeArray({1.f, 1.f, 1.f, 1.f}));
+    meta.Add("mode",    PropType::Enum,   0);   // integer index; label/options from the editor
+    meta.Add("clip",    PropType::Asset,  "");  // project asset reference
+    meta.Add("target",  PropType::Object, "");  // GameObject reference, stored as its GUID
 }
 ```

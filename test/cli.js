@@ -189,6 +189,12 @@ check(tagged && tagged.length === 1 && tagged[0].name === 'Agent Cube',
     'scene.find locates the tagged entity', tagged);
 const taggedId = tagged[0].id;
 
+// Stable entity GUIDs (0.1.2): present, and preserved across save + reload.
+const entGuid = expectOk(['--project', projectDir, '--scene', 'Assets/Scenes/Agent.cscene', 'entity.get', '--id', taggedId]);
+check(entGuid && /^[0-9a-f]{32}$/.test(entGuid.guid), 'entity carries a stable 32-hex GUID', entGuid && entGuid.guid);
+const entGuid2 = expectOk(['--project', projectDir, '--scene', 'Assets/Scenes/Agent.cscene', 'entity.get', '--id', taggedId]);
+check(entGuid && entGuid2 && entGuid.guid === entGuid2.guid, 'entity GUID is stable across reloads', entGuid2 && entGuid2.guid);
+
 const propRoundTrip = expectOk([
     '--project', projectDir, '--scene', 'Assets/Scenes/Agent.cscene',
     'component.getProp', '--id', taggedId, '--type', 'MeshRenderer', '--prop', 'albedoColor']);

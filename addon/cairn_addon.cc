@@ -85,9 +85,11 @@ const char* PropKindName(EditorPropKind kind) {
         case EditorPropKind::String: return "string";
         case EditorPropKind::Vec2: return "vec2";
         case EditorPropKind::Vec3: return "vec3";
+        case EditorPropKind::Vec4: return "vec4";
         case EditorPropKind::Color: return "color";
         case EditorPropKind::Enum: return "enum";
         case EditorPropKind::Asset: return "asset";
+        case EditorPropKind::Object: return "object";
     }
     return "float";
 }
@@ -330,6 +332,7 @@ private:
     Napi::Value EntityToObject(Napi::Env env, const GameObject* go) {
         Napi::Object o = Napi::Object::New(env);
         o.Set("id", (double)go->m_id);
+        o.Set("guid", go->m_guid);
         o.Set("name", go->name);
         o.Set("active", go->active);
         o.Set("tag", go->tag);
@@ -619,8 +622,9 @@ private:
             for (const auto& p : c.props) {
                 Napi::Object pj = Napi::Object::New(env);
                 pj.Set("name", p.name);
-                const char* typeNames[] = {"float", "int", "bool", "string", "vec2", "vec3", "color"};
-                pj.Set("type", p.type >= 0 && p.type < 7 ? typeNames[p.type] : "float");
+                const char* typeNames[] = {"float", "int", "bool", "string", "vec2", "vec3", "color",
+                                           "vec4", "enum", "asset", "object"};
+                pj.Set("type", p.type >= 0 && p.type < 11 ? typeNames[p.type] : "float");
                 pj.Set("default", JsonToValue(env, p.defaultValue));
                 props.Set(pi++, pj);
             }
@@ -743,7 +747,7 @@ Napi::FunctionReference EngineWrap::constructor;
 
 Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
     EngineWrap::Init(env, exports);
-    exports.Set("engineVersion", Napi::String::New(env, "0.1.1"));
+    exports.Set("engineVersion", Napi::String::New(env, "0.1.2"));
     return exports;
 }
 
