@@ -169,15 +169,30 @@ function resizeRgba(data, w, h, nw, nh) {
 // -------------------------------------------------------------------- drawing
 // All primitives operate on a raw RGBA buffer and clip to bounds.
 
+// Straight-alpha source-over onto one layer. The colour is weighted by the
+// destination's *own* alpha, so a 50% highlight painted onto a transparent layer
+// stores white at 50% alpha - painting it as `src * a` against a transparent
+// black instead stored grey at 50% alpha, which `composite()` then darkened a
+// second time (a 50% white fill composited to 25%, and the same highlight looked
+// duller on its own layer than drawn directly on the base). Over an opaque
+// destination this is exactly the old `src * a + dst * (1 - a)`, and the alpha
+// still uses max() rather than source-over so a repeated stroke does not build up
+// coverage - that is what keeps a mirrored draw pixel-identical to its
+// reflection.
 function blendPixel(data, w, h, x, y, rgba, alpha) {
     if (x < 0 || y < 0 || x >= w || y >= h) return;
     const a = clamp(alpha, 0, 1);
     if (a <= 0) return;
     const o = (y * w + x) * 4;
-    data[o] = Math.round(rgba[0] * 255 * a + data[o] * (1 - a));
-    data[o + 1] = Math.round(rgba[1] * 255 * a + data[o + 1] * (1 - a));
-    data[o + 2] = Math.round(rgba[2] * 255 * a + data[o + 2] * (1 - a));
-    data[o + 3] = Math.max(data[o + 3], Math.round(a * 255));
+    const da = data[o + 3] / 255;
+    const oa = Math.max(da, a);
+    if (oa <= 0) return;
+    for (let c = 0; c < 3; ++c) {
+        const sc = rgba[c] * a;
+        const dc = (data[o + c] / 255) * da * (1 - a);
+        data[o + c] = Math.round(clamp((sc + dc) / oa, 0, 1) * 255);
+    }
+    data[o + 3] = Math.round(oa * 255);
 }
 
 function erasePixel(data, w, h, x, y, alpha) {

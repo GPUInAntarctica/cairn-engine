@@ -1333,6 +1333,185 @@ expectFail(['image.palette', '--palette', '#zzzzzz'], 'invalid_arg');
 expectFail(['image.draw.noise'], 'usage');
 
 // ---------------------------------------------------------------------------
+console.log('cli: opacity over transparency');
+// ---------------------------------------------------------------------------
+// `blendPixel` used to blend a semi-transparent stroke against a transparent
+// pixel's RGB as `src * a`, so a 50% white fill on an empty layer stored grey at
+// 50% alpha and `composite()` darkened it a second time (it came out 25% grey
+// over black). The colour is now weighted by the destination's own alpha -
+// identical for an opaque destination - while the alpha still uses max(), so a
+// repeated stroke cannot build up coverage.
+const opTransparent = runBatch(writeBatch('image-opacity.jsonl', [
+    { command: 'image.new', args: { width: 8, height: 8, background: 'transparent' }, id: 'new' },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 8, height: 8, filled: true, color: '#ffffff', opacity: 0.5 }, id: 'half' },
+    { command: 'image.pixel', args: { x: 4, y: 4 }, id: 'stored' },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 8, height: 8, filled: true, color: '#ffffff', opacity: 0.5 }, id: 'again' },
+    { command: 'image.pixel', args: { x: 4, y: 4, layer: 0 }, id: 'storedAgain' },
+    { command: 'image.layer.add', args: { name: 'Backdrop' }, id: 'backdrop' },
+    { command: 'image.layer.move', args: { index: 1, to: 0 }, id: 'move' },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 8, height: 8, filled: true, layer: 0, color: '#000000' }, id: 'black' },
+    { command: 'image.pixel', args: { x: 4, y: 4 }, id: 'overBlack' },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 8, height: 8, filled: true, layer: 1, color: '#ff0000' }, id: 'cover' },
+    { command: 'image.pixel', args: { x: 4, y: 4 }, id: 'covered' },
+]));
+check(opTransparent.lines.every(l => l.ok !== false),
+    'the opacity batch runs clean', opTransparent.stdout + opTransparent.stderr);
+const storedHalf = opTransparent.byId.stored.result;
+check(storedHalf.hex === '#ffffff' && storedHalf.a === 128,
+    'a 50% fill on a transparent layer stores the colour, not the colour times the alpha',
+    storedHalf);
+const storedAgain = opTransparent.byId.storedAgain.result;
+check(storedAgain.hex === '#ffffff' && storedAgain.a === 128,
+    'a repeated 50% stroke does not build up alpha', storedAgain);
+const overBlack = opTransparent.byId.overBlack.result;
+check(overBlack.hex === '#808080' && overBlack.a === 255,
+    '50% white over an opaque black backdrop composites to 50% grey', overBlack);
+const covered = opTransparent.byId.covered.result;
+check(covered.hex === '#ff0000' && covered.a === 255,
+    'an opaque stroke still covers a semi-transparent one', covered);
+
+const opOpaque = runBatch(writeBatch('image-opacity-opaque.jsonl', [
+    { command: 'image.new', args: { width: 8, height: 8, background: '#000000' }, id: 'new' },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 8, height: 8, filled: true, color: '#ffffff', opacity: 0.5 }, id: 'half' },
+    { command: 'image.pixel', args: { x: 4, y: 4, layer: 0 }, id: 'blend' },
+]));
+const opaqueBlend = opOpaque.byId.blend.result;
+check(opaqueBlend.hex === '#808080' && opaqueBlend.a === 255,
+    'painting over an opaque layer blends exactly as it always did', opaqueBlend);
+
+// ---------------------------------------------------------------------------
+console.log('cli: drawing tutorial');
+// ---------------------------------------------------------------------------
+// docs/drawing.md is a walkthrough, not prose: both recipes are replayed here
+// step for step, so the chapter cannot drift from the implementation. The coin
+// is the loop (a flat highlight caught by image.preview/image.info and fixed
+// with --mirror), the tile is a seam that is measured rather than eyeballed.
+
+const tutorialCoin = writeBatch('tutorial-coin.jsonl', [
+    { command: 'image.new', args: { width: 32, height: 32, background: 'transparent' }, id: 'new' },
+    { command: 'image.draw.ellipse', args: { cx: 16, cy: 16, rx: 13, ry: 13, filled: true, stroke: 1, color: '#f2c14e', strokeColor: '#8a5a1a' }, id: 'disc' },
+    { command: 'image.layer.add', args: { name: 'Gloss' }, id: 'glossLayer' },
+    { command: 'image.draw.rect', args: { x: 6, y: 7, width: 20, height: 4, filled: true, color: '#fff0b3', opacity: 0.85 }, id: 'rect' },
+    { command: 'image.preview', args: { scale: 1 }, id: 'prev1' },
+    { command: 'image.pixel', args: { x: 16, y: 7 }, id: 'px1' },
+    { command: 'image.info', args: {}, id: 'info1' },
+    { command: 'image.layer.delete', args: { index: 1 }, id: 'dropGloss' },
+    { command: 'image.layer.add', args: { name: 'Gloss' }, id: 'glossLayer2' },
+    { command: 'image.draw.ellipse', args: { cx: 16, cy: 11, rx: 8, ry: 3, filled: true, color: '#fff0b3', opacity: 0.85, mirror: 'y' }, id: 'gloss' },
+    { command: 'image.pixel', args: { x: 16, y: 7 }, id: 'px2' },
+    { command: 'image.pixel', args: { x: 16, y: 10 }, id: 'topHighlight' },
+    { command: 'image.pixel', args: { x: 16, y: 21 }, id: 'bottomHighlight' },
+    { command: 'image.info', args: {}, id: 'info2' },
+    { command: 'image.draw.path', args: { sides: 6, cx: 16, cy: 16, radius: 7, inner: 0.5, filled: true, layer: 0, color: '#a8701c' }, id: 'star' },
+    { command: 'image.pixel', args: { x: 16, y: 14 }, id: 'emblem' },
+    { command: 'image.info', args: {}, id: 'info3' },
+    { command: 'image.preview', args: { scale: 1 }, id: 'prev2' },
+    { command: 'image.save', args: { out: 'Assets/Sprites/coin.png' }, id: 'save' },
+]);
+const coin = runProjectBatch(tutorialCoin);
+check(coin.lines.every(l => l.ok !== false),
+    'the tutorial coin batch runs clean', coin.stdout + coin.stderr);
+
+const coinStats = id => coin.step(id).result.stats;
+const attempt = coinStats('info1');
+check(attempt.mirrorLeftRight === true && attempt.mirrorLeftRightMismatch === 0
+    && attempt.mirrorTopBottom === false && attempt.mirrorTopBottomMismatch > 0
+    && Math.abs(attempt.coverage - 616 / 1024) < 1e-9,
+    'the flat highlight is caught by the symmetry check', attempt);
+const px1 = coin.step('px1').result;
+const px2 = coin.step('px2').result;
+check(px1.hex !== '#f2c14e' && px2.hex === '#f2c14e',
+    'the fixed highlight leaves the coin body at the top edge', { before: px1, after: px2 });
+const attemptRows = coin.step('prev1').result.lines;
+check(attemptRows.length === 32 && attemptRows[7].length === 32
+    && !attemptRows[7].includes('#') && attemptRows[7].includes('%'),
+    'the preview shows the highlight flattening the top of the disc', attemptRows[7]);
+const fixedRows = coin.step('prev2').result.lines;
+check(fixedRows[7].includes('#') && !fixedRows[7].includes('%'),
+    'after the fix the preview shows the rim again', fixedRows[7]);
+const fixed = coinStats('info2');
+check(fixed.mirrorLeftRight === true && fixed.mirrorLeftRightMismatch === 0
+    && fixed.mirrorTopBottom === true && fixed.mirrorTopBottomMismatch === 0,
+    'the mirrored highlight makes the coin top-bottom symmetric', fixed);
+const top = coin.step('topHighlight').result;
+const bottom = coin.step('bottomHighlight').result;
+check(top.hex === bottom.hex && top.hex !== px2.hex,
+    'the top and bottom highlights are the same colour', { top, bottom });
+const withEmblem = coinStats('info3');
+check(withEmblem.mirrorLeftRight === true && withEmblem.mirrorTopBottom === true
+    && coin.step('emblem').result.hex === '#a8701c',
+    'the six-point emblem keeps the coin symmetric', { withEmblem, emblem: coin.step('emblem').result });
+const coinPng = path.join(projectDir, 'Assets', 'Sprites', 'coin.png');
+const coinBytes = fs.readFileSync(coinPng);
+check(coinBytes.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    && coinBytes.readUInt32BE(16) === 32 && coinBytes.readUInt32BE(20) === 32,
+    'image.save writes a 32x32 PNG', { bytes: coinBytes.length });
+const coinAgain = runProjectBatch(tutorialCoin);
+check(coinAgain.lines.every(l => l.ok !== false)
+    && fs.readFileSync(coinPng).equals(coinBytes),
+    'the tutorial coin is byte-identical when replayed', coinBytes.length);
+
+// The tile: fractal shading plus per-pixel white grain, then the same shading
+// with a periodic value lattice. The seam is the gap between the two edge
+// columns; "seamless" means it is no wider than the gap between neighbouring
+// columns inside the image (a grey level of slack covers 8-bit rounding).
+const TILE_ROWS = [3, 11, 19, 27];
+function tileBatch(file, grain) {
+    const steps = [
+        { command: 'image.new', args: { width: 32, height: 32, background: '#24421b' }, id: 'new' },
+        { command: 'image.draw.noise', args: { kind: 'fractal', seed: 7, cell: 8, octaves: 4, tile: true, from: '#24421b', to: '#7fae4e' }, id: 'shade' },
+        { command: 'image.draw.noise', args: Object.assign({ opacity: 0.1, from: '#000000', to: '#ffffff' }, grain), id: 'grain' },
+    ];
+    for (const y of TILE_ROWS) {
+        for (const [x, tag] of [[0, 'L'], [1, 'Lb'], [30, 'Rb'], [31, 'R']]) {
+            steps.push({ command: 'image.pixel', args: { x, y }, id: `g${tag}${y}` });
+        }
+    }
+    steps.push({ command: 'image.palette', args: { colors: 8, dither: 'ordered', list: true }, id: 'palette' });
+    for (const y of TILE_ROWS) {
+        for (const [x, tag] of [[0, 'L'], [1, 'Lb'], [30, 'Rb'], [31, 'R']]) {
+            steps.push({ command: 'image.pixel', args: { x, y }, id: `q${tag}${y}` });
+        }
+    }
+    steps.push({ command: 'image.save', args: { out: 'Assets/Textures/grass.png' }, id: 'save' });
+    return runProjectBatch(writeBatch(file, steps));
+}
+const gaps = (run, prefix) => TILE_ROWS.map(y => {
+    const r = tag => run.step(`${prefix}${tag}${y}`).result.r;
+    return {
+        y,
+        seam: Math.abs(r('L') - r('R')),
+        inner: Math.max(Math.abs(r('L') - r('Lb')), Math.abs(r('Rb') - r('R'))),
+    };
+});
+
+const roughTile = tileBatch('tutorial-tile-rough.jsonl', { kind: 'white', seed: 11 });
+check(roughTile.lines.every(l => l.ok !== false),
+    'the tile batch runs clean', roughTile.stdout + roughTile.stderr);
+const roughGaps = gaps(roughTile, 'g');
+check(roughGaps.some(g => g.seam > g.inner),
+    'per-pixel grain breaks the tile seam', roughGaps);
+check(Math.max(...roughGaps.map(g => g.seam)) === roughGaps[1].seam,
+    'the worst wrap is the row the chapter quotes', roughGaps);
+
+const tile = tileBatch('tutorial-tile.jsonl', { kind: 'value', seed: 11, cell: 2, tile: true });
+check(tile.lines.every(l => l.ok !== false),
+    'the corrected tile batch runs clean', tile.stdout + tile.stderr);
+const tiledGaps = gaps(tile, 'g');
+check(tiledGaps.every(g => g.seam <= g.inner + 1),
+    'a periodic lattice keeps every wrap as tight as an interior neighbour gap', tiledGaps);
+const quantGaps = gaps(tile, 'q');
+check(quantGaps.every((g, i) => g.seam === tiledGaps[i].seam),
+    'quantising does not reopen the seam', { before: tiledGaps, after: quantGaps });
+const palette = tile.step('palette').result;
+check(palette.colors === 8 && palette.total === 1024 && palette.palette.length === 8,
+    'the tile palette reports eight colours for the whole canvas', palette);
+const grassPng = path.join(projectDir, 'Assets', 'Textures', 'grass.png');
+check(fs.existsSync(grassPng) && fs.readFileSync(grassPng).slice(0, 8)
+    .equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+    'image.save writes the tile', grassPng);
+
+// ---------------------------------------------------------------------------
 console.log('cli: export + preferences');
 // ---------------------------------------------------------------------------
 const prefs = expectOk(['project.preferences', '--set', '{"language":"en"}']);

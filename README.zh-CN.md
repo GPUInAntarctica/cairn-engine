@@ -118,6 +118,8 @@ cairn --project ./game exec.run --file steps.jsonl   # 多步批量，共用一�
 
 `"id"` 会把该步骤的结果存下来，后续步骤用 `"$ref":"<id>"` 引用。引用写错会直接报错，并把当前可用的 id 列出来。
 
+同一套循环也可以无人值守地驱动图像编辑器：`image.preview` 把画面印成文本、`image.info` 印出关于它的数字，于是精灵和瓦片可以在不打开 PNG 的前提下画、检查、修正。[Agent 绘画教程](docs/drawing.md) 把两种情况各走了一遍。
+
 ### 一条完整流程
 
 无头搭一个小关卡、挂脚本、跑模拟、然后看结果：
@@ -209,6 +211,7 @@ CAIRN_SCRIPT(Collector)
 | [路线图与进度](docs/roadmap.md) | 阶段划分、已交付增量、下一步、已知限制 |
 | [编辑器手册](docs/editor-manual.md) | 界面、键盘导航、工作流 |
 | [CLI 参考](docs/cli.md) | 全部 `cairn` 命令、JSON 契约、批量模式、实用配方 |
+| [Agent 绘画教程](docs/drawing.md) | 闭环：预览/统计自检面，金币精灵与无缝瓦片各走一遍 |
 | [脚本 API](docs/scripting-api.md) | 完整的 C++ 脚本接口 |
 | [构建指南](docs/building.md) | 依赖、GPU 后端编译选项、各平台说明、排错 |
 
@@ -229,7 +232,7 @@ docs/           文档
 
 ## 状态
 
-Cairn 当前版本 **0.1.20**——是个能用但仍早的起点。GPU 后端是默认路径但还年轻；软件光栅化器是参考实现，测试套件也固定跑它，因此**两条路径之间任何渲染差异都算 GPU 后端的 bug，而不是有意为之**。里程碑历史见 [CHANGELOG](CHANGELOG.md)，提 PR 前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+Cairn 当前版本 **0.1.21**——是个能用但仍早的起点。GPU 后端是默认路径但还年轻；软件光栅化器是参考实现，测试套件也固定跑它，因此**两条路径之间任何渲染差异都算 GPU 后端的 bug，而不是有意为之**。里程碑历史见 [CHANGELOG](CHANGELOG.md)，提 PR 前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 

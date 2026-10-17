@@ -118,6 +118,8 @@ cairn --project ./game exec.run --file steps.jsonl   # multi-step batch, one ses
 
 `"id"` stores a step's result; later steps refer to it as `"$ref":"<id>"`. A bad reference fails loudly and lists the ids that do exist.
 
+The same loop drives the image editor headlessly: `image.preview` prints the picture as text and `image.info` prints numbers about it, so a sprite or a tile can be drawn, checked and corrected without ever opening the PNG. [Drawing with an agent](docs/drawing.md) works both cases end to end.
+
 ### A complete session
 
 Build a small level headlessly, script it, simulate it, and look at the result:
@@ -209,6 +211,7 @@ CAIRN_SCRIPT(Collector)
 | [Roadmap & progress](docs/roadmap.md) | Phase plan, delivered increments, what is next, known limits |
 | [Editor manual](docs/editor-manual.md) | Interface, keyboard navigation, workflows |
 | [CLI reference](docs/cli.md) | Every `cairn` command, the JSON contract, batch mode, recipes |
+| [Drawing with an agent](docs/drawing.md) | The closed loop: preview/statistics feedback, a coin sprite and a seamless tile worked end to end |
 | [Scripting API](docs/scripting-api.md) | Complete C++ scripting reference |
 | [Building](docs/building.md) | Requirements, GPU backend build options, per-platform notes, troubleshooting |
 
@@ -229,7 +232,7 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.1.20** — an early but usable foundation. The GPU backend is the default but young; the software rasterizer remains the reference implementation and is what the test suite pins, so any rendering difference between the two is a bug in the GPU path rather than an intentional difference. See the [CHANGELOG](CHANGELOG.md) for the milestone history, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+Cairn is at version **0.1.21** — an early but usable foundation. The GPU backend is the default but young; the software rasterizer remains the reference implementation and is what the test suite pins, so any rendering difference between the two is a bug in the GPU path rather than an intentional difference. See the [CHANGELOG](CHANGELOG.md) for the milestone history, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 
