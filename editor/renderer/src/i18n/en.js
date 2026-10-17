@@ -209,6 +209,7 @@ export const dict = {
     // viewport overlay
     'viewport.draw': 'draw',
     'viewport.tris': 'tri',
+    'viewport.profile': 'profile',
 
     // context menus
     'ctx.create': 'Create',

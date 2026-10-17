@@ -115,6 +115,7 @@ public:
             InstanceMethod("getFrameBuffer", &EngineWrap::GetFrameBuffer),
             InstanceMethod("renderEditorFrame", &EngineWrap::RenderEditorFrame),
             InstanceMethod("renderGameFrame", &EngineWrap::RenderGameFrame),
+            InstanceMethod("profile", &EngineWrap::Profile),
             InstanceMethod("saveFramePNG", &EngineWrap::SaveFramePNG),
             InstanceMethod("setViewCamera", &EngineWrap::SetViewCamera),
             InstanceMethod("getViewCamera", &EngineWrap::GetViewCamera),
@@ -227,6 +228,9 @@ private:
     }
     Napi::Value RenderGameFrame(const Napi::CallbackInfo& info) {
         return StatsToObject(info.Env(), engine_->RenderGameFrame());
+    }
+    Napi::Value Profile(const Napi::CallbackInfo& info) {
+        return JsonToValue(info.Env(), engine_->ProfileSnapshot());
     }
     Napi::Value SaveFramePNG(const Napi::CallbackInfo& info) {
         bool ok = engine_->SaveFramePNG(GetString(info, 0));
@@ -856,7 +860,7 @@ Napi::FunctionReference EngineWrap::constructor;
 
 Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
     EngineWrap::Init(env, exports);
-    exports.Set("engineVersion", Napi::String::New(env, "0.1.7"));
+    exports.Set("engineVersion", Napi::String::New(env, "0.1.8"));
     return exports;
 }
 

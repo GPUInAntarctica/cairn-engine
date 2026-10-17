@@ -2,6 +2,16 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.8] - 2026-10-17
+
+### Performance: frame profiler
+- **`Profiler` (`<cairn/profiler.h>`).** Named samples via `Profiler::BeginSample`/`EndSample`, the RAII `Profiler::ScopedSample` / `CAIRN_PROFILE("name")` helper, and a per-name rolling window (last/avg/max over ~1s). Samples are thread-safe and cheap enough to leave in. Scripts can profile their own code with the same API.
+- **Engine phases are instrumented.** `Engine::Update` records `update`, `scripts` and `physics`; the shared `Renderer::RenderScene` records `render`, `gather`, `shadows`, `raster`, `post` and `gpu` (the Vulkan submit + readback).
+- **New CLI command.** `engine.profile` returns `{frame, fps, frameMs, lastFrameMs, entities, scopes:[{name, ms, avgMs, maxMs, calls}], render:{...}}` — scopes sorted heaviest-first, with the last frame's render counters (draw calls, triangles, culled meshes, lights, post passes) folded in.
+- **Editor overlay.** The viewport stats overlay (View ▸ Viewport Statistics) now also lists the four heaviest profiler scopes; strings localized in `i18n/en.js` + `i18n/zh-CN.js`.
+- **Tests.** `TestProfiler` (nesting, sample counts, heaviest-first ordering, an engine-driven frame) and CLI checks that `engine.profile` samples ≥ 100 frames and reports update/render scopes and counters.
+- **Still to come** (next increment): a general job system and parallel scene gather/culling; then draw-call reduction (instancing/batching) and non-blocking GPU readback.
+
 ## [0.1.7] - 2026-10-17
 
 ### Physics: distance/spring joints and rigidbody sleeping

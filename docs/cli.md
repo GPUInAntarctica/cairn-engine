@@ -231,6 +231,7 @@ the document with `--image FILE`). `image.open`, `image.layer.*`,
 | `engine.groups` | — | Command groups with their command names. |
 | `engine.help` | `--command` (string) | Usage detail for a single command (text or JSON via --format). |
 | `engine.info` | — | Report the current session: project, viewport, loaded scene and play state. |
+| `engine.profile` | — | Frame profiler snapshot: per-phase timings plus this frame's render counters. |
 | `engine.schema` | `--group` (string) | Machine-readable description of every command and argument schema. |
 | `engine.version` | — | Print engine and CLI versions. |
 

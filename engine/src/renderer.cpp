@@ -2,6 +2,7 @@
 
 #include "cairn/engine.h"
 #include "cairn/log.h"
+#include "cairn/profiler.h"
 #include "backend_vulkan.h"
 #include "font_internal.h"
 #include "gpu_types.h"
@@ -1767,6 +1768,7 @@ void Renderer::Resize(int w, int h) {
 
 RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
                                   const std::vector<DebugLine>& overlayLines) {
+    CAIRN_PROFILE("render");
     Impl& R = *impl_;
     if (target_.width <= 0) return {};
 
@@ -1815,14 +1817,17 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
 
     R.CollectLights(scene, &list.lights);
     Impl::SceneGather gather;
-    R.GatherScene(scene, Frustum::FromViewProj(R.viewProj), textures, &list, &gather);
-    gather.lightCount = (int)list.lights.size();
+    {
+        CAIRN_PROFILE("gather");
+        R.GatherScene(scene, Frustum::FromViewProj(R.viewProj), textures, &list, &gather);
+        gather.lightCount = (int)list.lights.size();
 
-    // Cascade fitting is shared too; only the depth rendering differs.
-    R.casterBounds.clear();
-    R.casterBounds.reserve(list.casters.size());
-    for (const auto& caster : list.casters) R.casterBounds.push_back(caster.bounds);
-    R.FitCascadeSet(list, cam);
+        // Cascade fitting is shared too; only the depth rendering differs.
+        R.casterBounds.clear();
+        R.casterBounds.reserve(list.casters.size());
+        for (const auto& caster : list.casters) R.casterBounds.push_back(caster.bounds);
+        R.FitCascadeSet(list, cam);
+    }
 
     // ---- Backend selection. `Auto` prefers the GPU and degrades silently to
     // software; an explicit Vulkan request logs why when it cannot be honoured.
@@ -1840,7 +1845,10 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
     }
     if (R.vulkan && vulkanWanted) {
         RenderStats stats;
-        R.vulkan->RenderFrame(list, &target_, &stats, cam.msaa);
+        {
+            CAIRN_PROFILE("gpu");
+            R.vulkan->RenderFrame(list, &target_, &stats, cam.msaa);
+        }
         stats.meshesSeen = gather.meshesSeen;
         stats.clipRejected = gather.clipRejected;
         stats.frustumCulled = gather.frustumCulled;
@@ -1866,6 +1874,7 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
         R.shadowScratch.assign((size_t)R.cascadeSize * R.cascadeSize * 4, 0);
     }
     if (R.cascadeCount > 0) {
+        CAIRN_PROFILE("shadows");
         R.cascadeDepth.resize((size_t)kMaxCascades);
         R.RenderShadowPassSoftware(list);
     }
@@ -1878,18 +1887,22 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
     R.triVerts.clear();
     R.triMats.clear();
 
-    // ---- Opaque 3D drawables.
     int clipRejected = 0;
-    for (const auto& draw : list.opaque) {
-        if (!draw.mesh) continue;
-        size_t before = R.triVerts.size();
-        R.EmitMesh(*draw.mesh, draw.model, draw.mat);
-        if (R.triVerts.size() == before) clipRejected++;
-    }
+    int jobCount = 0;
+    {
+        CAIRN_PROFILE("raster");
+        // ---- Opaque 3D drawables.
+        for (const auto& draw : list.opaque) {
+            if (!draw.mesh) continue;
+            size_t before = R.triVerts.size();
+            R.EmitMesh(*draw.mesh, draw.model, draw.mat);
+            if (R.triVerts.size() == before) clipRejected++;
+        }
 
-    // ---- Rasterize opaque jobs across the pool (row-band owned).
-    const int jobCount = (int)(R.triVerts.size() / 3);
-    R.RasterizeParallel(0, jobCount);
+        // ---- Rasterize opaque jobs across the pool (row-band owned).
+        jobCount = (int)(R.triVerts.size() / 3);
+        R.RasterizeParallel(0, jobCount);
+    }
 
     // ---- 2D pass: each item is rasterized immediately after its quads are
     // emitted so the depth sort stays exact (clipped quads can fan out).
@@ -1916,7 +1929,10 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
     // entirely when every effect is at its neutral default.
     RenderStats stats;
     stats.backend = "software";
-    stats.postPasses = R.RunPostChain(cam);
+    {
+        CAIRN_PROFILE("post");
+        stats.postPasses = R.RunPostChain(cam);
+    }
     stats.drawCalls = jobCount + gather.drawCalls2D + 1;
     stats.triangles = jobCount;
     stats.meshesSeen = gather.meshesSeen;

@@ -1,6 +1,7 @@
 #include "cairn/engine.h"
 
 #include "cairn/physics.h"
+#include "cairn/profiler.h"
 #include "scene_internal.h"
 #include "script_host.h"
 
@@ -711,6 +712,7 @@ void Engine::Stop() {
 }
 
 void Engine::Update(float dt) {
+    CAIRN_PROFILE("update");
     frameCount_++;
     g_lastDt = dt;
     float scaled = dt * timeScale_;
@@ -720,32 +722,42 @@ void Engine::Update(float dt) {
         accumulator_ += scaled;
         int steps = 0;
         while (accumulator_ >= fixed && steps < 5) {
-            // FixedUpdate scripts.
+            {
+                // FixedUpdate scripts.
+                CAIRN_PROFILE("scripts");
+                for (const auto& go : scene_->objects) {
+                    if (!go->ActiveInHierarchy()) continue;
+                    for (Component* c : go->GetComponentList()) {
+                        if (c->TypeId() != ComponentTypeId::Script) continue;
+                        auto* sc = static_cast<ScriptComponent*>(c);
+                        if (sc->instance && sc->enabled) sc->instance->FixedUpdate(fixed);
+                    }
+                }
+            }
+            {
+                CAIRN_PROFILE("physics");
+                PhysicsStep(*scene_, fixed);
+            }
+            accumulator_ -= fixed;
+            steps++;
+        }
+        {
+            // Variable-rate update.
+            CAIRN_PROFILE("scripts");
             for (const auto& go : scene_->objects) {
                 if (!go->ActiveInHierarchy()) continue;
                 for (Component* c : go->GetComponentList()) {
                     if (c->TypeId() != ComponentTypeId::Script) continue;
                     auto* sc = static_cast<ScriptComponent*>(c);
-                    if (sc->instance && sc->enabled) sc->instance->FixedUpdate(fixed);
+                    if (sc->instance && sc->enabled) sc->instance->OnUpdate(scaled);
                 }
-            }
-            PhysicsStep(*scene_, fixed);
-            accumulator_ -= fixed;
-            steps++;
-        }
-        // Variable-rate update.
-        for (const auto& go : scene_->objects) {
-            if (!go->ActiveInHierarchy()) continue;
-            for (Component* c : go->GetComponentList()) {
-                if (c->TypeId() != ComponentTypeId::Script) continue;
-                auto* sc = static_cast<ScriptComponent*>(c);
-                if (sc->instance && sc->enabled) sc->instance->OnUpdate(scaled);
             }
         }
         scene_->ProcessDeferred();
     }
     // Expire debug lines quickly (they render for the following frame).
     debugLines_.clear();
+    Profiler::Frame();
 }
 
 void Engine::EndFrameInput() {
@@ -1027,6 +1039,25 @@ Json Engine::QueryPhysicsStep(float dt, int steps) {
     o.set("dynamic", (double)dynamic);
     o.set("sleeping", (double)sleeping);
     return o;
+}
+
+Json Engine::ProfileSnapshot() const {
+    Json out = Profiler::Snapshot();
+    const RenderStats s = lastStats_;
+    Json render = Json::MakeObject();
+    render.set("backend", std::string(s.backend ? s.backend : "software"));
+    render.set("drawCalls", (double)s.drawCalls);
+    render.set("triangles", (double)s.triangles);
+    render.set("meshesSeen", (double)s.meshesSeen);
+    render.set("frustumCulled", (double)s.frustumCulled);
+    render.set("clipRejected", (double)s.clipRejected);
+    render.set("drawCalls2D", (double)s.drawCalls2D);
+    render.set("lightCount", (double)s.lightCount);
+    render.set("shadowedPixels", (double)s.shadowedPixels);
+    render.set("postPasses", (double)s.postPasses);
+    out.set("render", render);
+    out.set("entities", (double)scene_->objects.size());
+    return out;
 }
 
 bool Engine::SaveFramePNG(const std::string& path) const {    const FrameTarget& t = renderer_.target();

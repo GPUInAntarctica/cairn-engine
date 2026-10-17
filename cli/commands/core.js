@@ -156,6 +156,21 @@ def('engine.capabilities', {
     },
 });
 
+def('engine.profile', {
+    summary: 'Frame profiler snapshot: per-phase timings plus this frame\'s render counters.',
+    args: {},
+    returns: '{frame, fps, frameMs, lastFrameMs, entities, scopes:[{name, ms, avgMs, maxMs, calls}], render:{...}}',
+    needsEngine: true,
+    notes: 'Scopes cover simulation (update, scripts, physics) and rendering (render, gather, ' +
+        'raster, shadows, post, gpu). Drive frames with runtime.update / runtime.simulate so the ' +
+        'profiler has samples; avgMs is a rolling ~1s average, ms is the last frame.',
+    examples: ['cairn --project ./game runtime.update --frames 120 --render',
+               'cairn --project ./game engine.profile'],
+    run(ctx) {
+        return ctx.session.engine().profile();
+    },
+});
+
 // -------------------------------------------------------------- batch runner
 function readStdin() {
     try {

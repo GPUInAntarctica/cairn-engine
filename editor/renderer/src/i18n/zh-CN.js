@@ -209,6 +209,7 @@ export const dict = {
     // viewport overlay
     'viewport.draw': '绘制',
     'viewport.tris': '三角面',
+    'viewport.profile': '性能',
 
     // context menus
     'ctx.create': '创建',

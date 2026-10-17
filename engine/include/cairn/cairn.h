@@ -7,3 +7,4 @@
 #include "math.h"
 #include "json.h"
 #include "scripting.h"
+#include "profiler.h"

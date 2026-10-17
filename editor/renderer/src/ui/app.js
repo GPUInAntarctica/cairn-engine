@@ -469,7 +469,7 @@ export function mountEditor(root, prefs) {
         if (editor.playing && !editor.paused) engineInstance().update(dt);
         if (editor.playing) consolePanel.pump();
         lastStats = viewport.lastRenderStats || lastStats;
-        viewport.updateStats(lastStats, lastFps);
+        viewport.updateStats(lastStats, lastFps, viewport.showStats ? engineInstance().profile() : null);
         statusbar.update(statusState());
         requestAnimationFrame(frame);
     }

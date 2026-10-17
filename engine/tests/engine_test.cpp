@@ -1568,6 +1568,52 @@ static void TestSleeping() {
     CHECK(!rb->sleeping);
 }
 
+// The frame profiler aggregates named samples and reports them heaviest-first.
+static void TestProfiler() {
+    Profiler::Reset();
+    {
+        Profiler::ScopedSample outer("outer");
+        for (int i = 0; i < 20000; ++i) {
+            Profiler::ScopedSample inner("inner");
+            volatile double sink = (double)i * 1.5;
+            (void)sink;
+        }
+    }
+    Profiler::Frame();
+    Json snap = Profiler::Snapshot();
+    CHECK(snap["frame"].asInt() == 1);
+
+    const Json scopes = snap["scopes"];
+    CHECK(scopes.size() == 2);
+    bool sawOuter = false, sawInner = false;
+    for (size_t i = 0; i < scopes.size(); ++i) {
+        const std::string name = scopes[i]["name"].asString();
+        if (name == "outer") {
+            sawOuter = true;
+            CHECK(scopes[i]["calls"].asInt() == 1);
+        } else if (name == "inner") {
+            sawInner = true;
+            CHECK(scopes[i]["calls"].asInt() == 20000);
+        }
+    }
+    CHECK(sawOuter && sawInner);
+    // Heaviest-first: `outer` wraps every `inner` sample.
+    CHECK(scopes[0]["name"].asString() == "outer");
+
+    // A driven engine frame records the update scope and merges render counters.
+    Engine engine;
+    engine.SetViewportSize(48, 32);
+    for (int i = 0; i < 3; ++i) engine.Update(1.0f / 60.0f);
+    Json live = engine.ProfileSnapshot();
+    CHECK(live["frame"].asInt() >= 2);
+    bool sawUpdate = false;
+    const Json liveScopes = live["scopes"];
+    for (size_t i = 0; i < liveScopes.size(); ++i)
+        if (liveScopes[i]["name"].asString() == "update") sawUpdate = true;
+    CHECK(sawUpdate);
+    CHECK(live["render"]["backend"].asString() == "software");
+}
+
 int main() {
     Log::SetEchoStdout(false);
     TestMath();
@@ -1604,6 +1650,7 @@ int main() {
     TestCharacterController();
     TestJoints();
     TestSleeping();
+    TestProfiler();
 
     if (g_failures == 0) {
         std::printf("engine tests passed\n");

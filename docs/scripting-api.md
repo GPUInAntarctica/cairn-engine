@@ -98,6 +98,15 @@ Joints: `DistanceJoint` keeps two bodies a fixed distance apart (or a spring/dam
 
 Sleeping: rigidbodies that stay slow for `sleepDelay` seconds stop integrating until disturbed (`AddForce`/`AddImpulse`/`AddTorque`, a written `velocity`, or a moving body touching them). Tune with `allowSleep`, `sleepThreshold`, `sleepDelay`.
 
+Profiling: wrap hot code with a named sample and read the rolling window from the CLI (`engine.profile`).
+
+```cpp
+{
+    Profiler::ScopedSample s("pathfinding");   // or Profiler::BeginSample / EndSample
+    RebuildNavMesh();
+}
+```
+
 Queries run against colliders in the active scene:
 
 ```cpp

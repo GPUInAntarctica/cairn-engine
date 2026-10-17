@@ -389,10 +389,17 @@ export class Viewport {
         // Stats readout (updated by app.js each frame).
     }
 
-    updateStats(stats, fps) {
+    updateStats(stats, fps, profile) {
         if (!this.showStats) return;
-        const html = `${this.sceneCanvas.width}×${this.sceneCanvas.height} &nbsp; ${fps.toFixed(0)} fps` +
+        let html = `${this.sceneCanvas.width}×${this.sceneCanvas.height} &nbsp; ${fps.toFixed(0)} fps` +
             `<br>${t('viewport.draw')} ${stats.drawCalls} · ${t('viewport.tris')} ${stats.triangles}`;
+        if (profile && Array.isArray(profile.scopes)) {
+            const parts = profile.scopes
+                .filter(s => s.avgMs > 0.02)
+                .slice(0, 4)
+                .map(s => `${s.name} ${s.avgMs.toFixed(2)}`);
+            if (parts.length) html += `<br>${t('viewport.profile')} ${parts.join(' · ')} ms`;
+        }
         if (html !== this.statsHtml) {
             this.statsEl.innerHTML = html;
             this.statsHtml = html;

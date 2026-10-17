@@ -169,6 +169,8 @@ public:
     std::vector<LogEntry> PollLogs(uint64_t afterId) { return Log::Poll(afterId); }
     std::vector<AudioEvent>& audioEvents() { return audioEvents_; }
     RenderStats lastStats() const { return lastStats_; }
+    // Frame profiler snapshot: scopes plus this frame's render counters.
+    Json ProfileSnapshot() const;
 
     // When off, log entries are only buffered (host tools read them via PollLogs).
     void SetLogEcho(bool on) { Log::SetEchoStdout(on); }

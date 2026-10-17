@@ -346,6 +346,7 @@ fs.writeFileSync(playBatch, [
     { command: 'component.add', args: { id: '$ref:spinner', type: 'Script', props: { class: 'Rotator', speed: 180 } } },
     { command: 'runtime.play' },
     { command: 'runtime.update', args: { frames: 120, render: true } },
+    { command: 'engine.profile' },
     { command: 'runtime.logs', args: { level: 'info' } },
     { command: 'render.screenshot', args: { out: path.join(scratch, 'play.png'), width: 320, height: 200 } },
     { command: 'runtime.stop' },
@@ -364,6 +365,14 @@ check(shot && fs.existsSync(shot.result.path) && fs.statSync(shot.result.path).s
 const logs = playLines.find(l => l.command === 'runtime.logs');
 check(logs && Array.isArray(logs.result) && logs.result.every(e => e.level && e.text),
     'runtime.logs returns drained entries', logs && logs.result);
+const profile = playLines.find(l => l.command === 'engine.profile');
+check(profile && profile.result.frame >= 100 && profile.result.scopes.length > 0,
+    'engine.profile reports sampled frames', profile && profile.result && profile.result.frame);
+check(profile && profile.result.scopes.some(s => s.name === 'update') &&
+    profile.result.scopes.some(s => s.name === 'render' || s.name === 'gpu'),
+    'engine.profile records update and render scopes', profile && profile.result && profile.result.scopes.map(s => s.name));
+check(profile && profile.result.render.drawCalls > 0 && profile.result.entities > 0,
+    'engine.profile carries render counters', profile && profile.result && profile.result.render);
 
 // Input injection + picking.
 const inputBatch = path.join(scratch, 'input.jsonl');
