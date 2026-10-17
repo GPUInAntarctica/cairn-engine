@@ -1404,7 +1404,10 @@ struct Renderer::Impl {
                             world.TransformPoint(Vec3(pen + gw, 0, 0)),
                             world.TransformPoint(Vec3(pen + gw, gh, 0)),
                             world.TransformPoint(Vec3(pen, gh, 0))};
-            Vec2 uv[4] = {{g.u, g.v}, {g.u + g.w, g.v}, {g.u + g.w, g.v + g.h}, {g.u, g.v + g.h}};
+            // Same y-down image space as sprites: g.v is the glyph's top row,
+            // so the quad's bottom corners take the bottom of the cell.
+            Vec2 uv[4] = {{g.u, g.v + g.h}, {g.u + g.w, g.v + g.h},
+                          {g.u + g.w, g.v}, {g.u, g.v}};
             AppendQuad(list, quad, uv);
             pen += (float)g.advance * scale;
         }
@@ -1615,7 +1618,12 @@ struct Renderer::Impl {
                     list->liveTextures.push_back(nrm);
                     mat.normalMap = nrm.get();
                 }
-                Vec2 uv[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+                // Corner order is {bottom-left, bottom-right, top-right,
+                // top-left} and a texture's row 0 is v=0, so the two *top*
+                // corners must take v=0: image.* draws y-down (y=0 is the top
+                // row) and the world's +Y is up, so mapping v=0 to the bottom
+                // corners stands every sprite on its head.
+                Vec2 uv[4] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
                 Mat4 world = go->transform().WorldMatrix();
                 Vec3 q[4];
                 q[0] = world.TransformPoint(Vec3(-w * 0.5f, -h * 0.5f, 0));
@@ -1638,7 +1646,9 @@ struct Renderer::Impl {
 
 // Appends one world-space quad (six vertices) to the shared 2D list. Both
 // backends consume the result verbatim, so the winding and the derived plane
-// normal are decided here exactly once.
+// normal are decided here exactly once. uv[k] pairs with world[k]; callers hand
+// the *top* corners the low v, because image space is y-down throughout the
+// engine (image.* draws y=0 at the top, and a texture's row 0 is v=0).
 uint32_t AppendQuad(FrameDrawList* list, const Vec3 world[4], const Vec2 uv[4]) {
     Vec3 normal = Vec3::Cross(world[1] - world[0], world[3] - world[0]).Normalized();
     if (normal.LengthSq() < 1e-9f) normal = Vec3(0, 0, -1);

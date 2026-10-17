@@ -219,10 +219,10 @@ sr->orderInLayer = -5;                       // fine order within the layer
 - **Size.** A sprite's world size is `texturePixels / pixelsPerUnit`; place the camera back (for example `z = 10`, looking down `-Z`) so the sprites are in front of it.
 - **`pixelPerfect`** disables anti-aliasing in the software reference and selects a nearest-neighbour, mip-less sampler on the GPU, which is what keeps AI-drawn pixel art crisp. Both backends are held to the same picture (0.1.22).
 - **Sorting** is `sortingLayer` first, then `orderInLayer`, then distance along the view direction; text shares the same ordering.
-- **`normalMapPath`** adds tangent-space 2D lighting, and `flipX` / `flipY` mirror the geometry about the sprite's centre.
+- **`normalMapPath`** adds tangent-space 2D lighting. The map is authored in the same y-down image space as the albedo: a green channel below 0.5 tilts the surface towards the top of the image (which is the world's up), which is exactly what `image.normalMap` writes (0.1.23). `flipX` / `flipY` mirror the geometry about the sprite's centre.
 - `TextRenderer` takes `text`, `fontSize` (glyph height in the same world units), `color` and `alignment` (`Left` / `Center` / `Right`).
 
-> **Known limitation (0.1.22).** Texture `v = 0` is the image's **top** row, but the 2D quad maps that row to the **bottom** of the sprite, so sprites and text render vertically mirrored relative to what `image.*` draws (`flipY` flips geometry, not the texture-`v` relationship). The fix is scheduled in the 0.2 layer of the roadmap.
+> **Orientation (0.1.23).** Image space is y-down everywhere in the engine: `image.*` draws `y = 0` at the top, and a texture's row 0 is `v = 0`. The 2D quad maps the image's top row to the **top** of the sprite, so what you draw is what you see — `flipY` is a plain "turn the picture upside down". Until 0.1.23 both the sprite and the glyph quad handed their top corners `v = 1`, which mirrored every sprite and every word (including the bundled `project-2d` template's title text).
 
 ## Inspector fields
 

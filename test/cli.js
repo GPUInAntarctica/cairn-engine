@@ -1516,9 +1516,10 @@ console.log('cli: sprite 2D rendering quality');
 // ---------------------------------------------------------------------------
 // The loop the project is built around: the agent draws an asset and then sees
 // it rendered. A four-quadrant sprite goes through a pixel-perfect 2D camera,
-// which pins two shipped bugs end to end — the software rasteriser dropped one
-// triangle of every 2D quad (half of every sprite and glyph was missing), and
-// pixel-perfect sprites were sampled through a filtering, mipmapped sampler.
+// which pins three shipped bugs end to end — the software rasteriser dropped
+// one triangle of every 2D quad (half of every sprite and glyph was missing),
+// pixel-perfect sprites were sampled through a filtering, mipmapped sampler,
+// and the quad handed its top corners v=1 so every sprite came out upside down.
 const spriteShot = path.join(scratch, 'sprite2d.png');
 const spriteRun = runProjectBatch(writeBatch('sprite2d.jsonl', [
     { command: 'image.new', args: { width: 8, height: 8, background: 'transparent' } },
@@ -1557,11 +1558,54 @@ check([0, 1, 2].every(ch => spriteQuad.some(p => dominant(p, ch))),
 check(new Set(spriteQuad.map(p => p.hex)).size === 4
     && spriteQuad.some(p => Math.abs(p.r - p.g) <= 8 && Math.abs(p.g - p.b) <= 14 && p.r > 60),
     'the fourth quadrant is the lit white corner', spriteQuad);
+// Up is up. The drawn image is red/blue across its top and white/green across
+// its bottom, so the frame must read back the same way round: image.* draws
+// y-down and the image's top row has to land at the top of the screen. The
+// quad used to hand its *bottom* corners v=0, mirroring every sprite and glyph.
+check(dominant(spriteQuad[0], 0), "the sprite's top-left corner is the image's top-left", spriteQuad[0]);
+check(dominant(spriteQuad[1], 2), "the sprite's top-right corner is the image's top-right", spriteQuad[1]);
+check(spriteQuad[2].r > 60 && Math.abs(spriteQuad[2].r - spriteQuad[2].g) <= 8
+    && Math.abs(spriteQuad[2].g - spriteQuad[2].b) <= 14,
+    "the sprite's bottom-left corner is the image's (white) bottom-left", spriteQuad[2]);
+check(dominant(spriteQuad[3], 1), "the sprite's bottom-right corner is the image's bottom-right", spriteQuad[3]);
 const spritePalette = expectOk(['--image', spriteShot, 'image.palette', '--list']);
 check(spritePalette && spritePalette.colors === 4,
     'pixel-perfect sampling keeps the sprite to four flat colours', spritePalette);
 check(spritePalette && !spritePalette.palette.some(e => e.hex === '#000000'),
     'the sprite covers its whole quad, both triangles', spritePalette);
+
+// ---------------------------------------------------------------------------
+console.log('cli: 2D orientation (up is up)');
+// ---------------------------------------------------------------------------
+// Text and sprites share AppendQuad, but the glyph rect supplies its own uvs,
+// so the two mappings need pinning separately. The capital 'T' is the sharpest
+// probe there is: its top row is a full cross bar and every row below it is a
+// one-texel stem, so a mirrored glyph is unmistakable. Until 0.1.23 the glyph
+// quad gave its top corners v = g.v + g.h, which rendered every word upside
+// down.
+const textShot = path.join(scratch, 'text2d.png');
+const textRun = runProjectBatch(writeBatch('text2d.jsonl', [
+    { command: 'scene.new', args: { name: 'Text2D' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    { command: 'entity.create', args: { name: 'Main', position: [0, 0, 10] }, id: 'cam' },
+    { command: 'component.add', args: { id: '$ref:cam', type: 'Camera', props: { orthographic: true, orthoSize: 2, clearColor: [0, 0, 0, 1], skyEnabled: false } } },
+    { command: 'entity.create', args: { name: 'Text', position: [-1.25, -1.75, 0] }, id: 'txt' },
+    { command: 'component.add', args: { id: '$ref:txt', type: 'TextRenderer', props: { text: 'T', fontSize: 3.5, color: [1, 1, 1, 1] } } },
+    { command: 'runtime.play' },
+    { command: 'render.screenshot', args: { out: textShot, mode: 'game', width: 64, height: 64 }, id: 'shot' },
+]));
+check(textRun.lines.every(l => l.ok !== false), 'the text render batch runs clean', textRun.stdout + textRun.stderr);
+// The glyph fills screen x 12..52, y 4..60: its top row is the bar, its centre
+// column the stem. Reading the bar's left end, the mirror of that point, and
+// the stem fixes the glyph's way up.
+const textPx = (x, y) => expectOk(['--image', textShot, 'image.pixel', '--x', String(x), '--y', String(y)]);
+const litTexel = p => p.r + p.g + p.b > 60;
+const barTop = textPx(16, 8);
+const barMirror = textPx(16, 56);
+const stemBottom = textPx(32, 56);
+check(litTexel(barTop), "the 'T' cross bar is at the top", barTop);
+check(!litTexel(barMirror), "nothing hangs below the bar's left end", barMirror);
+check(litTexel(stemBottom), "the 'T' stem runs down the middle to the bottom", stemBottom);
 
 // ---------------------------------------------------------------------------
 console.log('cli: export + preferences');

@@ -120,7 +120,7 @@ cairn --project ./game exec.run --file steps.jsonl   # multi-step batch, one ses
 
 The same loop drives the image editor headlessly: `image.preview` prints the picture as text and `image.info` prints numbers about it, so a sprite or a tile can be drawn, checked and corrected without ever opening the PNG. [Drawing with an agent](docs/drawing.md) works both cases end to end.
 
-A drawn sprite also renders in a scene: an orthographic `Camera` plus a `SpriteRenderer` (with `pixelPerfect` for pixel art) puts it on screen, and `render.screenshot` writes the frame back to a PNG that `image.open` and `image.pixel` can read — so the "draw → render → look" step closes the loop too. The 2D picture is pinned on **both** backends: a 64×64 four-quadrant sprite comes out byte-identical on the software rasterizer and the GPU (0.1.22).
+A drawn sprite also renders in a scene: an orthographic `Camera` plus a `SpriteRenderer` (with `pixelPerfect` for pixel art) puts it on screen, and `render.screenshot` writes the frame back to a PNG that `image.open` and `image.pixel` can read — so the "draw → render → look" step closes the loop too. The 2D picture is pinned on **both** backends — a 64×64 four-quadrant sprite comes out byte-identical on the software rasterizer and the GPU — and image space is y-down end to end, so the top row you drew is the top row on screen (0.1.22–0.1.23).
 
 ### A complete session
 
@@ -234,7 +234,7 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.1.22** — an early but usable foundation. The GPU backend is the default but young; the software rasterizer remains the reference implementation and is what the test suite pins, so any rendering difference between the two is a bug in the GPU path rather than an intentional difference. See the [CHANGELOG](CHANGELOG.md) for the milestone history, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+Cairn is at version **0.1.23** — an early but usable foundation. The GPU backend is the default but young; the software rasterizer remains the reference implementation and is what the test suite pins, so any rendering difference between the two is a bug in the GPU path rather than an intentional difference. See the [CHANGELOG](CHANGELOG.md) for the milestone history, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 

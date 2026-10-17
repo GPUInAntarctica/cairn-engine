@@ -1117,6 +1117,32 @@ static void WriteTestBmpChecker(const std::string& path, int w, int h,
         }
 }
 
+// Minimal 24-bit BMP of a two-tone image: the visual top half one colour and
+// the visual bottom half another (BMP rows are stored bottom-up, so the file's
+// last row is the visual top).
+static void WriteTestBmpHalves(const std::string& path, int w, int h,
+                               uint8_t topR, uint8_t topG, uint8_t topB,
+                               uint8_t botR, uint8_t botG, uint8_t botB) {
+    const int row = w * 3;
+    const uint32_t dataSize = (uint32_t)(row * h);
+    const uint32_t fileSize = 54 + dataSize;
+    std::ofstream out(path, std::ios::binary);
+    auto u16 = [&](uint16_t v) { out.put((char)(v & 0xff)); out.put((char)(v >> 8)); };
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) out.put((char)((v >> (8 * i)) & 0xff)); };
+    out.put('B'); out.put('M');
+    u32(fileSize); u16(0); u16(0); u32(54);
+    u32(40); u32((uint32_t)w); u32((uint32_t)h); u16(1); u16(24);
+    u32(0); u32(dataSize); u32(2835); u32(2835); u32(0); u32(0);
+    for (int fileRow = 0; fileRow < h; ++fileRow) {
+        const bool topHalf = fileRow >= h / 2;
+        for (int x = 0; x < w; ++x) {
+            out.put((char)(topHalf ? topB : botB));
+            out.put((char)(topHalf ? topG : botG));
+            out.put((char)(topHalf ? topR : botR));
+        }
+    }
+}
+
 // Bindless texture arrays: a batched run shares one mesh and cull mode, so the
 // only thing keeping two draws' textures apart is the per-instance slot index
 // in the draw uniform. Three cubes with three albedo textures must render as
@@ -1287,6 +1313,194 @@ static void TestSpriteQuality() {
     const RenderStats gpuStats = gpu.RenderGameFrame();
     CHECK(std::string(gpuStats.backend) == "vulkan");
     checkSprite(gpu);
+}
+
+// 2D up/down orientation. Image space is y-down everywhere else in the engine
+// (image.* draws y=0 at the top, and a texture's row 0 is v=0), so the sprite
+// and glyph quads must give their *top* corners the low v. They used to hand
+// the bottom corners v=0, which stood every sprite and every word on its head.
+// A red-over-blue sprite pins the sprite path; the capital 'T' — a full bar on
+// the top row above a centred stem — pins the glyph path. Both are checked on
+// both backends, because the mapping lives in shared vertex data precisely so
+// that the two agree.
+static void TestSpriteOrientation() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-orient").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/halves.bmp";
+    WriteTestBmpHalves(dir + "/" + tex, 16, 16, 255, 0, 0, 0, 0, 255);
+
+    auto makeScene = [&](Engine& engine, int backend) -> Scene& {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(128, 128);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 2.0f;   // 4x4 world units on screen
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        return scene;
+    };
+    auto px = [](Engine& engine, int x, int y) {
+        const FrameTarget& t = engine.frame();
+        const uint8_t* p = &t.color[((size_t)y * (size_t)t.width + (size_t)x) * 4];
+        return std::array<int, 3>{(int)p[0], (int)p[1], (int)p[2]};
+    };
+    auto sum = [](const std::array<int, 3>& c) { return c[0] + c[1] + c[2]; };
+
+    // --- sprite: the red half is up, the blue half is down ----------------
+    {
+        auto build = [&](Engine& engine, int backend) {
+            Scene& scene = makeScene(engine, backend);
+            GameObject* sprite = scene.CreateEntity("Sprite");
+            auto* sr = sprite->AddComponent<SpriteRenderer>();
+            sr->texturePath = tex;
+            sr->pixelPerfect = true;
+            sr->pixelsPerUnit = 4.0f;   // 16 texels -> 4 units: fills the view
+        };
+        auto check = [&](Engine& engine) {
+            auto top = px(engine, 64, 32);     // over the red half
+            auto bottom = px(engine, 64, 96);  // over the blue half
+            CHECK(sum(top) > 24 && sum(bottom) > 24);
+            CHECK(top[0] > top[2] * 2);        // red above
+            CHECK(bottom[2] > bottom[0] * 2);  // blue below
+        };
+        Engine cpu;
+        build(cpu, 2);  // software
+        cpu.Play();
+        CHECK(std::string(cpu.RenderGameFrame().backend) == "software");
+        check(cpu);
+
+        if (VulkanBackendAvailable()) {
+            Engine gpu;
+            build(gpu, 1);  // forced Vulkan; skips gracefully without a device
+            gpu.Play();
+            CHECK(std::string(gpu.RenderGameFrame().backend) == "vulkan");
+            check(gpu);
+        }
+    }
+
+    // --- text: the 'T' bar belongs at the top -----------------------------
+    {
+        auto build = [&](Engine& engine, int backend) {
+            Scene& scene = makeScene(engine, backend);
+            GameObject* text = scene.CreateEntity("Text");
+            text->transform().position = Vec3(-1.25f, -1.75f, 0);
+            auto* tr = text->AddComponent<TextRenderer>();
+            tr->text = "T";
+            tr->fontSize = 3.5f;   // glyph 2.5 x 3.5 units, centred in the view
+            tr->color = Color(1, 1, 1, 1);
+        };
+        auto check = [&](Engine& engine) {
+            // The glyph fills screen x 24..104, y 8..120. 'T' is a full bar on
+            // its top row over a one-texel stem, so the top rows of its ink
+            // bounding box must be far busier than the bottom rows. Upside
+            // down, the stem is on top and the bar hangs at the bottom.
+            int minY = 128, maxY = -1;
+            for (int y = 0; y < 128; ++y)
+                for (int x = 16; x < 112; ++x) {
+                    if (sum(px(engine, x, y)) > 24) {
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            CHECK(minY <= maxY);
+            auto litIn = [&](int y0, int y1) {
+                int n = 0;
+                for (int y = y0; y <= y1; ++y)
+                    for (int x = 16; x < 112; ++x)
+                        if (sum(px(engine, x, y)) > 24) ++n;
+                return n;
+            };
+            const int top = litIn(minY, minY + 3);
+            const int bottom = litIn(maxY - 3, maxY);
+            CHECK(top > bottom * 2);   // the bar is up, the stem hangs below it
+        };
+        Engine cpu;
+        build(cpu, 2);  // software
+        cpu.Play();
+        CHECK(std::string(cpu.RenderGameFrame().backend) == "software");
+        check(cpu);
+
+        if (VulkanBackendAvailable()) {
+            Engine gpu;
+            build(gpu, 1);
+            gpu.Play();
+            CHECK(std::string(gpu.RenderGameFrame().backend) == "vulkan");
+            check(gpu);
+        }
+    }
+}
+
+// 2D sprite lighting must follow the *image*, not the screen. A normal map's
+// green channel is authored in the same y-down image space as the albedo: with
+// image.normalMap's convention G < 0.5 tilts the surface toward the top of the
+// image, G > 0.5 toward the bottom. The orientation fix above is what makes
+// image-top equal world-top, so a map leaning to the image top has to catch a
+// lamp that shines down on the sprite while one leaning to the image bottom
+// must miss it. Both backends carry their own copy of the remap, so both are
+// checked.
+static void TestSpriteNormalOrientation() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-nrm").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    WriteTestBmp(dir + "/Assets/Textures/white.bmp", 8, 8, 255, 255, 255);
+    // G = 0 -> the generator's ny = -1 -> the normal leans to the image top;
+    // G = 255 -> ny = +1 -> it leans to the image bottom.
+    WriteTestBmp(dir + "/Assets/Textures/nrm_up.bmp", 8, 8, 128, 0, 255);
+    WriteTestBmp(dir + "/Assets/Textures/nrm_down.bmp", 8, 8, 128, 255, 255);
+
+    auto run = [&](int backend) {
+        Engine engine;
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(64, 64);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 1.0f;   // the 2x2-unit sprite fills the view
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        GameObject* lamp = scene.CreateEntity("Lamp");
+        lamp->transform().position = Vec3(0, 3, 2);   // above and in front
+        auto* lc = lamp->AddComponent<LightComponent>();
+        lc->type = LightComponent::LightType::Point;
+        lc->intensity = 1.0f;
+        lc->range = 20.0f;
+        GameObject* sprite = scene.CreateEntity("Sprite");
+        auto* sr = sprite->AddComponent<SpriteRenderer>();
+        sr->texturePath = "Assets/Textures/white.bmp";
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = 4.0f;
+        sr->normalMapPath = "Assets/Textures/nrm_up.bmp";
+
+        engine.Play();
+        auto centre = [&]() {
+            const FrameTarget& t = engine.frame();
+            const uint8_t* p = &t.color[((size_t)32 * (size_t)t.width + 32) * 4];
+            return (int)p[0] + (int)p[1] + (int)p[2];
+        };
+        engine.RenderGameFrame();
+        const int leaningUp = centre();
+        sr->normalMapPath = "Assets/Textures/nrm_down.bmp";
+        engine.RenderGameFrame();
+        const int leaningDown = centre();
+        CHECK(leaningUp > leaningDown + 20);
+    };
+
+    run(2);  // software
+    if (VulkanBackendAvailable()) run(1);
 }
 
 // Texture cache: per-slot color space, byte-budgeted LRU eviction, and mtime
@@ -2648,6 +2862,8 @@ int main() {
     TestCullingAndAA();
     TestSortingOrder();
     TestSpriteQuality();
+    TestSpriteOrientation();
+    TestSpriteNormalOrientation();
     TestTextureMips();
     TestParentedPhysics();
     TestTriggerAndEnabled();
