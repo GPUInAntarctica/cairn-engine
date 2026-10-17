@@ -769,8 +769,8 @@ console.log('cli: image preview + shapes');
 // ---------------------------------------------------------------------------
 // The agent-facing drawing surface: a text preview and pixel statistics it can
 // iterate against, plus polygons and one-call fill+outline shapes.
-function runBatch(file) {
-    const r = spawnSync(process.execPath, [cli, 'exec.run', '--file', file], { encoding: 'utf8', cwd: scratch, env: batchEnv() });
+function runBatch(file, extra = []) {
+    const r = spawnSync(process.execPath, [cli, 'exec.run', '--file', file, ...extra], { encoding: 'utf8', cwd: scratch, env: batchEnv() });
     const lines = r.stdout.trim().split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
     const byId = {};
     for (const l of lines) if (l.id) byId[l.id] = l;
@@ -999,6 +999,186 @@ expectFail(['--project', projectDir, 'image.stamp', '--file', 'Assets/Textures/s
 expectFail(['image.rotate', '--degrees', '45'], 'invalid_arg');
 expectFail(['image.crop', '--x', '0', '--y', '0', '--width', '0', '--height', '4'], 'invalid_arg');
 expectFail(['--project', projectDir, '--image', 'Assets/Textures/stamp_dot.png', 'image.flip', '--axis', 'x', '--layer', '9'], 'not_found');
+
+// ---------------------------------------------------------------------------
+console.log('cli: seeded noise + gradients + palette');
+// ---------------------------------------------------------------------------
+// Texture assets. The noise field is a pure function of its seed, so a
+// generator is reproducible; --tile wraps the lattice so the two edge columns
+// of the canvas meet like any two neighbouring columns do.
+
+// One batch paints the same field with two seeds (on two layers) and samples
+// the edge columns of every fourth row, which is where a tile seam shows up.
+function noiseBatch(file, tile) {
+    const steps = [
+        { command: 'image.new', args: { width: 32, height: 32, background: 'transparent' }, id: 'new' },
+        { command: 'image.draw.noise', args: { kind: 'value', seed: 4, cell: 8, tile, from: '#000000', to: '#ffffff' }, id: 'noise' },
+        { command: 'image.preview', args: { format: 'hex', scale: 8 }, id: 'hex' },
+        { command: 'image.layer.add', args: { name: 'Seed 5' }, id: 'layer' },
+        { command: 'image.draw.noise', args: { kind: 'value', seed: 5, cell: 8, tile, from: '#000000', to: '#ffffff' }, id: 'noise5' },
+        { command: 'image.preview', args: { format: 'hex', scale: 8, layer: 1 }, id: 'hex5' },
+    ];
+    for (const y of [3, 11, 19, 27]) {
+        steps.push({ command: 'image.pixel', args: { x: 0, y, layer: 0 }, id: `l${y}` });
+        steps.push({ command: 'image.pixel', args: { x: 1, y, layer: 0 }, id: `l${y}b` });
+        steps.push({ command: 'image.pixel', args: { x: 30, y, layer: 0 }, id: `r${y}b` });
+        steps.push({ command: 'image.pixel', args: { x: 31, y, layer: 0 }, id: `r${y}` });
+    }
+    fs.writeFileSync(file, steps.map(s => JSON.stringify(s)).join('\n'));
+    return file;
+}
+
+const texRows = [3, 11, 19, 27];
+const tileFile = noiseBatch(path.join(scratch, 'tex-tile.jsonl'), true);
+const tileRun = runBatch(tileFile);
+const tileAgain = runBatch(tileFile);
+const patchRun = runBatch(noiseBatch(path.join(scratch, 'tex-patch.jsonl'), false));
+check(tileRun.lines.every(l => l.ok !== false) && patchRun.lines.every(l => l.ok !== false),
+    'the noise batch runs clean', tileRun.stdout + tileRun.stderr + patchRun.stdout + patchRun.stderr);
+check(tileRun.byId.noise.result.painted === 1024 && tileRun.byId.noise.result.kind === 'value'
+    && tileRun.byId.noise.result.tile === true && patchRun.byId.noise.result.tile === false,
+    'image.draw.noise fills the canvas and reports the field', [tileRun.byId.noise, patchRun.byId.noise]);
+check(tileRun.byId.hex.result.lines.join('\n') === tileAgain.byId.hex.result.lines.join('\n')
+    && tileRun.byId.l11.result.hex === tileAgain.byId.l11.result.hex,
+    'the same seed paints the same pixels', [tileRun.byId.l11.result, tileAgain.byId.l11.result]);
+check(tileRun.byId.hex.result.lines.join('\n') !== tileRun.byId.hex5.result.lines.join('\n'),
+    'a different seed paints a different field', tileRun.byId.hex5.result.lines);
+
+// A wrapped lattice makes the gap across the seam the same as the gap between
+// two neighbouring columns inside the image; an unwrapped one leaves the two
+// edges unrelated.
+const seam = (run, y) => Math.abs(run.byId[`l${y}`].result.r - run.byId[`r${y}`].result.r);
+const inner = (run, y) => Math.max(
+    Math.abs(run.byId[`l${y}`].result.r - run.byId[`l${y}b`].result.r),
+    Math.abs(run.byId[`r${y}b`].result.r - run.byId[`r${y}`].result.r));
+const tileSeams = texRows.map(y => ({ y, seam: seam(tileRun, y), inner: inner(tileRun, y) }));
+// The wrapped seam is one lattice step, exactly like an inner neighbour pair;
+// a grey level of slack covers 8-bit rounding.
+check(tileSeams.every(t => t.seam <= t.inner + 1 && t.seam <= 16),
+    '--tile makes the edge columns meet', tileSeams);
+const tileMax = Math.max(...texRows.map(y => seam(tileRun, y)));
+const patchMax = Math.max(...texRows.map(y => seam(patchRun, y)));
+check(patchMax > tileMax, 'without --tile the two edges do not line up', { tile: tileMax, patch: patchMax });
+
+// Gradients: the default axis runs top -> bottom, --angle 0 turns it left ->
+// right, a radial one starts at its centre, and a region leaves the rest alone.
+const gradBatch = path.join(scratch, 'tex-grad.jsonl');
+fs.writeFileSync(gradBatch, [
+    { command: 'image.new', args: { width: 16, height: 16, background: 'transparent' }, id: 'new' },
+    { command: 'image.draw.gradient', args: { from: '#000000', to: '#ffffff' }, id: 'vertical' },
+    { command: 'image.pixel', args: { x: 8, y: 0, layer: 0 }, id: 'top' },
+    { command: 'image.pixel', args: { x: 8, y: 15, layer: 0 }, id: 'bottom' },
+    { command: 'image.layer.add', args: { name: 'Horizontal' }, id: 'layerH' },
+    { command: 'image.draw.gradient', args: { angle: 0, from: '#000000', to: '#ffffff' }, id: 'horizontal' },
+    { command: 'image.pixel', args: { x: 0, y: 8, layer: 1 }, id: 'left' },
+    { command: 'image.pixel', args: { x: 15, y: 8, layer: 1 }, id: 'right' },
+    { command: 'image.layer.add', args: { name: 'Radial' }, id: 'layerR' },
+    { command: 'image.draw.gradient', args: { kind: 'radial', cx: 8, cy: 8, radius: 8, from: '#000000', to: '#ffffff' }, id: 'radial' },
+    { command: 'image.pixel', args: { x: 8, y: 8, layer: 2 }, id: 'centre' },
+    { command: 'image.pixel', args: { x: 15, y: 8, layer: 2 }, id: 'radialEdge' },
+    { command: 'image.layer.add', args: { name: 'Region' }, id: 'layerG' },
+    { command: 'image.draw.gradient', args: { x: 4, y: 4, width: 8, height: 8, from: '#ff0000', to: '#00ff00' }, id: 'region' },
+    { command: 'image.pixel', args: { x: 4, y: 4, layer: 3 }, id: 'inRegion' },
+    { command: 'image.pixel', args: { x: 2, y: 2, layer: 3 }, id: 'outsideRegion' },
+    { command: 'image.layer.add', args: { name: 'Diagonal' }, id: 'layerD' },
+    { command: 'image.draw.gradient', args: { x1: 0, y1: 0, x2: 15, y2: 15, from: '#000000', to: '#ffffff' }, id: 'diagonal' },
+    { command: 'image.pixel', args: { x: 0, y: 0, layer: 4 }, id: 'diagStart' },
+    { command: 'image.pixel', args: { x: 15, y: 15, layer: 4 }, id: 'diagEnd' },
+    { command: 'image.draw.gradient', args: { kind: 'radial', radius: 0 }, id: 'badRadius' },
+    { command: 'image.draw.gradient', args: { x1: 5, y1: 5, x2: 5, y2: 5 }, id: 'badAxis' },
+].map(s => JSON.stringify(s)).join('\n'));
+// The two bad steps at the end are deliberate, so keep going past them; a
+// failing step is reported by index without its id.
+const gradRun = runBatch(gradBatch, ['--stopOnError=false']);
+const gradFailures = gradRun.lines.find(l => l.command === 'exec.run').result.failures;
+check(gradRun.lines.filter(l => l.id).every(l => l.ok !== false),
+    'the gradient batch runs clean', gradRun.stdout + gradRun.stderr);
+check(gradRun.byId.top.result.r < gradRun.byId.bottom.result.r
+    && gradRun.byId.top.result.r < 16 && gradRun.byId.bottom.result.r > 240,
+    'a linear gradient runs top to bottom by default', [gradRun.byId.top.result, gradRun.byId.bottom.result]);
+check(gradRun.byId.left.result.r < gradRun.byId.right.result.r
+    && gradRun.byId.left.result.r < 16 && gradRun.byId.right.result.r > 240,
+    '--angle 0 turns the gradient left to right', [gradRun.byId.left.result, gradRun.byId.right.result]);
+check(gradRun.byId.centre.result.r < 40 && gradRun.byId.radialEdge.result.r > 220,
+    'a radial gradient starts dark at its centre', [gradRun.byId.centre.result, gradRun.byId.radialEdge.result]);
+check(gradRun.byId.region.result.painted === 64 && gradRun.byId.inRegion.result.a === 255
+    && gradRun.byId.inRegion.result.r > gradRun.byId.inRegion.result.g
+    && gradRun.byId.outsideRegion.result.a === 0,
+    'a gradient region leaves the rest of the canvas alone',
+    [gradRun.byId.region.result, gradRun.byId.inRegion.result, gradRun.byId.outsideRegion.result]);
+check(gradRun.byId.diagStart.result.r < gradRun.byId.diagEnd.result.r && gradRun.byId.diagEnd.result.r === 255,
+    'explicit endpoints drive the gradient', [gradRun.byId.diagStart.result, gradRun.byId.diagEnd.result]);
+check(gradFailures.length === 2 && gradFailures.every(f => f.code === 'invalid_arg')
+    && gradFailures.map(f => f.index).join(',') === '20,21',
+    'a degenerate gradient is rejected', gradFailures);
+
+// Palette: median cut finds the colours an image actually uses (exactly, for a
+// flat sprite), an explicit palette snaps to that palette, and dithering stays
+// inside the palette while breaking the bands up.
+const palBatch = path.join(scratch, 'tex-pal.jsonl');
+fs.writeFileSync(palBatch, [
+    { command: 'image.new', args: { width: 32, height: 32, background: 'transparent' }, id: 'new' },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 16, height: 32, filled: true, color: '#ff0000' }, id: 'red' },
+    { command: 'image.draw.rect', args: { x: 16, y: 0, width: 16, height: 16, filled: true, color: '#0000ff' }, id: 'blue' },
+    { command: 'image.draw.rect', args: { x: 16, y: 16, width: 16, height: 16, filled: true, color: '#00ff00' }, id: 'green' },
+    { command: 'image.palette', args: { colors: 8, list: true }, id: 'list' },
+    { command: 'image.palette', args: { colors: 2 }, id: 'quant' },
+    { command: 'image.pixel', args: { x: 8, y: 8, layer: 0 }, id: 'afterRed' },
+    { command: 'image.pixel', args: { x: 24, y: 8, layer: 0 }, id: 'afterBlue' },
+    { command: 'image.pixel', args: { x: 24, y: 24, layer: 0 }, id: 'afterGreen' },
+    { command: 'image.palette', args: { colors: 256, list: true, layer: 0 }, id: 'afterList' },
+    { command: 'image.layer.add', args: { name: 'Grey' }, id: 'greyLayer' },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 32, height: 32, filled: true, color: '#808080' }, id: 'grey' },
+    { command: 'image.palette', args: { palette: '#000000,#ffffff', dither: 'floyd', layer: 1 }, id: 'dither' },
+    { command: 'image.palette', args: { palette: '#000000,#ffffff', list: true, layer: 1 }, id: 'ditherList' },
+    { command: 'image.pixel', args: { x: 0, y: 0, layer: 1 }, id: 'd0' },
+    { command: 'image.pixel', args: { x: 1, y: 0, layer: 1 }, id: 'd1' },
+    { command: 'image.pixel', args: { x: 7, y: 7, layer: 1 }, id: 'd2' },
+    { command: 'image.pixel', args: { x: 31, y: 31, layer: 1 }, id: 'd3' },
+    { command: 'image.layer.add', args: { name: 'Empty' }, id: 'emptyLayer' },
+    { command: 'image.palette', args: { colors: 4, list: true, layer: 2 }, id: 'emptyList' },
+    { command: 'image.palette', args: { colors: 4, layer: 2 }, id: 'emptyQuant' },
+].map(s => JSON.stringify(s)).join('\n'));
+const palRun = runBatch(palBatch);
+check(palRun.lines.every(l => l.ok !== false), 'the palette batch runs clean', palRun.stdout + palRun.stderr);
+
+const palList = palRun.byId.list.result;
+check(palList && palList.colors === 3 && palList.total === 1024
+    && JSON.stringify(palList.palette) === JSON.stringify([
+        { hex: '#ff0000', count: 512 }, { hex: '#0000ff', count: 256 }, { hex: '#00ff00', count: 256 },
+    ]),
+    'image.palette --list reports the exact colours of a flat image', palList);
+
+const quant = palRun.byId.quant.result;
+const quantHexes = quant && quant.palette;
+check(quant && quant.colors === 2 && quant.dither === 'none' && quant.changed > 0
+    && quantHexes.includes(palRun.byId.afterRed.result.hex)
+    && quantHexes.includes(palRun.byId.afterBlue.result.hex)
+    && quantHexes.includes(palRun.byId.afterGreen.result.hex),
+    'image.palette snaps every pixel onto the palette',
+    [quant, palRun.byId.afterRed.result, palRun.byId.afterBlue.result, palRun.byId.afterGreen.result]);
+check(palRun.byId.afterList.result.colors === 2 && palRun.byId.afterList.result.total === 1024,
+    'quantizing leaves no more colours than the palette has', palRun.byId.afterList.result);
+
+const ditherList = palRun.byId.ditherList.result;
+const ditherHexes = ['d0', 'd1', 'd2', 'd3'].map(id => palRun.byId[id].result.hex);
+check(palRun.byId.dither.result.colors === 2 && ditherHexes.every(h => h === '#000000' || h === '#ffffff')
+    && ditherList.palette.every(p => p.count > 0) && ditherList.total === 1024,
+    'an explicit palette with Floyd-Steinberg dithers within the palette',
+    [palRun.byId.dither.result, ditherHexes, ditherList]);
+
+check(palRun.byId.emptyList.result.colors === 0 && palRun.byId.emptyList.result.total === 0
+    && palRun.byId.emptyQuant.result.changed === 0,
+    'a fully transparent layer has no palette', [palRun.byId.emptyList.result, palRun.byId.emptyQuant.result]);
+
+expectFail(['image.draw.noise', '--cell', '0'], 'invalid_arg');
+expectFail(['image.draw.noise', '--octaves', '0'], 'invalid_arg');
+expectFail(['image.draw.noise', '--lacunarity', '0.5'], 'invalid_arg');
+expectFail(['image.draw.noise', '--gain', '2'], 'invalid_arg');
+expectFail(['image.palette', '--colors', '0'], 'invalid_arg');
+expectFail(['image.palette', '--colors', '300'], 'invalid_arg');
+expectFail(['image.palette', '--palette', '#zzzzzz'], 'invalid_arg');
+expectFail(['image.draw.noise'], 'usage');
 
 // ---------------------------------------------------------------------------
 console.log('cli: export + preferences');

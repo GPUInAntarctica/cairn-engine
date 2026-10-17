@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cairn-engine VERSION 0.1.17 LANGUAGES CXX)
+project(cairn-engine VERSION 0.1.18 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

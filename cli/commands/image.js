@@ -497,6 +497,93 @@ def('image.draw.fill', {
     },
 });
 
+// Deterministic noise and gradients are region fills with a colour ramp, not
+// brush strokes: `--from` is the low end of the ramp and `--to` the high end,
+// and the optional x/y/width/height region defaults to the whole canvas.
+const rampArgs = {
+    layer: { type: 'int', desc: 'Target layer index (default: the top layer).' },
+    from: { type: 'color', default: '#000000', desc: 'Colour at the low end of the ramp.' },
+    to: { type: 'color', default: '#ffffff', desc: 'Colour at the high end of the ramp.' },
+    opacity: { type: 'number', default: 1, desc: 'Alpha multiplier 0-1.' },
+    x: { type: 'number', desc: 'Region left (default: the whole canvas).' },
+    y: { type: 'number', desc: 'Region top (default: the whole canvas).' },
+    width: { type: 'number', desc: 'Region width (default: the whole canvas).' },
+    height: { type: 'number', desc: 'Region height (default: the whole canvas).' },
+};
+
+def('image.draw.noise', {
+    summary: 'Fill a region with seeded, reproducible noise (value, white or fractal).',
+    args: Object.assign({}, rampArgs, {
+        kind: { type: 'enum', enum: ['value', 'white', 'fractal'], default: 'value', desc: 'value = smooth blobs, white = per-pixel grain, fractal = octave sum.' },
+        seed: { type: 'int', default: 0, desc: 'Seed: the same seed always paints the same pixels.' },
+        cell: { type: 'number', default: 16, desc: 'Lattice cell size in pixels (value/fractal).' },
+        octaves: { type: 'int', default: 4, desc: 'Octaves summed by --kind fractal.' },
+        lacunarity: { type: 'number', default: 2, desc: 'Cell shrink per octave.' },
+        gain: { type: 'number', default: 0.5, desc: 'Amplitude per octave 0-1.' },
+        tile: { type: 'bool', default: false, desc: 'Wrap the lattice so the field is exactly periodic (a seamless tile).' },
+    }),
+    returns: '{layer, painted, kind, seed, tile, width, height}',
+    examples: [
+        'cairn image.draw.noise --kind fractal --seed 7 --cell 24 --from "#2a1a0a" --to "#a67c4a"',
+        'cairn image.draw.noise --kind white --seed 3 --from "#000000" --to "#ffffff" --opacity 0.25',
+        'cairn image.draw.noise --kind value --seed 5 --cell 16 --tile --from "#12384a" --to "#9ccfe8"',
+    ],
+    run(ctx, args) {
+        if (!(args.cell > 0)) throw invalidArg('--cell must be greater than 0', { cell: args.cell });
+        if (args.octaves < 1) throw invalidArg('--octaves must be 1 or greater', { octaves: args.octaves });
+        if (args.lacunarity < 1) throw invalidArg('--lacunarity must be 1 or greater', { lacunarity: args.lacunarity });
+        if (args.gain < 0 || args.gain > 1) throw invalidArg('--gain must be between 0 and 1', { gain: args.gain });
+        const layer = activeLayer(ctx, args);
+        const doc = ctx.session._image;
+        const painted = imaging.drawNoise(layer.data, doc.width, doc.height, args);
+        return {
+            layer: doc.layers.indexOf(layer),
+            painted,
+            kind: args.kind,
+            seed: args.seed,
+            tile: args.tile && args.kind !== 'white',
+            width: doc.width,
+            height: doc.height,
+        };
+    },
+});
+
+def('image.draw.gradient', {
+    summary: 'Fill a region with a linear or radial colour ramp.',
+    args: Object.assign({}, rampArgs, {
+        kind: { type: 'enum', enum: ['linear', 'radial'], default: 'linear', desc: 'linear along an axis, or radial from a centre outwards.' },
+        angle: { type: 'number', default: 90, desc: 'Linear direction in degrees (0 = left to right, 90 = top to bottom).' },
+        x1: { type: 'number', desc: 'Linear start X (overrides --angle/--y1/--x2/--y2).' },
+        y1: { type: 'number', desc: 'Linear start Y.' },
+        x2: { type: 'number', desc: 'Linear end X.' },
+        y2: { type: 'number', desc: 'Linear end Y.' },
+        cx: { type: 'number', desc: 'Radial centre X (default: the canvas centre).' },
+        cy: { type: 'number', desc: 'Radial centre Y.' },
+        radius: { type: 'number', desc: 'Radial radius in pixels (default: half the smaller side).' },
+    }),
+    returns: '{layer, painted, kind, width, height}',
+    examples: [
+        'cairn image.draw.gradient --kind linear --angle 90 --from "#0b1e3a" --to "#7fb2e5"',
+        'cairn image.draw.gradient --kind radial --cx 32 --cy 32 --radius 30 --from "#ffffff" --to "#ffd700"',
+        'cairn image.draw.gradient --x1 0 --y1 0 --x2 63 --y2 63 --from "#000000" --to "#ffffff"',
+    ],
+    run(ctx, args) {
+        const doc = getDoc(ctx);
+        if (args.kind === 'radial') {
+            const radius = args.radius === undefined ? Math.min(doc.width, doc.height) / 2 : args.radius;
+            if (!(radius > 0)) throw invalidArg('--radius must be greater than 0', { radius: args.radius });
+        } else if (args.x1 !== undefined || args.x2 !== undefined) {
+            const x1 = args.x1 === undefined ? 0 : args.x1, y1 = args.y1 === undefined ? 0 : args.y1;
+            const x2 = args.x2 === undefined ? doc.width : args.x2;
+            const y2 = args.y2 === undefined ? doc.height : args.y2;
+            if (x1 === x2 && y1 === y2) throw invalidArg('the gradient start and end must differ');
+        }
+        const layer = activeLayer(ctx, args);
+        const painted = imaging.drawGradient(layer.data, doc.width, doc.height, args);
+        return { layer: doc.layers.indexOf(layer), painted, kind: args.kind, width: doc.width, height: doc.height };
+    },
+});
+
 def('image.pixel', {
     summary: 'Sample a pixel from the active layer or the composite.',
     args: {
@@ -541,6 +628,74 @@ def('image.replaceColor', {
             }
             return changed;
         });
+    },
+});
+
+// An explicit palette: "#112233,#445566", a "1,2,3 4,5,6" list, or a JSON array
+// of those strings / [r,g,b] triples.
+function parsePalette(value) {
+    const items = Array.isArray(value) ? value : String(value).split(/[,\s;]+/).filter(Boolean);
+    if (!items.length) throw invalidArg('--palette needs at least one colour');
+    return items.map((item, i) => {
+        const rgba = imaging.parseColor(item);
+        if (!rgba) throw invalidArg(`--palette entry ${i + 1} is not a colour`, { entry: item });
+        return { r: Math.round(rgba[0] * 255), g: Math.round(rgba[1] * 255), b: Math.round(rgba[2] * 255) };
+    });
+}
+
+function paletteHex(entry) {
+    return imaging.rgbaToHex([entry.r / 255, entry.g / 255, entry.b / 255]);
+}
+
+def('image.palette', {
+    summary: 'Quantize a layer to a palette (median cut), with optional dithering, or report it.',
+    args: {
+        colors: { type: 'int', default: 16, desc: 'Palette size for the automatic median cut (1-256).' },
+        palette: { type: 'json', desc: 'Explicit palette instead: "#112233,#445566" or a JSON array.' },
+        dither: { type: 'enum', enum: ['none', 'ordered', 'floyd'], default: 'none', desc: 'none, an ordered Bayer threshold, or Floyd-Steinberg.' },
+        layer: { type: 'int', desc: 'Target layer (default: the top layer).' },
+        list: { type: 'bool', default: false, desc: 'Report the palette and how many pixels use each entry instead of applying it.' },
+    },
+    returns: '--list: {layer, colors, palette:[{hex,count}], total}; else {layer, colors, dither, palette:[hex], changed}',
+    examples: [
+        'cairn image.palette --colors 8 --dither floyd',
+        'cairn image.palette --palette "#1a1c2c,#5d275d,#b13e53,#ef7d57" --dither ordered',
+        'cairn image.palette --colors 16 --list',
+    ],
+    run(ctx, args) {
+        if (args.colors < 1 || args.colors > 256) {
+            throw invalidArg('--colors must be between 1 and 256', { colors: args.colors });
+        }
+        // Parsed before the document is needed, so a bad --palette reports
+        // itself whether or not an image is loaded.
+        const explicit = args.palette === undefined ? null : parsePalette(args.palette);
+        const layer = activeLayer(ctx, args);
+        const doc = ctx.session._image;
+        const palette = explicit || imaging.paletteFromImage(layer.data, doc.width, doc.height, args.colors);
+        const layerIndex = doc.layers.indexOf(layer);
+        if (args.list) {
+            // The counts are where each pixel actually lands, so they line up
+            // with what a quantize would do (dithering aside).
+            const counts = imaging.paletteCounts(layer.data, doc.width, doc.height, palette);
+            return {
+                layer: layerIndex,
+                colors: palette.length,
+                palette: palette.map((entry, i) => ({ hex: paletteHex(entry), count: counts[i] })),
+                total: counts.reduce((a, b) => a + b, 0),
+                width: doc.width,
+                height: doc.height,
+            };
+        }
+        const changed = imaging.quantizeLayer(layer.data, doc.width, doc.height, { palette, dither: args.dither });
+        return {
+            layer: layerIndex,
+            colors: palette.length,
+            dither: args.dither,
+            palette: palette.map(paletteHex),
+            changed,
+            width: doc.width,
+            height: doc.height,
+        };
     },
 });
 

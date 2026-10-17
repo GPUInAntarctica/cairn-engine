@@ -226,9 +226,9 @@ symmetry with mismatch counts, 4-bit quantised dominant colors, and — with
 That is enough to confirm a silhouette, spot a clipped sprite, check a mirror or
 read a palette without decoding the image by eye.
 
-The shape and preview primitives are driven from the CLI; the editor's image
-editor keeps its own canvas renderer and only shares the colour and normal-map
-helpers from `editor/main/imaging.js`.
+The shape, preview, noise, gradient and palette primitives are driven from the CLI;
+the editor's image editor keeps its own canvas renderer and only shares the colour,
+normal-map and quantization helpers from `editor/main/imaging.js`.
 
 ### Symmetry and composition
 
@@ -264,6 +264,49 @@ canvas is clipped, `--scale` is nearest neighbour, `--opacity` multiplies alpha,
 and `--blend replace` copies the source through (a transparent source punches a
 hole) instead of compositing source-over. An asset sheet is one `image.new` at
 the sheet size followed by one `image.stamp` per cell.
+
+### Textures: noise, gradients, palettes
+
+Three primitives that make a *texture* rather than fill a shape with one colour:
+
+```bash
+cairn --project ./game image.draw.noise --kind fractal --seed 7 --cell 24 \
+    --from '#2a1a0a' --to '#a67c4a'          # clouds, dirt, stone
+cairn --project ./game image.draw.noise --kind white --seed 3 --opacity 0.25
+cairn --project ./game image.draw.noise --kind value --cell 16 --tile   # a seamless tile
+cairn --project ./game image.draw.gradient --angle 90 --from '#0b1e3a' --to '#7fb2e5'
+cairn --project ./game image.draw.gradient --kind radial --cx 32 --cy 32 --radius 30 \
+    --from '#ffffff' --to '#ffd700'
+cairn --project ./game image.palette --colors 8 --dither floyd
+cairn --project ./game image.palette --palette '#1a1c2c,#5d275d,#b13e53' --list
+```
+
+Noise is a pure function of `--seed` (an integer hash: nothing reaches `Math.random`,
+there is no time or hidden state), so the same command always paints the same pixels and
+two revisions of a generator can be diffed. `--kind value` is smooth blobs, `white` is
+per-pixel grain, and `fractal` sums octaves (`--octaves --lacunarity --gain`) over a
+lattice whose cell size is `--cell`. `--from`/`--to` are the two ends of the colour ramp,
+and the optional `--x/--y/--width/--height` region limits the fill (whole canvas by
+default).
+
+`--tile` snaps every octave's lattice to an integer number of cells across the canvas, so
+the field is exactly periodic and the seam vanishes — the test checks that the difference
+across it is no larger than between two neighbouring columns inside the image, which is
+what "seamless" has to mean to be verifiable.
+
+`image.draw.gradient` takes the same ramp/region/opacity arguments. A linear one runs
+through the canvas centre along `--angle` (90 = top to bottom, 0 = left to right) and
+spans the box along that axis, so opposite corners land on 0 and 1 whatever the angle;
+`--x1/--y1/--x2/--y2` give explicit endpoints instead. A radial one runs from `--cx/--cy`
+out to `--radius` (the canvas centre and half the smaller side by default). Both
+composite source-over, so `--opacity` really blends with what is underneath.
+
+`image.palette` quantizes the layer with a median cut (`--colors`, 1-256) or snaps it to a
+palette you give (`--palette '#1a1c2c,#5d275d,…'`), optionally dithering (`--dither
+ordered` adds a Bayer threshold, `floyd` diffuses the error). A flat sprite quantizes to
+exactly its own colours, and fully transparent pixels are left alone. `--list` changes
+nothing and reports the palette plus how many pixels land on each entry — the cheap way to
+read what a sprite is actually made of.
 
 ## Command reference
 
@@ -341,7 +384,9 @@ the sheet size followed by one `image.stamp` per cell.
 | `image.draw.brush` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--mirror` (enum, default "none", one of none \| x \| y \| both)<br>`--x` (number, required)<br>`--y` (number, required)<br>`--x2` (number)<br>`--y2` (number)<br>`--erase` (bool, default false) | Paint a brush stroke along a path (single point when no end is given). |
 | `image.draw.ellipse` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--mirror` (enum, default "none", one of none \| x \| y \| both)<br>`--filled` (bool, default false)<br>`--stroke` (number, default 0)<br>`--strokeColor` (color)<br>`--cx` (number, required)<br>`--cy` (number, required)<br>`--rx` (number, required)<br>`--ry` (number, required) | Draw an ellipse outline or a filled ellipse. |
 | `image.draw.fill` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--x` (number, required)<br>`--y` (number, required)<br>`--tolerance` (int, default 24) | Flood fill the contiguous region around a pixel (tolerance matched). |
+| `image.draw.gradient` | `--layer` (int)<br>`--from` (color, default "#000000")<br>`--to` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--x` (number)<br>`--y` (number)<br>`--width` (number)<br>`--height` (number)<br>`--kind` (enum, default "linear", one of linear \| radial)<br>`--angle` (number, default 90)<br>`--x1` (number)<br>`--y1` (number)<br>`--x2` (number)<br>`--y2` (number)<br>`--cx` (number)<br>`--cy` (number)<br>`--radius` (number) | Fill a region with a linear or radial colour ramp. |
 | `image.draw.line` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--mirror` (enum, default "none", one of none \| x \| y \| both)<br>`--x1` (number, required)<br>`--y1` (number, required)<br>`--x2` (number, required)<br>`--y2` (number, required) | Draw a line segment. |
+| `image.draw.noise` | `--layer` (int)<br>`--from` (color, default "#000000")<br>`--to` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--x` (number)<br>`--y` (number)<br>`--width` (number)<br>`--height` (number)<br>`--kind` (enum, default "value", one of value \| white \| fractal)<br>`--seed` (int, default 0)<br>`--cell` (number, default 16)<br>`--octaves` (int, default 4)<br>`--lacunarity` (number, default 2)<br>`--gain` (number, default 0.5)<br>`--tile` (bool, default false) | Fill a region with seeded, reproducible noise (value, white or fractal). |
 | `image.draw.path` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--mirror` (enum, default "none", one of none \| x \| y \| both)<br>`--filled` (bool, default false)<br>`--stroke` (number, default 0)<br>`--strokeColor` (color)<br>`--points` (json)<br>`--closed` (bool, default true)<br>`--sides` (int)<br>`--cx` (number)<br>`--cy` (number)<br>`--radius` (number)<br>`--rotation` (number, default 0)<br>`--inner` (number) | Draw a closed polygon, an open polyline, or a regular polygon/star. |
 | `image.draw.rect` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--mirror` (enum, default "none", one of none \| x \| y \| both)<br>`--filled` (bool, default false)<br>`--stroke` (number, default 0)<br>`--strokeColor` (color)<br>`--x` (number, required)<br>`--y` (number, required)<br>`--width` (number, required)<br>`--height` (number, required) | Draw a rectangle outline or a filled rectangle. |
 | `image.flatten` | — | Collapse all visible layers into a single layer. |
@@ -357,6 +402,7 @@ the sheet size followed by one `image.stamp` per cell.
 | `image.new` | `--width` (int, default 256)<br>`--height` (int, default 256)<br>`--background` (string, default "white")<br>`--layers` (int, default 1) | Create a layered image document (one transparent or coloured base layer). |
 | `image.normalMap` | `--source` (enum, default "luma", one of luma \| alpha)<br>`--strength` (number, default 6)<br>`--invertX` (bool, default false)<br>`--invertY` (bool, default false)<br>`--out` (string)<br>`--name` (string, default "Normal Map") | Generate a tangent-space normal map from the composite height field and add it as a new layer. |
 | `image.open` | `--file` (string, required) | Load a PNG or BMP file as a single-layer document. |
+| `image.palette` | `--colors` (int, default 16)<br>`--palette` (json)<br>`--dither` (enum, default "none", one of none \| ordered \| floyd)<br>`--layer` (int)<br>`--list` (bool, default false) | Quantize a layer to a palette (median cut), with optional dithering, or report it. |
 | `image.pixel` | `--x` (int, required)<br>`--y` (int, required)<br>`--layer` (int) | Sample a pixel from the active layer or the composite. |
 | `image.preview` | `--layer` (int)<br>`--scale` (int, default 1)<br>`--format` (enum, default "ascii", one of ascii \| blocks \| hex)<br>`--chars` (string)<br>`--empty` (string, default " ") | Render the image (or a layer) as text so its shape can be checked without opening a file. |
 | `image.replaceColor` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--from` (color, required)<br>`--tolerance` (int, default 8) | Recolor every pixel of a layer whose color matches within a tolerance. |

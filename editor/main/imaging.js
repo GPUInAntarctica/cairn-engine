@@ -670,6 +670,376 @@ function mirrorShapeArgs(args, w, h, box = false) {
     return out;
 }
 
+// ------------------------------------------------- noise, gradients, palettes
+// Everything below is a pure function of its arguments: the same seed paints
+// the same pixels, nothing reaches Math.random and there is no time or hidden
+// state, so an agent can regenerate a texture bit for bit. With `tile` each
+// noise octave's lattice is snapped to an integer number of cells across the
+// canvas, which makes the field exactly periodic and the tile seam vanish.
+
+// A pure integer hash, used as the noise lattice: the value at (x, y) for a
+// seed and channel. Written out rather than taken from a library so the exact
+// pixels are pinned by the tests.
+function hashLattice(seed, x, y, channel) {
+    let h = Math.imul(x | 0, 0x27d4eb2d) ^ Math.imul(y | 0, 0x165667b1)
+        ^ Math.imul((((seed | 0) + Math.imul(channel | 0, 0x51ed270b)) | 0), 0x9e3779b9);
+    h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d);
+    h = Math.imul(h ^ (h >>> 12), 0x297a2d39);
+    return ((h ^ (h >>> 15)) >>> 0) / 4294967296;
+}
+
+// Bilinear value noise on a lattice of cellsX x cellsY cells, summed into `out`
+// with `weight`. With `tile` the lattice indexes wrap, so the field is periodic
+// in the canvas size; without it the cell past the last one is just another
+// lattice value (which is the whole difference between a tile and a patch).
+function valueNoiseOctave(width, height, cellsX, cellsY, seed, tile, weight, out) {
+    const stepX = cellsX / width, stepY = cellsY / height;
+    const at = (ix, iy) => {
+        const x = tile ? ((ix % cellsX) + cellsX) % cellsX : ix;
+        const y = tile ? ((iy % cellsY) + cellsY) % cellsY : iy;
+        return hashLattice(seed, x, y, 0);
+    };
+    for (let y = 0; y < height; ++y) {
+        const fy = y * stepY;
+        const iy = Math.floor(fy), ty = fy - iy;
+        for (let x = 0; x < width; ++x) {
+            const fx = x * stepX;
+            const ix = Math.floor(fx), tx = fx - ix;
+            const top = at(ix, iy) + (at(ix + 1, iy) - at(ix, iy)) * tx;
+            const bot = at(ix, iy + 1) + (at(ix + 1, iy + 1) - at(ix, iy + 1)) * tx;
+            out[y * width + x] += (top + (bot - top) * ty) * weight;
+        }
+    }
+}
+
+// One value in [0, 1] per pixel. `kind` is `value` (smooth blobs), `white`
+// (independent grain) or `fractal` (value noise summed over octaves).
+function noiseField(width, height, options = {}) {
+    const out = new Float64Array(width * height);
+    const seed = options.seed === undefined ? 0 : (options.seed | 0);
+    const kind = options.kind || 'value';
+    if (kind === 'white') {
+        // Grain has no lattice to wrap, so `tile` is a no-op: independent
+        // pixels already tile.
+        for (let y = 0; y < height; ++y) {
+            for (let x = 0; x < width; ++x) out[y * width + x] = hashLattice(seed, x, y, 0);
+        }
+        return out;
+    }
+    const cell = Math.max(1e-6, options.cell === undefined ? 16 : options.cell);
+    const cells = (px, cellPx) => Math.max(1, Math.round(px / cellPx));
+    if (kind !== 'fractal') {
+        valueNoiseOctave(width, height, cells(width, cell), cells(height, cell), seed, !!options.tile, 1, out);
+        return out;
+    }
+    const octaves = Math.max(1, options.octaves === undefined ? 4 : (options.octaves | 0));
+    const lacunarity = Math.max(1, options.lacunarity === undefined ? 2 : options.lacunarity);
+    const gain = clamp(options.gain === undefined ? 0.5 : options.gain, 0, 1);
+    let total = 0, weight = 1, octaveCell = cell;
+    for (let o = 0; o < octaves; ++o) {
+        total += weight;
+        // Each octave gets its own lattice (a shifted seed), otherwise the
+        // finer octaves repeat the coarse one's zero crossings.
+        valueNoiseOctave(width, height, cells(width, octaveCell), cells(height, octaveCell),
+            (seed + Math.imul(o, 1013904223)) | 0, !!options.tile, weight, out);
+        weight *= gain;
+        octaveCell /= lacunarity;
+    }
+    if (total > 0) for (let i = 0; i < out.length; ++i) out[i] /= total;
+    return out;
+}
+
+// Clamps an optional x/y/width/height region to the canvas; anything missing
+// defaults to the whole canvas, so a fill can say `--x 8 --y 8 --width 16
+// --height 16` or nothing at all.
+function regionBounds(width, height, options = {}) {
+    const x = options.x === undefined ? 0 : options.x;
+    const y = options.y === undefined ? 0 : options.y;
+    const rw = options.width === undefined ? width : options.width;
+    const rh = options.height === undefined ? height : options.height;
+    const x0 = clamp(Math.floor(x), 0, width);
+    const y0 = clamp(Math.floor(y), 0, height);
+    const x1 = clamp(Math.ceil(x + rw), 0, width);
+    const y1 = clamp(Math.ceil(y + rh), 0, height);
+    return { x0, y0, x1: Math.max(x0, x1), y1: Math.max(y0, y1) };
+}
+
+// Source-over on a straight-alpha RGBA buffer. The same composition the
+// composite/stamp paths use, so a 50% ramp over a 50% pixel really blends
+// instead of taking the larger alpha the brush path does.
+function compositePixel(data, w, h, x, y, r, g, b, alpha) {
+    if (x < 0 || y < 0 || x >= w || y >= h) return;
+    const sa = clamp(alpha, 0, 1);
+    if (sa <= 0) return;
+    const o = (y * w + x) * 4;
+    const da = data[o + 3] / 255;
+    const oa = sa + da * (1 - sa);
+    if (oa <= 0) return;
+    const src = [r, g, b];
+    for (let c = 0; c < 3; ++c) {
+        const sc = clamp(src[c], 0, 1) * sa;
+        const dc = (data[o + c] / 255) * da * (1 - sa);
+        data[o + c] = Math.round(clamp((sc + dc) / oa, 0, 1) * 255);
+    }
+    data[o + 3] = Math.round(clamp(oa, 0, 1) * 255);
+}
+
+// Paints the noise field through a `from` -> `to` colour ramp. Returns how many
+// pixels were written (a fully transparent ramp leaves the region alone).
+function drawNoise(data, w, h, options = {}) {
+    const from = options.from || [0, 0, 0, 1];
+    const to = options.to || [1, 1, 1, 1];
+    const opacity = clamp(options.opacity === undefined ? 1 : options.opacity, 0, 1);
+    const region = regionBounds(w, h, options);
+    const field = noiseField(w, h, options);
+    let painted = 0;
+    for (let y = region.y0; y < region.y1; ++y) {
+        for (let x = region.x0; x < region.x1; ++x) {
+            const v = clamp(field[y * w + x], 0, 1);
+            const a = (from[3] + (to[3] - from[3]) * v) * opacity;
+            if (a <= 0) continue;
+            compositePixel(data, w, h, x, y,
+                from[0] + (to[0] - from[0]) * v,
+                from[1] + (to[1] - from[1]) * v,
+                from[2] + (to[2] - from[2]) * v, a);
+            painted++;
+        }
+    }
+    return painted;
+}
+
+// Paints a `from` -> `to` ramp: `linear` along an axis, or `radial` from a
+// centre outwards. The linear axis runs through the canvas centre and is as
+// long as the box is wide along it, so opposite corners land on 0 and 1
+// whatever the angle (the CSS convention) - or give --x1/--y1/--x2/--y2 for
+// explicit endpoints.
+function drawGradient(data, w, h, options = {}) {
+    const from = options.from || [0, 0, 0, 1];
+    const to = options.to || [1, 1, 1, 1];
+    const opacity = clamp(options.opacity === undefined ? 1 : options.opacity, 0, 1);
+    const region = regionBounds(w, h, options);
+    let position;
+    if ((options.kind || 'linear') === 'radial') {
+        const cx = options.cx === undefined ? w / 2 : options.cx;
+        const cy = options.cy === undefined ? h / 2 : options.cy;
+        const radius = Math.max(1e-6, Math.abs(options.radius === undefined ? Math.min(w, h) / 2 : options.radius));
+        position = (x, y) => Math.hypot(x + 0.5 - cx, y + 0.5 - cy) / radius;
+    } else {
+        let p0x, p0y, dx, dy;
+        if (options.x1 !== undefined || options.x2 !== undefined) {
+            p0x = options.x1 === undefined ? 0 : options.x1;
+            p0y = options.y1 === undefined ? 0 : options.y1;
+            dx = (options.x2 === undefined ? w : options.x2) - p0x;
+            dy = (options.y2 === undefined ? h : options.y2) - p0y;
+        } else {
+            const angle = (options.angle === undefined ? 90 : options.angle) * Math.PI / 180;
+            const ux = Math.cos(angle), uy = Math.sin(angle);
+            const len = Math.abs(w * ux) + Math.abs(h * uy);
+            p0x = w / 2 - ux * len / 2;
+            p0y = h / 2 - uy * len / 2;
+            dx = ux * len;
+            dy = uy * len;
+        }
+        const len2 = (dx * dx + dy * dy) || 1e-9;
+        position = (x, y) => ((x + 0.5 - p0x) * dx + (y + 0.5 - p0y) * dy) / len2;
+    }
+    let painted = 0;
+    for (let y = region.y0; y < region.y1; ++y) {
+        for (let x = region.x0; x < region.x1; ++x) {
+            const k = clamp(position(x, y), 0, 1);
+            const a = (from[3] + (to[3] - from[3]) * k) * opacity;
+            if (a <= 0) continue;
+            compositePixel(data, w, h, x, y,
+                from[0] + (to[0] - from[0]) * k,
+                from[1] + (to[1] - from[1]) * k,
+                from[2] + (to[2] - from[2]) * k, a);
+            painted++;
+        }
+    }
+    return painted;
+}
+
+// How many pixels carry each distinct colour (fully transparent pixels have no
+// colour and are skipped). A Map keyed by the packed 0xRRGGBB.
+function colourHistogram(data, w, h) {
+    const counts = new Map();
+    for (let p = 0; p < w * h; ++p) {
+        const o = p * 4;
+        if (data[o + 3] === 0) continue;
+        const key = (data[o] << 16) | (data[o + 1] << 8) | data[o + 2];
+        counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return counts;
+}
+
+// Median cut: repeatedly split the box whose colours span the widest range,
+// until there are `maxColors` boxes, then report each box's average colour.
+// The histogram is collapsed to distinct colours first, so a flat sprite comes
+// back as exactly its own colours (never a duplicate entry) and a photo gets
+// split by where the colours are, not by pixel order.
+function medianCutPalette(histogram, maxColors) {
+    const channel = (v, c) => (c === 0 ? (v >> 16) & 255 : c === 1 ? (v >> 8) & 255 : v & 255);
+    const boxes = [];
+    {
+        const entries = [];
+        let total = 0;
+        for (const [v, c] of histogram) {
+            entries.push([v, c]);
+            total += c;
+        }
+        if (entries.length) boxes.push({ entries, total });
+    }
+    const sum = (entries) => entries.reduce((n, e) => n + e[1], 0);
+    while (boxes.length < Math.max(1, maxColors)) {
+        let best = -1, bestSpan = -1, bestAxis = 0;
+        for (let i = 0; i < boxes.length; ++i) {
+            const entries = boxes[i].entries;
+            if (entries.length < 2) continue;
+            const min = [255, 255, 255], max = [0, 0, 0];
+            for (const [v] of entries) {
+                for (let c = 0; c < 3; ++c) {
+                    const x = channel(v, c);
+                    if (x < min[c]) min[c] = x;
+                    if (x > max[c]) max[c] = x;
+                }
+            }
+            const span = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+            const axis = span[0] >= span[1] && span[0] >= span[2] ? 0 : (span[1] >= span[2] ? 1 : 2);
+            if (span[axis] > bestSpan) { best = i; bestSpan = span[axis]; bestAxis = axis; }
+        }
+        if (best < 0 || bestSpan <= 0) break;
+        const box = boxes[best];
+        box.entries.sort((a, b) => channel(a[0], bestAxis) - channel(b[0], bestAxis));
+        let acc = 0, cut = 1;
+        for (let i = 0; i < box.entries.length; ++i) {
+            acc += box.entries[i][1];
+            if (acc * 2 >= box.total) { cut = clamp(i + 1, 1, box.entries.length - 1); break; }
+        }
+        const left = box.entries.slice(0, cut), right = box.entries.slice(cut);
+        boxes.splice(best, 1, { entries: left, total: sum(left) }, { entries: right, total: sum(right) });
+    }
+    return boxes.map((box) => {
+        let r = 0, g = 0, b = 0;
+        for (const [v, c] of box.entries) {
+            r += ((v >> 16) & 255) * c;
+            g += ((v >> 8) & 255) * c;
+            b += (v & 255) * c;
+        }
+        const n = box.total || 1;
+        return { r: Math.round(r / n), g: Math.round(g / n), b: Math.round(b / n), count: box.total };
+    }).sort((a, b) => b.count - a.count);
+}
+
+// The palette of an image, at most `maxColors` entries, most pixels first.
+function paletteFromImage(data, w, h, maxColors) {
+    return medianCutPalette(colourHistogram(data, w, h), maxColors);
+}
+
+function nearestPaletteIndex(palette, r, g, b) {
+    let best = 0, bestDist = Infinity;
+    for (let i = 0; i < palette.length; ++i) {
+        const dr = r - palette[i].r, dg = g - palette[i].g, db = b - palette[i].b;
+        const d = dr * dr + dg * dg + db * db;
+        if (d < bestDist) { bestDist = d; best = i; }
+    }
+    return best;
+}
+
+// The average distance from a palette entry to its nearest neighbour: the
+// scale of one quantization step, used to size an ordered dither.
+function paletteStep(palette) {
+    if (palette.length < 2) return 0;
+    let total = 0;
+    for (let i = 0; i < palette.length; ++i) {
+        let best = Infinity;
+        for (let j = 0; j < palette.length; ++j) {
+            if (i === j) continue;
+            const dr = palette[i].r - palette[j].r, dg = palette[i].g - palette[j].g, db = palette[i].b - palette[j].b;
+            best = Math.min(best, Math.sqrt(dr * dr + dg * dg + db * db));
+        }
+        total += best;
+    }
+    return total / palette.length;
+}
+
+// A 4x4 Bayer threshold matrix, the classic ordered-dither pattern.
+const BAYER4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+
+// Snaps every visible pixel of a layer to `palette` ([{r,g,b}]), optionally
+// dithering: `floyd` diffuses the error to the neighbours, `ordered` adds a
+// Bayer threshold scaled to the palette step. Both use one threshold/error per
+// pixel on all three channels, so the dither does not shift the hue. Fully
+// transparent pixels are left alone and semi-transparent pixels keep their
+// alpha. Returns how many pixels changed.
+function quantizeLayer(data, w, h, options = {}) {
+    const palette = options.palette || [];
+    const dither = options.dither || 'none';
+    if (!palette.length) return 0;
+    let changed = 0;
+    const put = (o, p) => {
+        if (data[o] !== p.r || data[o + 1] !== p.g || data[o + 2] !== p.b) changed++;
+        data[o] = p.r;
+        data[o + 1] = p.g;
+        data[o + 2] = p.b;
+    };
+    if (dither === 'floyd') {
+        // Two rolling error rows: the one being written and the one below it.
+        const err = new Float64Array(3 * w * 2);
+        const add = (base, i, e, weight) => {
+            base[i * 3] += e[0] * weight;
+            base[i * 3 + 1] += e[1] * weight;
+            base[i * 3 + 2] += e[2] * weight;
+        };
+        for (let y = 0; y < h; ++y) {
+            const cur = (y % 2) * 3 * w, nxt = ((y + 1) % 2) * 3 * w;
+            err.fill(0, nxt, nxt + 3 * w);
+            for (let x = 0; x < w; ++x) {
+                const o = (y * w + x) * 4;
+                if (data[o + 3] === 0) continue;
+                const r = clamp(data[o] + err[cur + x * 3], 0, 255);
+                const g = clamp(data[o + 1] + err[cur + x * 3 + 1], 0, 255);
+                const b = clamp(data[o + 2] + err[cur + x * 3 + 2], 0, 255);
+                const p = palette[nearestPaletteIndex(palette, r, g, b)];
+                const e = [r - p.r, g - p.g, b - p.b];
+                put(o, p);
+                if (x + 1 < w) add(err, cur + x + 1, e, 7 / 16);
+                if (y + 1 < h) {
+                    if (x > 0) add(err, nxt + x - 1, e, 3 / 16);
+                    add(err, nxt + x, e, 5 / 16);
+                    if (x + 1 < w) add(err, nxt + x + 1, e, 1 / 16);
+                }
+            }
+        }
+        return changed;
+    }
+    const step = dither === 'ordered' ? paletteStep(palette) : 0;
+    for (let y = 0; y < h; ++y) {
+        for (let x = 0; x < w; ++x) {
+            const o = (y * w + x) * 4;
+            if (data[o + 3] === 0) continue;
+            const bias = dither === 'ordered' ? (BAYER4[(y % 4) * 4 + (x % 4)] / 16 - 0.5) * step : 0;
+            const p = palette[nearestPaletteIndex(palette,
+                clamp(data[o] + bias, 0, 255),
+                clamp(data[o + 1] + bias, 0, 255),
+                clamp(data[o + 2] + bias, 0, 255))];
+            put(o, p);
+        }
+    }
+    return changed;
+}
+
+// How many pixels would land on each entry of an explicit palette.
+function paletteCounts(data, w, h, palette) {
+    const counts = new Array(palette.length).fill(0);
+    if (!palette.length) return counts;
+    for (let p = 0; p < w * h; ++p) {
+        const o = p * 4;
+        if (data[o + 3] === 0) continue;
+        counts[nearestPaletteIndex(palette, data[o], data[o + 1], data[o + 2])]++;
+    }
+    return counts;
+}
+
 // --------------------------------------------------------------- normal maps
 // Height field -> tangent-space normal map (Sobel), as used by the editor.
 function normalMapFromHeight(rgba, w, h, options = {}) {
@@ -1104,6 +1474,15 @@ module.exports = {
     cropRgba,
     stampImage,
     mirrorShapeArgs,
+    noiseField,
+    drawNoise,
+    drawGradient,
+    regionBounds,
+    colourHistogram,
+    medianCutPalette,
+    paletteFromImage,
+    quantizeLayer,
+    paletteCounts,
     normalMapFromHeight,
     analyze,
     previewText,
