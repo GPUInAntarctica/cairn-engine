@@ -821,6 +821,17 @@ bool Raycast(const Vec3& origin, const Vec3& direction, float maxDistance, Rayca
 std::vector<RaycastHit> RaycastAll(const Vec3& origin, const Vec3& direction, float maxDistance);
 // Entities whose collider overlaps the sphere.
 std::vector<EntityId> OverlapSphere(const Vec3& center, float radius);
+// Entities whose collider overlaps an axis-aligned box. `halfExtents` is half
+// the size (Unity's OverlapBox convention).
+std::vector<EntityId> OverlapBox(const Vec3& center, const Vec3& halfExtents);
+// Sweep a sphere or an axis-aligned box from its start pose along `direction`
+// and report the first contact: the shape's surface, not a centre line, so a
+// fat cast stops on an edge a thin ray would slip past. A cast that starts
+// overlapping reports distance 0.
+bool SphereCast(const Vec3& origin, float radius, const Vec3& direction, float maxDistance,
+                RaycastHit* hit);
+bool BoxCast(const Vec3& center, const Vec3& halfExtents, const Vec3& direction, float maxDistance,
+             RaycastHit* hit);
 }  // namespace Physics
 
 // ---------------------------------------------------------------------------

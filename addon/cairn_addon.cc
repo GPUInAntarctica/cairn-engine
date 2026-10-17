@@ -163,6 +163,9 @@ public:
             InstanceMethod("setLayerCollision", &EngineWrap::SetLayerCollision),
             InstanceMethod("physicsRaycast", &EngineWrap::PhysicsRaycast),
             InstanceMethod("physicsOverlapSphere", &EngineWrap::PhysicsOverlapSphere),
+            InstanceMethod("physicsOverlapBox", &EngineWrap::PhysicsOverlapBox),
+            InstanceMethod("physicsSphereCast", &EngineWrap::PhysicsSphereCast),
+            InstanceMethod("physicsBoxCast", &EngineWrap::PhysicsBoxCast),
             InstanceMethod("characterMove", &EngineWrap::CharacterMove),
             InstanceMethod("physicsStep", &EngineWrap::PhysicsStep),
             InstanceMethod("loadScriptLibrary", &EngineWrap::LoadScriptLibrary),
@@ -718,6 +721,28 @@ private:
         float radius = (float)GetNumber(info, 1, 1.0);
         return JsonToValue(env, engine_->QueryOverlapSphere(center, radius));
     }
+    Napi::Value PhysicsOverlapBox(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        Vec3 center, half;
+        if (!ReadVec3(info[0], &center) || !ReadVec3(info[1], &half)) return env.Null();
+        return JsonToValue(env, engine_->QueryOverlapBox(center, half));
+    }
+    Napi::Value PhysicsSphereCast(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        Vec3 origin, dir;
+        if (!ReadVec3(info[0], &origin) || !ReadVec3(info[2], &dir)) return env.Null();
+        float radius = (float)GetNumber(info, 1, 1.0);
+        float maxDistance = (float)GetNumber(info, 3, 1000.0);
+        return JsonToValue(env, engine_->QuerySphereCast(origin, radius, dir, maxDistance));
+    }
+    Napi::Value PhysicsBoxCast(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        Vec3 center, half, dir;
+        if (!ReadVec3(info[0], &center) || !ReadVec3(info[1], &half) || !ReadVec3(info[2], &dir))
+            return env.Null();
+        float maxDistance = (float)GetNumber(info, 3, 1000.0);
+        return JsonToValue(env, engine_->QueryBoxCast(center, half, dir, maxDistance));
+    }
     Napi::Value CharacterMove(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
         EntityId id = (EntityId)GetNumber(info, 0, 0);
@@ -888,7 +913,7 @@ Napi::FunctionReference EngineWrap::constructor;
 
 Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
     EngineWrap::Init(env, exports);
-    exports.Set("engineVersion", Napi::String::New(env, "0.1.19"));
+    exports.Set("engineVersion", Napi::String::New(env, "0.1.20"));
     return exports;
 }
 

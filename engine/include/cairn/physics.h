@@ -26,6 +26,19 @@ bool PhysicsRaycast(Scene& scene, const Vec3& origin, const Vec3& direction, flo
 std::vector<PhysicsHit> PhysicsRaycastAll(Scene& scene, const Vec3& origin, const Vec3& direction,
                                           float maxDistance);
 std::vector<GameObject*> PhysicsOverlapSphere(Scene& scene, const Vec3& center, float radius);
+// Axis-aligned box overlap. `halfExtents` is half the box size (Unity's
+// OverlapBox convention); a negative component is treated as 0.
+std::vector<GameObject*> PhysicsOverlapBox(Scene& scene, const Vec3& center,
+                                           const Vec3& halfExtents);
+// Shape casts: sweep a sphere or a box (axis-aligned, `halfExtents` as above)
+// from its start pose along `direction` and report the first contact. A cast
+// that starts overlapping reports distance 0. `maxDistance <= 0` means "far"
+// (1e6 units, a finite bound rather than an infinite one so the sweep stays
+// numerically well behaved).
+bool PhysicsSphereCast(Scene& scene, const Vec3& origin, float radius, const Vec3& direction,
+                       float maxDistance, PhysicsHit* hit);
+bool PhysicsBoxCast(Scene& scene, const Vec3& center, const Vec3& halfExtents,
+                    const Vec3& direction, float maxDistance, PhysicsHit* hit);
 
 // Moves a CharacterController capsule by `displacement`, resolving it against
 // solid colliders. Returns true when the controller is grounded afterwards.

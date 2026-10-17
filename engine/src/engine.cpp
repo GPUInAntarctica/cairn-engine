@@ -158,6 +158,32 @@ std::vector<EntityId> OverlapSphere(const Vec3& center, float radius) {
         if (go) out.push_back(go->m_id);
     return out;
 }
+std::vector<EntityId> OverlapBox(const Vec3& center, const Vec3& halfExtents) {
+    std::vector<EntityId> out;
+    Scene* s = EngineActiveScene();
+    if (!s) return out;
+    for (GameObject* go : Cairn::PhysicsOverlapBox(*s, center, halfExtents))
+        if (go) out.push_back(go->m_id);
+    return out;
+}
+bool SphereCast(const Vec3& origin, float radius, const Vec3& direction, float maxDistance,
+                RaycastHit* hit) {
+    Scene* s = EngineActiveScene();
+    if (!s) return false;
+    Cairn::PhysicsHit h;
+    if (!Cairn::PhysicsSphereCast(*s, origin, radius, direction, maxDistance, &h)) return false;
+    if (hit) Fill(hit, h);
+    return true;
+}
+bool BoxCast(const Vec3& center, const Vec3& halfExtents, const Vec3& direction, float maxDistance,
+             RaycastHit* hit) {
+    Scene* s = EngineActiveScene();
+    if (!s) return false;
+    Cairn::PhysicsHit h;
+    if (!Cairn::PhysicsBoxCast(*s, center, halfExtents, direction, maxDistance, &h)) return false;
+    if (hit) Fill(hit, h);
+    return true;
+}
 }  // namespace Physics
 
 namespace Debug {
@@ -829,9 +855,9 @@ Json Engine::DebugCollectStats() {
     return out;
 }
 
-Json Engine::QueryRaycast(const Vec3& origin, const Vec3& direction, float maxDistance) {
-    PhysicsHit h;
-    if (!PhysicsRaycast(*scene_, origin, direction, maxDistance, &h)) return Json();
+// A physics hit as the JSON a script or the CLI reads: the entity plus the
+// world point/normal/distance.
+static Json HitToJson(const PhysicsHit& h) {
     Json o = Json::MakeObject();
     o.set("entity", (double)(h.go ? h.go->m_id : 0));
     o.set("guid", h.go ? h.go->m_guid : std::string());
@@ -842,24 +868,9 @@ Json Engine::QueryRaycast(const Vec3& origin, const Vec3& direction, float maxDi
     return o;
 }
 
-Json Engine::QueryRaycastAll(const Vec3& origin, const Vec3& direction, float maxDistance) {
+static Json OverlapToJson(const std::vector<GameObject*>& hits) {
     Json arr = Json::MakeArray();
-    for (const PhysicsHit& h : PhysicsRaycastAll(*scene_, origin, direction, maxDistance)) {
-        Json o = Json::MakeObject();
-        o.set("entity", (double)(h.go ? h.go->m_id : 0));
-        o.set("guid", h.go ? h.go->m_guid : std::string());
-        o.set("name", h.go ? h.go->name : std::string());
-        o.set("point", Json::MakeArray({h.point.x, h.point.y, h.point.z}));
-        o.set("normal", Json::MakeArray({h.normal.x, h.normal.y, h.normal.z}));
-        o.set("distance", (double)h.distance);
-        arr.push(std::move(o));
-    }
-    return arr;
-}
-
-Json Engine::QueryOverlapSphere(const Vec3& center, float radius) {
-    Json arr = Json::MakeArray();
-    for (GameObject* go : PhysicsOverlapSphere(*scene_, center, radius)) {
+    for (GameObject* go : hits) {
         if (!go) continue;
         Json o = Json::MakeObject();
         o.set("id", (double)go->m_id);
@@ -868,6 +879,41 @@ Json Engine::QueryOverlapSphere(const Vec3& center, float radius) {
         arr.push(std::move(o));
     }
     return arr;
+}
+
+Json Engine::QueryRaycast(const Vec3& origin, const Vec3& direction, float maxDistance) {
+    PhysicsHit h;
+    if (!PhysicsRaycast(*scene_, origin, direction, maxDistance, &h)) return Json();
+    return HitToJson(h);
+}
+
+Json Engine::QueryRaycastAll(const Vec3& origin, const Vec3& direction, float maxDistance) {
+    Json arr = Json::MakeArray();
+    for (const PhysicsHit& h : PhysicsRaycastAll(*scene_, origin, direction, maxDistance))
+        arr.push(HitToJson(h));
+    return arr;
+}
+
+Json Engine::QueryOverlapSphere(const Vec3& center, float radius) {
+    return OverlapToJson(PhysicsOverlapSphere(*scene_, center, radius));
+}
+
+Json Engine::QueryOverlapBox(const Vec3& center, const Vec3& halfExtents) {
+    return OverlapToJson(PhysicsOverlapBox(*scene_, center, halfExtents));
+}
+
+Json Engine::QuerySphereCast(const Vec3& origin, float radius, const Vec3& direction,
+                             float maxDistance) {
+    PhysicsHit h;
+    if (!PhysicsSphereCast(*scene_, origin, radius, direction, maxDistance, &h)) return Json();
+    return HitToJson(h);
+}
+
+Json Engine::QueryBoxCast(const Vec3& center, const Vec3& halfExtents, const Vec3& direction,
+                          float maxDistance) {
+    PhysicsHit h;
+    if (!PhysicsBoxCast(*scene_, center, halfExtents, direction, maxDistance, &h)) return Json();
+    return HitToJson(h);
 }
 
 Json Engine::QueryCharacterMove(EntityId id, const Vec3& displacement) {

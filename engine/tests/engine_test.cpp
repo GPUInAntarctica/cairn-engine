@@ -1532,6 +1532,62 @@ static void TestPhysicsQueries() {
 
     // Nothing along an upward ray.
     CHECK(!Physics::Raycast(Vec3(0, 10, 0), Vec3(0, 1, 0), 100.0f, &hit));
+
+    // --- Overlap box and the shape casts -----------------------------------
+    // Off the cast lines in z (they sweep down -y), so only the query under
+    // test can see it.
+    GameObject* ball = scene.CreateEntity("Ball");
+    ball->transform().position = Vec3(3, 3, 6);
+    ball->AddComponent<SphereCollider>()->radius = 0.75f;
+
+    // OverlapBox is exact against the sphere's surface, not its bounding box: a
+    // query box that clips the AABB corner but stays 0.86 from the centre
+    // (radius 0.75) must not report it.
+    auto o1 = Physics::OverlapBox(Vec3(3.8f, 4.0f, 6.0f), Vec3(0.3f, 0.3f, 0.3f));
+    CHECK(std::find(o1.begin(), o1.end(), ball->m_id) == o1.end());
+    auto o2 = Physics::OverlapBox(Vec3(3.4f, 3.4f, 6.0f), Vec3(0.3f, 0.3f, 0.3f));
+    CHECK(std::find(o2.begin(), o2.end(), ball->m_id) != o2.end());
+    // The box query finds the crate it wraps and ignores empty air above it.
+    auto o3 = Physics::OverlapBox(Vec3(0, 3, 0), Vec3(0.6f, 0.6f, 0.6f));
+    CHECK(std::find(o3.begin(), o3.end(), box->m_id) != o3.end());
+    CHECK(std::find(o3.begin(), o3.end(), floor->m_id) == o3.end());
+    auto o4 = Physics::OverlapBox(Vec3(0, 8, 0), Vec3(0.5f, 0.5f, 0.5f));
+    CHECK(o4.empty());
+
+    // SphereCast: the swept sphere's surface decides, so a cast whose centre
+    // line slips past the crate still stops on its top-right edge.
+    Physics::RaycastHit cast;
+    CHECK(Physics::SphereCast(Vec3(0.6f, 10, 0), 0.5f, Vec3(0, -1, 0), 100.0f, &cast));
+    CHECK(cast.entity == box->m_id);
+    CHECK(NearlyEqual(cast.distance, 10.0f - 3.5f - std::sqrt(0.25f - 0.01f), 1e-2f));
+    CHECK(NearlyEqual(cast.normal.x, 0.2f, 1e-2f));
+    CHECK(NearlyEqual(cast.point.y, 3.5f, 1e-2f));  // the crate's own top edge
+    // The ray down that same centre line misses the crate and reaches the floor.
+    CHECK(Physics::Raycast(Vec3(0.6f, 10, 0), Vec3(0, -1, 0), 100.0f, &hit));
+    CHECK(hit.entity == floor->m_id);
+    // A sphere off to the side lands on the floor instead (top y=0.5).
+    CHECK(Physics::SphereCast(Vec3(4, 10, 0), 0.5f, Vec3(0, -1, 0), 100.0f, &cast));
+    CHECK(cast.entity == floor->m_id);
+    CHECK(NearlyEqual(cast.distance, 9.0f, 1e-2f));
+    // A cast that starts inside the crate reports distance 0.
+    CHECK(Physics::SphereCast(Vec3(0, 3, 0), 0.6f, Vec3(0, -1, 0), 100.0f, &cast));
+    CHECK(cast.entity == box->m_id);
+    CHECK(NearlyEqual(cast.distance, 0.0f, 1e-4f));
+
+    // BoxCast: a 1x1x1 box whose left face clips the crate stops on the crate's
+    // top at 6.0, while a box clear of it in x drops to the floor.
+    CHECK(Physics::BoxCast(Vec3(0.9f, 10, 0), Vec3(0.5f, 0.5f, 0.5f), Vec3(0, -1, 0), 100.0f,
+                           &cast));
+    CHECK(cast.entity == box->m_id);
+    CHECK(NearlyEqual(cast.distance, 6.0f, 1e-2f));
+    CHECK(NearlyEqual(cast.normal.y, 1.0f, 1e-2f));
+    CHECK(Physics::BoxCast(Vec3(4.8f, 10, 0), Vec3(0.5f, 0.5f, 0.5f), Vec3(0, -1, 0), 100.0f,
+                           &cast));
+    CHECK(cast.entity == floor->m_id);
+    CHECK(NearlyEqual(cast.distance, 9.0f, 1e-2f));
+    // A short cast stops before the floor.
+    CHECK(!Physics::BoxCast(Vec3(4.8f, 10, 0), Vec3(0.5f, 0.5f, 0.5f), Vec3(0, -1, 0), 5.0f,
+                            &cast));
 }
 
 // The collision layer matrix filters which pairs the solver sees.
@@ -2225,6 +2281,13 @@ static void TestMeshCollider() {
         CHECK(std::find(inside.begin(), inside.end(), tri) != inside.end());
         auto outside = PhysicsOverlapSphere(scene, Vec3(-3, 3, 0), 0.2f);
         CHECK(std::find(outside.begin(), outside.end(), tri) == outside.end());
+
+        // The box query is exact against the triangles too: it finds the mesh
+        // where the triangle is and misses the empty half of its bounding box.
+        auto boxOn = PhysicsOverlapBox(scene, Vec3(3, -3, 0), Vec3(0.2f, 0.2f, 0.2f));
+        CHECK(std::find(boxOn.begin(), boxOn.end(), tri) != boxOn.end());
+        auto boxOff = PhysicsOverlapBox(scene, Vec3(-3, 3, 0), Vec3(0.2f, 0.2f, 0.2f));
+        CHECK(std::find(boxOff.begin(), boxOff.end(), tri) == boxOff.end());
     }
 
     // A closed mesh (six quads) carries a body on its roof.

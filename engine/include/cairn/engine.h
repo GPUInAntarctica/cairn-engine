@@ -174,6 +174,10 @@ public:
     Json QueryRaycast(const Vec3& origin, const Vec3& direction, float maxDistance);
     Json QueryRaycastAll(const Vec3& origin, const Vec3& direction, float maxDistance);
     Json QueryOverlapSphere(const Vec3& center, float radius);
+    Json QueryOverlapBox(const Vec3& center, const Vec3& halfExtents);
+    Json QuerySphereCast(const Vec3& origin, float radius, const Vec3& direction, float maxDistance);
+    Json QueryBoxCast(const Vec3& center, const Vec3& halfExtents, const Vec3& direction,
+                      float maxDistance);
     // Moves an entity's CharacterController and reports the resulting pose.
     Json QueryCharacterMove(EntityId id, const Vec3& displacement);
     // Advances the scene physics by `steps` fixed steps (headless simulation).

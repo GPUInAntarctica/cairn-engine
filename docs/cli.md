@@ -137,6 +137,21 @@ bounding box) and `Continuous` CCD sweeps it. A mesh on a non-kinematic
 collider for bodies the solver has to push, and remember that two mesh colliders
 do not interact.
 
+Ask about volumes, not just lines. `physics.raycast` answers "what is along this
+line"; `physics.overlapBox` answers "what is inside this box", and the shape casts
+answer "what will this sphere or box hit first if it moves" - the surface decides,
+so a cast stops on an edge a ray slips past:
+
+```bash
+cairn --project ./game physics.overlapBox --center '[0,1,0]' --size '[2,2,2]'
+cairn --project ./game physics.sphereCast --origin '[0,5,0]' --radius 0.4 --direction '[0,-1,0]'
+cairn --project ./game physics.boxCast --center '[0,5,0]' --size '[1,1,1]' --direction '[0,-1,0]'
+```
+
+`--size` is the full box size (as on `BoxCollider`), so `[2,2,2]` is a 2-unit cube.
+An overlap box is exact against a sphere's surface rather than its bounding box,
+and a cast that starts already overlapping reports distance 0.
+
 Preview and simulate headlessly:
 
 ```bash
@@ -444,9 +459,12 @@ read what a sprite is actually made of.
 
 | Command | Arguments | Description |
 | --- | --- | --- |
+| `physics.boxCast` | `--center` (json, required)<br>`--size` (json, required)<br>`--direction` (json, required)<br>`--maxDistance` (number, default 1000) | Sweep an axis-aligned box along a direction and return the first hit (null when clear). |
 | `physics.moveCharacter` | `--id` (int, required)<br>`--displacement` (json, required) | Move an entity's CharacterController capsule and report the resolved pose. |
+| `physics.overlapBox` | `--center` (json, required)<br>`--size` (json, required) | Return the entities whose collider overlaps an axis-aligned box. |
 | `physics.overlapSphere` | `--center` (json, required)<br>`--radius` (number, required) | Return the entities whose collider overlaps a sphere. |
 | `physics.raycast` | `--origin` (json, required)<br>`--direction` (json, required)<br>`--maxDistance` (number, default 1000)<br>`--all` (bool, default false) | Cast a ray against colliders and return the nearest hit (or every hit with --all). |
+| `physics.sphereCast` | `--origin` (json, required)<br>`--radius` (number, required)<br>`--direction` (json, required)<br>`--maxDistance` (number, default 1000) | Sweep a sphere along a direction and return the first hit (null when clear). |
 | `physics.step` | `--dt` (number, default 0.0166667)<br>`--steps` (int, default 1) | Advance the scene physics by N fixed steps (headless simulation). |
 
 ### `prefab`

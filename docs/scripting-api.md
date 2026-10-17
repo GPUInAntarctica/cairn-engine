@@ -153,7 +153,21 @@ if (Physics::Raycast(origin, direction, 100.0f, &hit)) {
 }
 auto all = Physics::RaycastAll(origin, direction, 100.0f);  // nearest first
 auto nearby = Physics::OverlapSphere(center, 2.0f);          // [EntityId]
+auto inBox = Physics::OverlapBox(center, Vec3(1.0f));        // half extents
 ```
+
+Shape casts sweep a volume instead of a line, so a fat cast stops on an edge a ray
+would slip past (the surface decides, not the centre line). `point` is the contact
+point on the swept shape's own surface, and a cast that starts overlapping reports
+distance 0:
+
+```cpp
+if (Physics::SphereCast(origin, 0.4f, direction, 100.0f, &hit)) { /* ... */ }
+if (Physics::BoxCast(center, Vec3(0.5f), direction, 100.0f, &hit)) { /* ... */ }
+```
+
+Queries are layer-independent (the layer matrix is a property of the step, not of a
+query) and report trigger colliders as well as solid ones.
 
 Collision layers: `gameObject().layer` (0..31) plus the scene's layer matrix decide which pairs interact. Toggle a pair with the editor/CLI (`scene.layerMatrix.set`) or `Scene::SetLayerCollision`; all layers collide by default.
 

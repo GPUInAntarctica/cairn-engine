@@ -520,9 +520,12 @@ float ShapeSeparation(const Shape& a, const Shape& b, Vec3* nOut) {
         float gy = std::max(a.min.y - b.max.y, b.min.y - a.max.y);
         float gz = a.Is2D() ? -1e30f : std::max(a.min.z - b.max.z, b.min.z - a.max.z);
         float g = std::max({gx, gy, gz});
-        if (g == gx) *nOut = Vec3(a.min.x > b.max.x ? 1.0f : -1.0f, 0, 0);
-        else if (g == gy) *nOut = Vec3(0, a.min.y > b.max.y ? 1.0f : -1.0f, 0);
-        else *nOut = Vec3(0, 0, a.min.z > b.max.z ? 1.0f : -1.0f);
+        // Oriented by centre, exactly as Collide() orients a box pair: at the
+        // touch boundary min-vs-max is ambiguous (neither holds), while the
+        // centre comparison stays meaningful for a cast that stops just short.
+        if (g == gx) *nOut = Vec3(a.center.x >= b.center.x ? 1.0f : -1.0f, 0, 0);
+        else if (g == gy) *nOut = Vec3(0, a.center.y >= b.center.y ? 1.0f : -1.0f, 0);
+        else *nOut = Vec3(0, 0, a.center.z >= b.center.z ? 1.0f : -1.0f);
         return g;
     }
     float len = d.Length();
@@ -1627,6 +1630,87 @@ void PhysicsStep(Scene& scene, float dt) {
 // ---------------------------------------------------------------------------
 // Queries.
 // ---------------------------------------------------------------------------
+
+// Centre of a query shape. Boxes and meshes carry their AABB centre, spheres
+// their centre, capsules the midpoint of their segment.
+Vec3 ShapeCentre(const Shape& s) {
+    if (s.kind == Shape::Capsule3) return (s.p0 + s.p1) * 0.5f;
+    return s.center;
+}
+
+// How far the shape reaches from its centre along `n`, i.e. the offset from the
+// centre to the surface point facing `n`. Places a cast's contact point on the
+// mover's own surface (on the obstacle's, too, at the moment of contact).
+float ShapeExtentAlong(const Shape& s, const Vec3& n) {
+    switch (s.kind) {
+        case Shape::Sphere3:
+            return s.radius;
+        case Shape::Capsule3:
+            return s.radius + std::fabs(Vec3::Dot((s.p1 - s.p0) * 0.5f, n));
+        default: {
+            Vec3 e = (s.max - s.min) * 0.5f;
+            return std::fabs(n.x) * e.x + std::fabs(n.y) * e.y + std::fabs(n.z) * e.z;
+        }
+    }
+}
+
+// Conservative advancement of `mover` along `delta` against one obstacle, in
+// the style of CcdTimeOfImpact but deliberately layer-independent: the layer
+// matrix is a property of the step, not of a query, and Raycast already ignores
+// it. `n` points from the obstacle toward the mover.
+bool SweepAgainst(const Shape& mover, const Vec3& delta, const Shape& obstacle, float* tOut,
+                  Vec3* nOut) {
+    float t = 0.0f;
+    Vec3 n(0, 1, 0);
+    for (int iter = 0; iter < 32; ++iter) {
+        Shape cur = mover;
+        TranslateShape(&cur, delta * t);
+        Vec3 sepN;
+        float sep = ShapeSeparation(cur, obstacle, &sepN);
+        if (sep > 1e29f) return false;         // mismatched dimensionality
+        n = sepN;
+        if (sep <= 0.0f) { *tOut = t; *nOut = n; return true; }
+        float closing = -Vec3::Dot(delta, n);  // > 0 while approaching
+        if (closing <= 1e-9f) return false;    // parallel or receding
+        t += sep / closing;
+        if (t >= 1.0f) return false;           // motion ends short of it
+    }
+    *tOut = t;  // budget spent: `t` is still a safe lower bound on the impact
+    *nOut = n;
+    return true;
+}
+
+// First contact of `mover` swept along `direction`. Every collider in the scene
+// is a candidate: like Raycast, a cast is not filtered by the layer matrix and
+// reports trigger colliders too.
+bool SweepShape(Scene& scene, const Shape& mover, const Vec3& direction, float maxDistance,
+                PhysicsHit* hit) {
+    if (direction.LengthSq() < 1e-12f) return false;
+    const float dist = maxDistance > 0.0f ? maxDistance : 1e6f;
+    const Vec3 d = direction.Normalized();
+    const Vec3 delta = d * dist;
+    std::vector<Shape> shapes;
+    GatherShapes(scene, &shapes);
+    float best = 1e30f;
+    bool found = false;
+    Vec3 bestN(0, 1, 0);
+    GameObject* bestGo = nullptr;
+    for (const Shape& o : shapes) {
+        if (!o.comp) continue;
+        float t;
+        Vec3 n;
+        if (!SweepAgainst(mover, delta, o, &t, &n)) continue;
+        float reached = t * dist;
+        if (reached < best) { best = reached; bestN = n; bestGo = o.go; found = true; }
+    }
+    if (!found) return false;
+    hit->go = bestGo;
+    hit->distance = best;
+    hit->normal = bestN;
+    hit->point = ShapeCentre(mover) + d * best - bestN * ShapeExtentAlong(mover, bestN);
+    return true;
+}
+
 bool PhysicsRaycast(Scene& scene, const Vec3& origin, const Vec3& direction, float maxDistance,
                     PhysicsHit* hit) {
     std::vector<Shape> shapes;
@@ -1702,6 +1786,49 @@ std::vector<GameObject*> PhysicsOverlapSphere(Scene& scene, const Vec3& center, 
         if (std::find(out.begin(), out.end(), s.go) == out.end()) out.push_back(s.go);
     }
     return out;
+}
+
+std::vector<GameObject*> PhysicsOverlapBox(Scene& scene, const Vec3& center,
+                                           const Vec3& halfExtents) {
+    const Vec3 h(std::fabs(halfExtents.x), std::fabs(halfExtents.y), std::fabs(halfExtents.z));
+    Shape box;
+    box.kind = Shape::Box3;
+    box.min = center - h;
+    box.max = center + h;
+    box.center = center;
+    std::vector<Shape> shapes;
+    GatherShapes(scene, &shapes);
+    std::vector<GameObject*> out;
+    for (const Shape& s : shapes) {
+        if (!s.go) continue;
+        // The same signed separation the step resolves with, so a box query is
+        // exact against a sphere, a capsule, another box and mesh triangles
+        // (rather than falling back to an AABB test for the last three).
+        Vec3 n;
+        if (ShapeSeparation(box, s, &n) > 0.0f) continue;
+        if (std::find(out.begin(), out.end(), s.go) == out.end()) out.push_back(s.go);
+    }
+    return out;
+}
+
+bool PhysicsSphereCast(Scene& scene, const Vec3& origin, float radius, const Vec3& direction,
+                       float maxDistance, PhysicsHit* hit) {
+    Shape mover;
+    mover.kind = Shape::Sphere3;
+    mover.radius = std::max(radius, 0.0f);
+    mover.center = origin;
+    return SweepShape(scene, mover, direction, maxDistance, hit);
+}
+
+bool PhysicsBoxCast(Scene& scene, const Vec3& center, const Vec3& halfExtents,
+                    const Vec3& direction, float maxDistance, PhysicsHit* hit) {
+    const Vec3 h(std::fabs(halfExtents.x), std::fabs(halfExtents.y), std::fabs(halfExtents.z));
+    Shape mover;
+    mover.kind = Shape::Box3;
+    mover.min = center - h;
+    mover.max = center + h;
+    mover.center = center;
+    return SweepShape(scene, mover, direction, maxDistance, hit);
 }
 
 // ---------------------------------------------------------------------------

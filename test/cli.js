@@ -446,6 +446,66 @@ check(sleeperStep && Math.abs(sleeperStep.result.transform.position[1] - 1.0) < 
 
 
 // ---------------------------------------------------------------------------
+console.log('cli: overlap box + shape casts');
+// ---------------------------------------------------------------------------
+// The query family beyond the ray: an axis-aligned overlap box, and a swept
+// sphere / box. The point of a shape cast (over a ray) is that its surface
+// decides - so a cast whose centre line slips past the crate still stops on its
+// edge - and the point of an overlap box is that it is exact against a sphere's
+// surface rather than the sphere's bounding box.
+const castBatch = writeBatch('casts.jsonl', [
+    { command: 'scene.new', args: { name: 'Casts' } },
+    { command: 'entity.create', args: { name: 'Floor', position: [0, 0, 0] }, id: 'floor' },
+    { command: 'component.add', args: { id: '$ref:floor', type: 'BoxCollider', props: { size: [20, 1, 20] } } },
+    { command: 'entity.create', args: { name: 'Crate', position: [0, 3, 0] }, id: 'crate' },
+    { command: 'component.add', args: { id: '$ref:crate', type: 'BoxCollider', props: { size: [1, 1, 1] } } },
+    // Off the cast lines in z, so only the sphere overlap check can see it.
+    { command: 'entity.create', args: { name: 'Ball', position: [3, 3, 6] }, id: 'ball' },
+    { command: 'component.add', args: { id: '$ref:ball', type: 'SphereCollider', props: { radius: 0.75 } } },
+    { command: 'physics.overlapBox', args: { center: [0, 3, 0], size: [1.2, 1.2, 1.2] }, id: 'boxOn' },
+    { command: 'physics.overlapBox', args: { center: [0, 8, 0], size: [1, 1, 1] }, id: 'boxOff' },
+    { command: 'physics.overlapBox', args: { center: [3.8, 4, 6], size: [0.6, 0.6, 0.6] }, id: 'boxCorner' },
+    { command: 'physics.sphereCast', args: { origin: [0.6, 10, 0], radius: 0.5, direction: [0, -1, 0], maxDistance: 100 }, id: 'sphereHit' },
+    { command: 'physics.sphereCast', args: { origin: [8, 10, 0], radius: 0.5, direction: [0, -1, 0], maxDistance: 100 }, id: 'sphereFloor' },
+    { command: 'physics.boxCast', args: { center: [0.9, 10, 0], size: [1, 1, 1], direction: [0, -1, 0], maxDistance: 100 }, id: 'boxCastHit' },
+    { command: 'physics.raycast', args: { origin: [0.9, 10, 0], direction: [0, -1, 0], maxDistance: 100 }, id: 'raySameSpot' },
+]);
+const castRun = runProjectBatch(castBatch);
+const castLines = castRun.stdout.trim().split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+check(castLines.every(l => l.ok !== false), 'cast batch is clean', castRun.stdout + castRun.stderr);
+const castStep = id => castLines.find(l => l.id === id);
+const boxOn = castStep('boxOn');
+check(boxOn && boxOn.result.some(e => e.name === 'Crate') && !boxOn.result.some(e => e.name === 'Floor'),
+    'physics.overlapBox finds the crate it wraps and not the floor', boxOn && boxOn.result);
+const boxOff = castStep('boxOff');
+check(boxOff && boxOff.result.length === 0, 'physics.overlapBox reports empty air as empty', boxOff && boxOff.result);
+const boxCorner = castStep('boxCorner');
+check(boxCorner && !boxCorner.result.some(e => e.name === 'Ball'),
+    'physics.overlapBox is exact against a sphere, not its bounding box', boxCorner && boxCorner.result);
+const sphereHit = castStep('sphereHit');
+check(sphereHit && sphereHit.result && sphereHit.result.name === 'Crate' &&
+    Math.abs(sphereHit.result.distance - (10 - 3.5 - Math.sqrt(0.24))) < 0.05,
+    'physics.sphereCast stops the swept sphere on the crate edge', sphereHit && sphereHit.result);
+check(sphereHit && sphereHit.result && Math.abs(sphereHit.result.normal[0] - 0.2) < 0.02,
+    'physics.sphereCast reports the edge normal', sphereHit && sphereHit.result && sphereHit.result.normal);
+check(sphereHit && sphereHit.result && Math.abs(sphereHit.result.point[1] - 3.5) < 0.02,
+    'physics.sphereCast reports the contact point on the surface', sphereHit && sphereHit.result && sphereHit.result.point);
+const sphereFloor = castStep('sphereFloor');
+check(sphereFloor && sphereFloor.result && sphereFloor.result.name === 'Floor' &&
+    Math.abs(sphereFloor.result.distance - 9.0) < 0.05,
+    'physics.sphereCast slips past the crate and lands on the floor', sphereFloor && sphereFloor.result);
+const boxCastHit = castStep('boxCastHit');
+check(boxCastHit && boxCastHit.result && boxCastHit.result.name === 'Crate' &&
+    Math.abs(boxCastHit.result.distance - 6.0) < 0.05,
+    'physics.boxCast lands the box on the crate top', boxCastHit && boxCastHit.result);
+const raySameSpot = castStep('raySameSpot');
+check(raySameSpot && raySameSpot.result && raySameSpot.result.name === 'Floor' &&
+    Math.abs(raySameSpot.result.distance - 9.5) < 0.05,
+    'a ray down the same centre line misses the crate the cast hit',
+    raySameSpot && raySameSpot.result);
+
+
+// ---------------------------------------------------------------------------
 console.log('cli: mesh colliders');
 // ---------------------------------------------------------------------------
 // A triangle-soup collider for level geometry: it stores a project-relative

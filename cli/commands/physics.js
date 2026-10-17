@@ -44,6 +44,59 @@ def('physics.overlapSphere', {
     },
 });
 
+def('physics.overlapBox', {
+    summary: 'Return the entities whose collider overlaps an axis-aligned box.',
+    args: {
+        center: { type: 'json', required: true, desc: '[x,y,z] world-space center.' },
+        size: { type: 'json', required: true, desc: '[x,y,z] full box size, as on BoxCollider.' },
+    },
+    returns: '[{id, guid, name}]',
+    needsEngine: true,
+    examples: ['cairn --project ./game physics.overlapBox --center \'[0,1,0]\' --size \'[2,2,2]\''],
+    run(ctx, args) {
+        const center = requireVec3(args.center, 'center');
+        const size = requireVec3(args.size, 'size');
+        return ctx.session.engine().physicsOverlapBox(center, size.map(v => v / 2));
+    },
+});
+
+def('physics.sphereCast', {
+    summary: 'Sweep a sphere along a direction and return the first hit (null when clear).',
+    args: {
+        origin: { type: 'json', required: true, desc: '[x,y,z] world-space center of the sphere at the start.' },
+        radius: { type: 'number', required: true, desc: 'Sphere radius.' },
+        direction: { type: 'json', required: true, desc: '[x,y,z] direction (normalized internally).' },
+        maxDistance: { type: 'number', default: 1000, desc: 'Maximum sweep distance.' },
+    },
+    returns: '{entity, guid, name, point, normal, distance} (null when nothing is hit)',
+    needsEngine: true,
+    examples: ['cairn --project ./game physics.sphereCast --origin \'[0,5,0]\' --radius 0.4 --direction \'[0,-1,0]\''],
+    run(ctx, args) {
+        const origin = requireVec3(args.origin, 'origin');
+        const direction = requireVec3(args.direction, 'direction');
+        return ctx.session.engine().physicsSphereCast(origin, args.radius, direction, args.maxDistance);
+    },
+});
+
+def('physics.boxCast', {
+    summary: 'Sweep an axis-aligned box along a direction and return the first hit (null when clear).',
+    args: {
+        center: { type: 'json', required: true, desc: '[x,y,z] world-space center of the box at the start.' },
+        size: { type: 'json', required: true, desc: '[x,y,z] full box size, as on BoxCollider.' },
+        direction: { type: 'json', required: true, desc: '[x,y,z] direction (normalized internally).' },
+        maxDistance: { type: 'number', default: 1000, desc: 'Maximum sweep distance.' },
+    },
+    returns: '{entity, guid, name, point, normal, distance} (null when nothing is hit)',
+    needsEngine: true,
+    examples: ['cairn --project ./game physics.boxCast --center \'[0,5,0]\' --size \'[1,1,1]\' --direction \'[0,-1,0]\''],
+    run(ctx, args) {
+        const center = requireVec3(args.center, 'center');
+        const size = requireVec3(args.size, 'size');
+        const direction = requireVec3(args.direction, 'direction');
+        return ctx.session.engine().physicsBoxCast(center, size.map(v => v / 2), direction, args.maxDistance);
+    },
+});
+
 def('physics.moveCharacter', {
     summary: 'Move an entity\'s CharacterController capsule and report the resolved pose.',
     args: {
