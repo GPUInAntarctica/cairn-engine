@@ -36,10 +36,24 @@ struct Shape {
     // Effective mass; a non-positive mass behaves as unit mass without the
     // engine ever rewriting the value the user authored.
     float InvMass() const {
-        if (!rb || isStatic || !rb->enabled || rb->isKinematic) return 0.0f;
+        if (!rb || isStatic || !rb->enabled || rb->isKinematic || rb->sleeping) return 0.0f;
         return 1.0f / (rb->mass > 0.0f ? rb->mass : 1.0f);
     }
 };
+
+// Clears a body's sleep state so it integrates and responds to contacts again.
+void WakeBody(RigidBody* rb) {
+    if (!rb) return;
+    rb->sleeping = false;
+    rb->m_sleepTimer = 0.0f;
+}
+
+// Inverse mass used by the joint solver (kinematic and sleeping bodies are
+// immovable until woken).
+float BodyInvMass(RigidBody* rb) {
+    if (!rb || !rb->enabled || rb->isKinematic || rb->sleeping) return 0.0f;
+    return 1.0f / (rb->mass > 0.0f ? rb->mass : 1.0f);
+}
 
 struct Contact {
     Vec3 normal;      // points from B toward A
@@ -464,6 +478,15 @@ void PhysicsStep(Scene& scene, float dt) {
         RigidBody* rb = go->GetComponent<RigidBody>();
         if (!rb || !rb->enabled || rb->isKinematic) continue;
         if (!HasEnabledCollider(*go)) continue;
+        // A sleeping body stays put until something gives it velocity (a script
+        // writing `velocity`, an impulse, or a contact with a moving body).
+        if (rb->sleeping) {
+            if (rb->velocity.LengthSq() > 1e-8f || rb->angularVelocity.LengthSq() > 1e-8f) {
+                WakeBody(rb);
+            } else {
+                continue;
+            }
+        }
         float mass = rb->mass > 0.0f ? rb->mass : 1.0f;
         if (rb->useGravity) rb->velocity += scene.gravity * rb->gravityScale * dt;
         rb->velocity += (rb->m_accumForce / mass) * dt;
@@ -527,6 +550,9 @@ void PhysicsStep(Scene& scene, float dt) {
 
         uint64_t key = PairKey(A.comp, B.comp);
         if (solidPair) {
+            // A moving body wakes a sleeping one it touches.
+            if (A.rb && A.rb->sleeping && B.rb && !B.rb->sleeping) WakeBody(A.rb);
+            if (B.rb && B.rb->sleeping && A.rb && !A.rb->sleeping) WakeBody(B.rb);
             bool first = seenPairs.find(key) == seenPairs.end();
             if (first) {
                 NotifyCollision(nullptr, A, B, CollisionPhase::Enter);
@@ -573,6 +599,96 @@ void PhysicsStep(Scene& scene, float dt) {
         }
     }
     scene.physicsPairs.swap(seenPairs);
+
+    // Joints: a sequential (Gauss-Seidel) constraint pass after contacts. A
+    // rigid joint corrects position and removes relative velocity along the
+    // axis; a spring applies a force proportional to the length error.
+    for (const auto& go : scene.objects) {
+        if (!go->ActiveInHierarchy()) continue;
+        auto* joint = go->GetComponent<DistanceJoint>();
+        if (!joint || !joint->enabled) continue;
+        RigidBody* rbA = go->GetComponent<RigidBody>();
+        if (rbA && !rbA->enabled) rbA = nullptr;
+        GameObject* target =
+            joint->connectedGuid.empty() ? nullptr : scene.FindByGuid(joint->connectedGuid);
+        RigidBody* rbB = target ? target->GetComponent<RigidBody>() : nullptr;
+        if (rbB && !rbB->enabled) rbB = nullptr;
+        if (!rbA && !rbB) continue;  // nothing can move
+
+        Vec3 pa = go->transform().WorldMatrix().TransformPoint(joint->anchor);
+        Vec3 pb = target ? target->transform().WorldMatrix().TransformPoint(joint->connectedAnchor)
+                         : joint->connectedAnchor;
+        Vec3 axis = pa - pb;
+        float dist = axis.Length();
+        if (dist < 1e-6f) continue;
+        Vec3 n = axis / dist;
+        float rest = joint->distance > 0.0f
+                         ? joint->distance
+                         : (joint->m_captured > 0.0f ? joint->m_captured : (joint->m_captured = dist));
+        float over = dist - rest;
+
+        // A joint that is off its rest length (or carrying speed) is a
+        // disturbance: wake both ends so the constraint is enforced.
+        bool disturbed = std::fabs(over) > 1e-4f;
+        float invA = BodyInvMass(rbA);
+        float invB = BodyInvMass(rbB);
+        if (disturbed) {
+            if (rbA && rbA->sleeping) { WakeBody(rbA); invA = BodyInvMass(rbA); }
+            if (rbB && rbB->sleeping) { WakeBody(rbB); invB = BodyInvMass(rbB); }
+        }
+        float invSum = invA + invB;
+        if (invSum <= 0.0f) continue;
+
+        Vec3 vA = rbA ? rbA->velocity : Vec3();
+        Vec3 vB = rbB ? rbB->velocity : Vec3();
+        float rel = Vec3::Dot(vA - vB, n);
+
+        if (joint->breakForce > 0.0f) {
+            float force = (std::fabs(over) + std::fabs(rel) * dt) / (invSum * (dt > 0 ? dt : 1.0f));
+            if (force > joint->breakForce) {
+                joint->enabled = false;  // the joint snaps; bodies fall free
+                continue;
+            }
+        }
+
+        if (joint->spring > 0.0f) {
+            float f = -joint->spring * over - joint->damping * rel;
+            Vec3 imp = n * (f * dt);
+            if (rbA) rbA->velocity += imp * invA;
+            if (rbB) rbB->velocity -= imp * invB;
+        } else {
+            if (rbA) MoveWorld(go->transform(), -n * (over * (invA / invSum)));
+            if (target && rbB) MoveWorld(target->transform(), n * (over * (invB / invSum)));
+            float j = -rel / invSum;
+            if (rbA) rbA->velocity += n * (j * invA);
+            if (rbB) rbB->velocity -= n * (j * invB);
+        }
+    }
+
+    // Sleeping: a body that has stayed slow for `sleepDelay` seconds is parked.
+    // Evaluated after contacts and joints so resting bodies (whose gravity was
+    // just cancelled) are the ones that sleep.
+    for (const auto& go : scene.objects) {
+        if (!go->ActiveInHierarchy()) continue;
+        RigidBody* rb = go->GetComponent<RigidBody>();
+        if (!rb || !rb->enabled || rb->isKinematic) continue;
+        if (!rb->allowSleep) {
+            WakeBody(rb);
+            continue;
+        }
+        if (rb->sleeping) continue;
+        float speed = rb->velocity.Length() + rb->angularVelocity.Length();
+        if (speed < rb->sleepThreshold) {
+            rb->m_sleepTimer += dt;
+            if (rb->m_sleepTimer >= rb->sleepDelay) {
+                rb->sleeping = true;
+                rb->velocity = Vec3();
+                rb->angularVelocity = Vec3();
+            }
+        } else {
+            rb->m_sleepTimer = 0.0f;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

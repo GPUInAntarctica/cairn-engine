@@ -298,6 +298,11 @@ fs.writeFileSync(physBatch, [
     { command: 'entity.create', args: { name: 'Hero', position: [-4, 1.5, 0] }, id: 'hero' },
     { command: 'component.add', args: { id: '$ref:hero', type: 'CharacterController' } },
     { command: 'physics.moveCharacter', args: { id: '$ref:hero', displacement: [0, -0.02, 0] }, id: 'heroStep' },
+    { command: 'entity.create', args: { name: 'Sleeper', position: [0, 2, 0] }, id: 'sleeper' },
+    { command: 'component.add', args: { id: '$ref:sleeper', type: 'BoxCollider', props: { size: [1, 1, 1] } } },
+    { command: 'component.add', args: { id: '$ref:sleeper', type: 'RigidBody', props: { restitution: 0 } } },
+    { command: 'physics.step', args: { dt: 0.0166, steps: 300 }, id: 'sim' },
+    { command: 'entity.get', args: { id: '$ref:sleeper' }, id: 'sleeperGet' },
     { command: 'scene.layerMatrix.set', args: { a: 2, b: 2, collide: false } },
     { command: 'scene.layerMatrix.get', args: {}, id: 'lm' },
 ].map(s => JSON.stringify(s)).join('\n'));
@@ -319,6 +324,12 @@ check(capOverlapStep && capOverlapStep.result.some(e => e.name === 'Cap'),
 const heroStep = physLines.find(l => l.id === 'heroStep');
 check(heroStep && heroStep.result.grounded === true && Math.abs(heroStep.result.position[1] - 1.5) < 0.06,
     'physics.moveCharacter grounds a controller on the floor', heroStep && heroStep.result);
+const simStep = physLines.find(l => l.id === 'sim');
+check(simStep && simStep.result.steps === 300 && simStep.result.sleeping >= 1,
+    'physics.step advances the simulation and bodies sleep', simStep && simStep.result);
+const sleeperStep = physLines.find(l => l.id === 'sleeperGet');
+check(sleeperStep && Math.abs(sleeperStep.result.transform.position[1] - 1.0) < 0.03,
+    'physics.step settles a falling body on the floor', sleeperStep && sleeperStep.result && sleeperStep.result.transform);
 
 
 const build = expectOk(['--project', projectDir, 'script.build']);

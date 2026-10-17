@@ -58,3 +58,17 @@ def('physics.moveCharacter', {
         return ctx.session.engine().characterMove(args.id, displacement);
     },
 });
+
+def('physics.step', {
+    summary: 'Advance the scene physics by N fixed steps (headless simulation).',
+    args: {
+        dt: { type: 'number', default: 0.0166667, desc: 'Fixed timestep in seconds.' },
+        steps: { type: 'int', default: 1, desc: 'Number of steps to run.' },
+    },
+    returns: '{steps, dt, dynamic, sleeping}',
+    needsEngine: true,
+    examples: ['cairn --project ./game physics.step --steps 120'],
+    run(ctx, args) {
+        return ctx.session.engine().physicsStep(args.dt, args.steps);
+    },
+});

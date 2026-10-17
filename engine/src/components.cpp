@@ -186,6 +186,9 @@ const std::vector<PropertyDef>& RigidBodyDefs() {
         Field<RigidBody, &RigidBody::restitution>("restitution", "Bounciness", EditorPropKind::Float),
         Field<RigidBody, &RigidBody::friction>("friction", "Friction", EditorPropKind::Float),
         Field<RigidBody, &RigidBody::freezeZ>("freezeZ", "Freeze Z", EditorPropKind::Bool),
+        Field<RigidBody, &RigidBody::allowSleep>("allowSleep", "Allow Sleep", EditorPropKind::Bool),
+        Field<RigidBody, &RigidBody::sleepThreshold>("sleepThreshold", "Sleep Threshold", EditorPropKind::Float),
+        Field<RigidBody, &RigidBody::sleepDelay>("sleepDelay", "Sleep Delay", EditorPropKind::Float),
     };
     return defs;
 }
@@ -244,6 +247,19 @@ const std::vector<PropertyDef>& CharacterControllerDefs() {
     return defs;
 }
 
+const std::vector<PropertyDef>& DistanceJointDefs() {
+    static const std::vector<PropertyDef> defs = {
+        ObjectField<DistanceJoint, &DistanceJoint::connectedGuid>("connectedGuid", "Connected Body"),
+        Field<DistanceJoint, &DistanceJoint::anchor>("anchor", "Anchor", EditorPropKind::Vec3),
+        Field<DistanceJoint, &DistanceJoint::connectedAnchor>("connectedAnchor", "Connected Anchor", EditorPropKind::Vec3),
+        Field<DistanceJoint, &DistanceJoint::distance>("distance", "Distance", EditorPropKind::Float),
+        Field<DistanceJoint, &DistanceJoint::spring>("spring", "Spring", EditorPropKind::Float),
+        Field<DistanceJoint, &DistanceJoint::damping>("damping", "Damping", EditorPropKind::Float),
+        Field<DistanceJoint, &DistanceJoint::breakForce>("breakForce", "Break Force", EditorPropKind::Float),
+    };
+    return defs;
+}
+
 const std::vector<PropertyDef>& ScriptDefs() {
     static const std::vector<PropertyDef> defs = {
         PropertyDef{"class", "Script", EditorPropKind::String,
@@ -272,6 +288,7 @@ const std::vector<PropertyDef>* DefsForTypeName(const std::string& typeName) {
     if (typeName == "Collider2D") return &Collider2DDefs();
     if (typeName == "CapsuleCollider") return &CapsuleColliderDefs();
     if (typeName == "CharacterController") return &CharacterControllerDefs();
+    if (typeName == "DistanceJoint") return &DistanceJointDefs();
     if (typeName == "PrefabInstance") return &PrefabInstanceDefs();
     if (typeName == "Script") return &ScriptDefs();
     return nullptr;
@@ -337,7 +354,7 @@ bool ComponentDeserialize(Component* c, const Json& props) {
 std::vector<std::string> AddableComponentNames() {
     return {"Camera", "Light", "MeshRenderer", "SpriteRenderer", "TextRenderer",
             "RigidBody", "BoxCollider", "SphereCollider", "Collider2D",
-            "CapsuleCollider", "CharacterController", "Script"};
+            "CapsuleCollider", "CharacterController", "DistanceJoint", "Script"};
 }
 
 }  // namespace Cairn

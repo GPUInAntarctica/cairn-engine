@@ -160,6 +160,7 @@ public:
             InstanceMethod("physicsRaycast", &EngineWrap::PhysicsRaycast),
             InstanceMethod("physicsOverlapSphere", &EngineWrap::PhysicsOverlapSphere),
             InstanceMethod("characterMove", &EngineWrap::CharacterMove),
+            InstanceMethod("physicsStep", &EngineWrap::PhysicsStep),
             InstanceMethod("loadScriptLibrary", &EngineWrap::LoadScriptLibrary),
             InstanceMethod("play", &EngineWrap::Play),
             InstanceMethod("pause", &EngineWrap::Pause),
@@ -692,6 +693,12 @@ private:
         if (!ReadVec3(info[1], &disp)) return env.Null();
         return JsonToValue(env, engine_->QueryCharacterMove(id, disp));
     }
+    Napi::Value PhysicsStep(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        float dt = (float)GetNumber(info, 0, 1.0 / 60.0);
+        int steps = (int)GetNumber(info, 1, 1);
+        return JsonToValue(env, engine_->QueryPhysicsStep(dt, steps));
+    }
     Napi::Value GetLayerMatrix(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
         Napi::Array arr = Napi::Array::New(env, 32);
@@ -849,7 +856,7 @@ Napi::FunctionReference EngineWrap::constructor;
 
 Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
     EngineWrap::Init(env, exports);
-    exports.Set("engineVersion", Napi::String::New(env, "0.1.6"));
+    exports.Set("engineVersion", Napi::String::New(env, "0.1.7"));
     return exports;
 }
 

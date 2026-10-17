@@ -61,6 +61,7 @@ class SphereCollider;
 class Collider2D;
 class CapsuleCollider;
 class CharacterController;
+class DistanceJoint;
 class ScriptComponent;
 class PrefabInstance;
 struct ScriptMeta;
@@ -113,7 +114,9 @@ enum class ComponentTypeId : int {
     Transform = 1, Camera, Light, MeshRenderer, SpriteRenderer, TextRenderer,
     RigidBody, BoxCollider, SphereCollider, Collider2D, Script, PrefabInstance,
     // Added in 0.1.6. Appended so existing numeric values stay stable.
-    CapsuleCollider, CharacterController, Other = 99,
+    CapsuleCollider, CharacterController,
+    // Added in 0.1.7.
+    DistanceJoint, Other = 99,
 };
 
 template <typename T>
@@ -138,6 +141,7 @@ CAIRN_COMPONENT_TYPE(ScriptComponent, Script)
 CAIRN_COMPONENT_TYPE(PrefabInstance, PrefabInstance)
 CAIRN_COMPONENT_TYPE(CapsuleCollider, CapsuleCollider)
 CAIRN_COMPONENT_TYPE(CharacterController, CharacterController)
+CAIRN_COMPONENT_TYPE(DistanceJoint, DistanceJoint)
 
 // ---------------------------------------------------------------------------
 // Component - base class for all behaviour. Gameplay scripts subclass this.
@@ -400,15 +404,26 @@ public:
     Vec3 angularVelocity{0, 0, 0};  // radians/second (integrated each step)
     bool freezeZ = false;           // lock motion along Z (2D games)
 
-    void AddForce(const Vec3& force) { m_accumForce += force; }
-    void AddImpulse(const Vec3& impulse) { velocity += impulse; }
-    void AddTorque(const Vec3& torque) { m_accumTorque += torque; }
+    // Sleeping: a body at rest for `sleepDelay` seconds stops integrating and
+    // is treated as static by the solver until something disturbs it. AddForce/
+    // AddImpulse/AddTorque wake it, and so does writing a non-zero velocity.
+    bool allowSleep = true;
+    float sleepThreshold = 0.05f;   // speed below which the sleep timer grows
+    float sleepDelay = 0.5f;        // seconds below the threshold before sleeping
+    bool sleeping = false;          // runtime state
+
+    void AddForce(const Vec3& force) { m_accumForce += force; Wake(); }
+    void AddImpulse(const Vec3& impulse) { velocity += impulse; Wake(); }
+    void AddTorque(const Vec3& torque) { m_accumTorque += torque; Wake(); }
+    // Clears the sleep state and timer (called on any disturbance).
+    void Wake() { sleeping = false; m_sleepTimer = 0.0f; }
 
     const char* TypeName() const override { return "RigidBody"; }
     ComponentTypeId TypeId() const override { return ComponentTypeId::RigidBody; }
 
     Vec3 m_accumForce{0, 0, 0};     // engine-internal accumulator
     Vec3 m_accumTorque{0, 0, 0};    // engine-internal accumulator
+    float m_sleepTimer = 0.0f;      // engine-internal
 };
 
 // ---------------------------------------------------------------------------
@@ -490,6 +505,29 @@ public:
 
     const char* TypeName() const override { return "CharacterController"; }
     ComponentTypeId TypeId() const override { return ComponentTypeId::CharacterController; }
+};
+
+// ---------------------------------------------------------------------------
+// DistanceJoint - keeps two bodies a fixed distance apart. With `spring` > 0 it
+// becomes a spring/damper instead of a rigid constraint. `connectedGuid` is the
+// target GameObject's stable GUID; an empty GUID anchors to a fixed world point
+// at `connectedAnchor`. At least one of the two bodies needs a RigidBody; a
+// body without one acts as a static anchor.
+// ---------------------------------------------------------------------------
+class DistanceJoint : public Component {
+public:
+    std::string connectedGuid;      // target GameObject GUID ("" = fixed world point)
+    Vec3 anchor{0, 0, 0};           // local anchor on this body
+    Vec3 connectedAnchor{0, 0, 0};  // local anchor on the target (world point if unconnected)
+    float distance = 0.0f;          // target separation; 0 = captured on the first step
+    float spring = 0.0f;            // >0: spring constant; 0 = rigid constraint
+    float damping = 0.0f;           // damps relative speed for a spring
+    float breakForce = 0.0f;        // 0 = unbreakable; otherwise disables the joint above this force
+
+    const char* TypeName() const override { return "DistanceJoint"; }
+    ComponentTypeId TypeId() const override { return ComponentTypeId::DistanceJoint; }
+
+    float m_captured = 0.0f;        // engine-internal: cached 0-distance target
 };
 
 // ---------------------------------------------------------------------------

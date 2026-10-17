@@ -1008,6 +1008,27 @@ Json Engine::QueryCharacterMove(EntityId id, const Vec3& displacement) {
     return o;
 }
 
+Json Engine::QueryPhysicsStep(float dt, int steps) {
+    if (dt <= 0.0f) dt = 1.0f / 60.0f;
+    if (steps < 0) steps = 0;
+    if (steps > 100000) steps = 100000;
+    for (int i = 0; i < steps; ++i) PhysicsStep(*scene_, dt);
+    int dynamic = 0, sleeping = 0;
+    for (const auto& go : scene_->objects) {
+        if (!go->ActiveInHierarchy()) continue;
+        RigidBody* rb = go->GetComponent<RigidBody>();
+        if (!rb || !rb->enabled || rb->isKinematic) continue;
+        ++dynamic;
+        if (rb->sleeping) ++sleeping;
+    }
+    Json o = Json::MakeObject();
+    o.set("steps", (double)steps);
+    o.set("dt", (double)dt);
+    o.set("dynamic", (double)dynamic);
+    o.set("sleeping", (double)sleeping);
+    return o;
+}
+
 bool Engine::SaveFramePNG(const std::string& path) const {    const FrameTarget& t = renderer_.target();
     if (t.width <= 0 || t.height <= 0) return false;
     // stb expects top-down rows; our buffer already is.

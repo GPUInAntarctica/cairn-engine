@@ -51,6 +51,14 @@ static void TestMath() {
     CHECK(NearlyEqual(again.x, roundTrip.x, 1e-4f) && NearlyEqual(again.w, roundTrip.w, 1e-4f));
 
     CHECK(NearlyEqual(Vec3::Cross(Vec3::Right, Vec3::Up).z, 1.0f));
+
+    // A transformed AABB must not pick up the origin: a unit box moved up to
+    // y = 2 stays at [1.5, 2.5], not [0, 2.5].
+    AABB moved = AABB(Vec3(-0.5f, -0.5f, -0.5f), Vec3(0.5f, 0.5f, 0.5f))
+                     .Transformed(Mat4::Translation(Vec3(0, 2, 0)));
+    CHECK(NearlyEqual(moved.min.y, 1.5f, 1e-5f));
+    CHECK(NearlyEqual(moved.max.y, 2.5f, 1e-5f));
+    CHECK(moved.min.x <= -0.5f && moved.max.x >= 0.5f);
 }
 
 static void TestJson() {
@@ -1469,6 +1477,97 @@ static void TestCharacterController() {
     CHECK(hero->transform().position.y > 1.15f);  // feet now on the step top
 }
 
+// Distance joints: a rigid constraint holds a distance, a spring restores it,
+// and breakForce snaps the link.
+static void TestJoints() {
+    Scene scene;
+    GameObject* bob = scene.CreateEntity("Bob");
+    bob->transform().position = Vec3(0, 2, 0);
+    bob->AddComponent<SphereCollider>()->radius = 0.2f;
+    auto* rb = bob->AddComponent<RigidBody>();
+    rb->useGravity = false;
+    auto* joint = bob->AddComponent<DistanceJoint>();
+    joint->distance = 2.0f;  // anchored to the world origin
+
+    for (int i = 0; i < 10; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(NearlyEqual(bob->transform().position.y, 2.0f, 0.05f));
+
+    // Displace it; the rigid constraint restores the distance.
+    bob->transform().position = Vec3(0, 4, 0);
+    rb->velocity = Vec3();
+    for (int i = 0; i < 60; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(NearlyEqual(bob->transform().position.y, 2.0f, 0.05f));
+
+    // A spring/damper pulls a displaced body back to the rest length.
+    joint->spring = 40.0f;
+    joint->damping = 4.0f;
+    bob->transform().position = Vec3(0, 5, 0);
+    rb->velocity = Vec3();
+    for (int i = 0; i < 180; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(NearlyEqual(bob->transform().position.y, 2.0f, 0.15f));
+
+    // Two dynamic bodies connected by GUID share the correction equally.
+    GameObject* p = scene.CreateEntity("P");
+    p->transform().position = Vec3(10, 0, 0);
+    p->AddComponent<SphereCollider>()->radius = 0.2f;
+    p->AddComponent<RigidBody>()->useGravity = false;
+    GameObject* q = scene.CreateEntity("Q");
+    q->transform().position = Vec3(12, 0, 0);
+    q->AddComponent<SphereCollider>()->radius = 0.2f;
+    q->AddComponent<RigidBody>()->useGravity = false;
+    auto* j2 = p->AddComponent<DistanceJoint>();
+    j2->connectedGuid = q->guid();
+    j2->distance = 1.0f;
+    for (int i = 0; i < 30; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(NearlyEqual(std::fabs(p->transform().position.x - q->transform().position.x), 1.0f, 0.1f));
+    CHECK(p->transform().position.x > 10.4f);
+    CHECK(q->transform().position.x < 11.6f);
+
+    // breakForce snaps the joint; the body then falls under gravity.
+    joint->spring = 0.0f;
+    joint->breakForce = 5.0f;
+    bob->transform().position = Vec3(0, 8, 0);
+    rb->velocity = Vec3();
+    rb->useGravity = true;
+    for (int i = 0; i < 120; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(!joint->enabled);
+    CHECK(bob->transform().position.y < 1.0f);
+}
+
+// Rigidbodies parked at rest stop integrating until something wakes them.
+static void TestSleeping() {
+    Scene scene;
+    GameObject* ground = scene.CreateEntity("Ground");
+    ground->transform().position = Vec3(0, -0.5f, 0);
+    ground->AddComponent<BoxCollider>()->size = Vec3(20, 1, 20);  // top at y = 0
+    GameObject* box = scene.CreateEntity("Box");
+    box->transform().position = Vec3(0, 2, 0);
+    box->AddComponent<BoxCollider>()->size = Vec3(1, 1, 1);
+    auto* rb = box->AddComponent<RigidBody>();
+    rb->restitution = 0.0f;
+
+    for (int i = 0; i < 300; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(rb->sleeping);
+    CHECK(NearlyEqual(box->transform().position.y, 0.5f, 0.02f));
+
+    // Sleeping bodies stop integrating entirely.
+    Vec3 rest = box->transform().position;
+    for (int i = 0; i < 30; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(NearlyEqual(box->transform().position.y, rest.y, 1e-5f));
+
+    // An impulse wakes it for good.
+    rb->AddImpulse(Vec3(0, 5, 0));
+    CHECK(!rb->sleeping);
+    for (int i = 0; i < 5; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(box->transform().position.y > rest.y + 0.1f);
+
+    // allowSleep = false keeps a body awake even at rest.
+    rb->allowSleep = false;
+    rb->velocity = Vec3();
+    for (int i = 0; i < 120; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(!rb->sleeping);
+}
+
 int main() {
     Log::SetEchoStdout(false);
     TestMath();
@@ -1503,6 +1602,9 @@ int main() {
     TestCapsuleCollider();
     TestCapsulePhysics();
     TestCharacterController();
+    TestJoints();
+    TestSleeping();
+
     if (g_failures == 0) {
         std::printf("engine tests passed\n");
         return 0;

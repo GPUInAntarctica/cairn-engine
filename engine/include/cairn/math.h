@@ -363,11 +363,17 @@ struct AABB {
         return p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y && p.z >= min.z && p.z <= max.z;
     }
     AABB Transformed(const Mat4& m) const {
-        // Fast exact transform of the 8 corners.
+        // Fast exact transform of the 8 corners. Seed from the first corner so
+        // the result never silently picks up the origin.
         AABB out;
         for (int i = 0; i < 8; ++i) {
             Vec3 c((i & 1) ? max.x : min.x, (i & 2) ? max.y : min.y, (i & 4) ? max.z : min.z);
-            out.Expand(m.TransformPoint(c));
+            Vec3 p = m.TransformPoint(c);
+            if (i == 0) {
+                out.min = out.max = p;
+            } else {
+                out.Expand(p);
+            }
         }
         return out;
     }

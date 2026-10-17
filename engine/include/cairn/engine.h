@@ -162,6 +162,8 @@ public:
     Json QueryOverlapSphere(const Vec3& center, float radius);
     // Moves an entity's CharacterController and reports the resulting pose.
     Json QueryCharacterMove(EntityId id, const Vec3& displacement);
+    // Advances the scene physics by `steps` fixed steps (headless simulation).
+    Json QueryPhysicsStep(float dt, int steps);
 
     // --- Console & telemetry.
     std::vector<LogEntry> PollLogs(uint64_t afterId) { return Log::Poll(afterId); }

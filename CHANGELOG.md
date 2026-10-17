@@ -2,6 +2,16 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.7] - 2026-10-17
+
+### Physics: distance/spring joints and rigidbody sleeping
+- **`DistanceJoint`.** Holds two bodies a fixed `distance` apart (0 = captured on the first step). `connectedGuid` names the target GameObject (empty anchors to a fixed world point at `connectedAnchor`); `anchor`/`connectedAnchor` are local offsets. With `spring` > 0 it becomes a spring/damper instead of a rigid constraint, and `breakForce` (> 0) snaps the joint once the constraint force exceeds it. Constraints are solved with a sequential (Gauss-Seidel) pass after contacts.
+- **Rigidbody sleeping.** A body that stays slow for `sleepDelay` seconds (`sleepThreshold`, `allowSleep`) stops integrating and is treated as static by the solver, so resting stacks cost ~nothing. It wakes on `AddForce`/`AddImpulse`/`AddTorque`, on a non-zero `velocity`, or when a moving body touches it.
+- **Bug fix: transformed AABBs no longer include the origin.** `AABB::Transformed` started from a zero-initialised box, so every transformed bound was silently unioned with the world origin — box-vs-box contacts behaved as if every box reached y = 0 until they fell through the floor, and mesh bounds used for picking/culling/shadows were inflated. It now seeds from the first corner. A `TestMath` case pins it.
+- **New CLI command.** `physics.step --dt <s> --steps <n>` advances the scene physics headlessly and returns `{steps, dt, dynamic, sleeping}`.
+- **Tests.** `TestJoints`, `TestSleeping` and the `AABB::Transformed` case, plus CLI checks that `physics.step` settles a falling body and that it sleeps.
+- **Still to come** (next increment): per-property prefab overrides; then the rendering-performance work (instancing/batching, async GPU readback, profiler).
+
 ## [0.1.6] - 2026-10-17
 
 ### Physics: capsule colliders and a character controller

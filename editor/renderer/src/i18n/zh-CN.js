@@ -83,6 +83,7 @@ export const dict = {
     'comp.collider2d': '2D 碰撞体',
     'comp.capsuleCollider': '胶囊碰撞体',
     'comp.characterController': '角色控制器',
+    'comp.distanceJoint': '距离关节',
     'comp.script': '脚本',
     'comp.none': '未选中实体。',
     'comp.script.noClass': '构建脚本 (Ctrl+B) 后可加载玩法类。',

@@ -94,6 +94,10 @@ cc->isGrounded;               // true after a move that settled on ground
 cc->SimpleMove(Vec3(x, 0, z));// per-second velocity + gravity (ignores input y)
 ```
 
+Joints: `DistanceJoint` keeps two bodies a fixed distance apart (or a spring/damper with `spring`/`damping`). Set `connectedGuid` to the target GameObject's GUID, or leave it empty to anchor to a world point; `breakForce` snaps the joint.
+
+Sleeping: rigidbodies that stay slow for `sleepDelay` seconds stop integrating until disturbed (`AddForce`/`AddImpulse`/`AddTorque`, a written `velocity`, or a moving body touching them). Tune with `allowSleep`, `sleepThreshold`, `sleepDelay`.
+
 Queries run against colliders in the active scene:
 
 ```cpp
