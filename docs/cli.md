@@ -230,6 +230,41 @@ The shape and preview primitives are driven from the CLI; the editor's image
 editor keeps its own canvas renderer and only shares the colour and normal-map
 helpers from `editor/main/imaging.js`.
 
+### Symmetry and composition
+
+`--mirror x` (or `y`, or `both`) on any geometry command (`image.draw.rect`,
+`ellipse`, `path`, `line`, `brush`) runs the call a second time on geometry
+reflected about the canvas centre line, so one half of a character is enough:
+
+```bash
+cairn --project ./game image.draw.path --points '8,56 24,16 40,56' --filled \
+    --color '#3a7de0' --mirror x
+```
+
+The second pass is a real draw, not a pixel copy: it gets the same brush, fill
+and outline, so the halves match exactly, and content already on the other side
+is left alone.
+
+Whole-document transforms and sprite assembly:
+
+```bash
+cairn --project ./game image.flip --axis x            # y or both; --layer 2 for one layer
+cairn --project ./game image.rotate --degrees 90      # clockwise, a multiple of 90
+cairn --project ./game image.crop --x 16 --y 16 --width 32 --height 32
+cairn --project ./game image.stamp --file Assets/Sprites/coin.png --x 64 --y 32
+cairn --project ./game image.stamp --from 0 --layer 1 --x 8 --y 8 --opacity 0.5
+cairn --project ./game image.stamp --file Assets/Sprites/mask.png --blend replace
+```
+
+`image.flip`, `image.rotate` and `image.crop` reshape the document every layer
+shares (`--layer` limits a flip to one layer); crop clamps to the canvas and
+reports the rectangle it used. `image.stamp` composites a PNG/BMP or another
+layer of the same document onto a layer at an offset — a source hanging off the
+canvas is clipped, `--scale` is nearest neighbour, `--opacity` multiplies alpha,
+and `--blend replace` copies the source through (a transparent source punches a
+hole) instead of compositing source-over. An asset sheet is one `image.new` at
+the sheet size followed by one `image.stamp` per cell.
+
 ## Command reference
 
 <!-- BEGIN GENERATED COMMANDS -->
@@ -302,13 +337,15 @@ helpers from `editor/main/imaging.js`.
 | Command | Arguments | Description |
 | --- | --- | --- |
 | `image.color` | `--value` (color, required)<br>`--to` (enum, default "hex", one of hex \| rgb255 \| rgb01 \| hsv) | Convert colors between hex, rgb 0-255, rgb 0-1 and hsv. |
-| `image.draw.brush` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--x` (number, required)<br>`--y` (number, required)<br>`--x2` (number)<br>`--y2` (number)<br>`--erase` (bool, default false) | Paint a brush stroke along a path (single point when no end is given). |
-| `image.draw.ellipse` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--filled` (bool, default false)<br>`--stroke` (number, default 0)<br>`--strokeColor` (color)<br>`--cx` (number, required)<br>`--cy` (number, required)<br>`--rx` (number, required)<br>`--ry` (number, required) | Draw an ellipse outline or a filled ellipse. |
+| `image.crop` | `--x` (int, required)<br>`--y` (int, required)<br>`--width` (int, required)<br>`--height` (int, required) | Crop every layer to a rectangle (clamped to the canvas). |
+| `image.draw.brush` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--mirror` (enum, default "none", one of none \| x \| y \| both)<br>`--x` (number, required)<br>`--y` (number, required)<br>`--x2` (number)<br>`--y2` (number)<br>`--erase` (bool, default false) | Paint a brush stroke along a path (single point when no end is given). |
+| `image.draw.ellipse` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--mirror` (enum, default "none", one of none \| x \| y \| both)<br>`--filled` (bool, default false)<br>`--stroke` (number, default 0)<br>`--strokeColor` (color)<br>`--cx` (number, required)<br>`--cy` (number, required)<br>`--rx` (number, required)<br>`--ry` (number, required) | Draw an ellipse outline or a filled ellipse. |
 | `image.draw.fill` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--x` (number, required)<br>`--y` (number, required)<br>`--tolerance` (int, default 24) | Flood fill the contiguous region around a pixel (tolerance matched). |
-| `image.draw.line` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--x1` (number, required)<br>`--y1` (number, required)<br>`--x2` (number, required)<br>`--y2` (number, required) | Draw a line segment. |
-| `image.draw.path` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--filled` (bool, default false)<br>`--stroke` (number, default 0)<br>`--strokeColor` (color)<br>`--points` (json)<br>`--closed` (bool, default true)<br>`--sides` (int)<br>`--cx` (number)<br>`--cy` (number)<br>`--radius` (number)<br>`--rotation` (number, default 0)<br>`--inner` (number) | Draw a closed polygon, an open polyline, or a regular polygon/star. |
-| `image.draw.rect` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--filled` (bool, default false)<br>`--stroke` (number, default 0)<br>`--strokeColor` (color)<br>`--x` (number, required)<br>`--y` (number, required)<br>`--width` (number, required)<br>`--height` (number, required) | Draw a rectangle outline or a filled rectangle. |
+| `image.draw.line` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--mirror` (enum, default "none", one of none \| x \| y \| both)<br>`--x1` (number, required)<br>`--y1` (number, required)<br>`--x2` (number, required)<br>`--y2` (number, required) | Draw a line segment. |
+| `image.draw.path` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--mirror` (enum, default "none", one of none \| x \| y \| both)<br>`--filled` (bool, default false)<br>`--stroke` (number, default 0)<br>`--strokeColor` (color)<br>`--points` (json)<br>`--closed` (bool, default true)<br>`--sides` (int)<br>`--cx` (number)<br>`--cy` (number)<br>`--radius` (number)<br>`--rotation` (number, default 0)<br>`--inner` (number) | Draw a closed polygon, an open polyline, or a regular polygon/star. |
+| `image.draw.rect` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--mirror` (enum, default "none", one of none \| x \| y \| both)<br>`--filled` (bool, default false)<br>`--stroke` (number, default 0)<br>`--strokeColor` (color)<br>`--x` (number, required)<br>`--y` (number, required)<br>`--width` (number, required)<br>`--height` (number, required) | Draw a rectangle outline or a filled rectangle. |
 | `image.flatten` | — | Collapse all visible layers into a single layer. |
+| `image.flip` | `--axis` (enum, default "x", one of x \| y \| both)<br>`--layer` (int) | Mirror the document left/right or top/bottom. |
 | `image.info` | `--layer` (int)<br>`--spans` (bool, default false) | Dimensions, layer list and pixel statistics: histogram, average color, content bounds, coverage, edge clipping, mirror symmetry and dominant colors. |
 | `image.layer.add` | `--name` (string, default "Layer")<br>`--index` (int)<br>`--fill` (color) | Insert an empty layer above the given one (or on top). |
 | `image.layer.delete` | `--index` (int, required) | Delete a layer (the last remaining layer cannot be removed). |
@@ -324,7 +361,9 @@ helpers from `editor/main/imaging.js`.
 | `image.preview` | `--layer` (int)<br>`--scale` (int, default 1)<br>`--format` (enum, default "ascii", one of ascii \| blocks \| hex)<br>`--chars` (string)<br>`--empty` (string, default " ") | Render the image (or a layer) as text so its shape can be checked without opening a file. |
 | `image.replaceColor` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--from` (color, required)<br>`--tolerance` (int, default 8) | Recolor every pixel of a layer whose color matches within a tolerance. |
 | `image.resize` | `--width` (int, required)<br>`--height` (int, required) | Resample every layer to new dimensions (nearest neighbour). |
+| `image.rotate` | `--degrees` (number, required) | Rotate every layer clockwise by a multiple of 90 degrees. |
 | `image.save` | `--out` (string)<br>`--layer` (int) | Write the composited image to a PNG file. |
+| `image.stamp` | `--file` (string)<br>`--from` (int)<br>`--layer` (int)<br>`--x` (number, default 0)<br>`--y` (number, default 0)<br>`--scale` (number, default 1)<br>`--opacity` (number, default 1)<br>`--blend` (enum, default "over", one of over \| replace) | Composite an image file or another layer onto a layer at an offset. |
 
 ### `input`
 

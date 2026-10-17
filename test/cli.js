@@ -588,6 +588,7 @@ fs.writeFileSync(plateBatch, [
     { command: 'image.pixel', args: { x: 6, y: 20 }, id: 'outside' },
     { command: 'image.info', args: {}, id: 'info' },
     { command: 'image.preview', args: { scale: 5 }, id: 'preview' },
+    { command: 'image.preview', args: { scale: 5, format: 'hex', empty: '.' }, id: 'hexPreview' },
     { command: 'image.draw.path', args: { sides: 6, cx: 20, cy: 20, radius: 6, filled: true, stroke: 1, color: '#00ff00', strokeColor: '#004400' }, id: 'hexagon' },
     { command: 'image.info', args: { spans: true }, id: 'spans' },
 ].map(s => JSON.stringify(s)).join('\n'));
@@ -627,6 +628,13 @@ check(preview && preview.cols === 8 && preview.rows === 8 && preview.lines.lengt
 check(preview && preview.lines.join('').includes('#') && preview.lines[0][0] === ' ',
     'image.preview distinguishes content from transparency', preview && preview.lines);
 
+// A hex cell is 7 characters wide, so empty cells are padded; otherwise a row
+// with transparency in it is shorter than its neighbours and nothing lines up.
+const hexPreview = plate.byId.hexPreview && plate.byId.hexPreview.result;
+check(hexPreview && hexPreview.lines.every(l => l.length === hexPreview.cols * 8 - 1)
+    && hexPreview.lines[0].startsWith('.......'),
+    'image.preview --format hex pads transparent cells', hexPreview && hexPreview.lines.map(l => l.length));
+
 check(plate.byId.hexagon && plate.byId.hexagon.result.pixels === 6,
     'image.draw.path builds a regular polygon from --sides', plate.byId.hexagon);
 const spans = plate.byId.spans && plate.byId.spans.result.stats;
@@ -661,6 +669,135 @@ expectFail(['image.draw.path', '--points', '3,4'], 'invalid_arg');
 expectFail(['--project', projectDir, '--image', 'Assets/Textures/cli_texture.png', 'image.info', '--layer', '7'], 'not_found');
 expectFail(['--project', projectDir, '--image', 'Assets/Textures/cli_texture.png', 'image.preview', '--scale', '0'], 'invalid_arg');
 expectFail(['--project', projectDir, '--image', 'Assets/Textures/cli_texture.png', 'image.draw.rect', '--x', '0', '--y', '0', '--width', '4', '--height', '4', '--stroke', '-1'], 'invalid_arg');
+
+// ---------------------------------------------------------------------------
+console.log('cli: image transforms + composition');
+// ---------------------------------------------------------------------------
+// Symmetry and composition: `--mirror` paints the reflection in the same call
+// (a symmetric character is drawn from one half), flip/rotate/crop reshape the
+// whole document, and image.stamp blits another image or layer in.
+const mirrorBatch = path.join(scratch, 'image-mirror.jsonl');
+fs.writeFileSync(mirrorBatch, [
+    { command: 'image.new', args: { width: 48, height: 48, background: 'transparent' }, id: 'new' },
+    { command: 'image.draw.rect', args: { x: 4, y: 20, width: 12, height: 8, filled: true, color: '#3a7de0', mirror: 'x' }, id: 'rect' },
+    { command: 'image.info', args: {}, id: 'info' },
+    { command: 'image.pixel', args: { x: 4, y: 24 }, id: 'left' },
+    { command: 'image.pixel', args: { x: 43, y: 24 }, id: 'right' },
+    { command: 'image.pixel', args: { x: 3, y: 24 }, id: 'before' },
+    { command: 'image.pixel', args: { x: 44, y: 24 }, id: 'after' },
+    // The same call without --mirror, as the A/B: it stays on one side.
+    { command: 'image.new', args: { width: 48, height: 48, background: 'transparent' }, id: 'new2' },
+    { command: 'image.draw.rect', args: { x: 4, y: 20, width: 12, height: 8, filled: true, color: '#3a7de0' }, id: 'rect2' },
+    { command: 'image.info', args: {}, id: 'info2' },
+    // --points reflection (a triangle whose mirror lands across the centre).
+    { command: 'image.new', args: { width: 40, height: 40, background: 'transparent' }, id: 'new3' },
+    { command: 'image.draw.path', args: { points: '4,30 12,8 20,30', filled: true, color: '#3a7de0', mirror: 'x' }, id: 'tri' },
+    { command: 'image.info', args: {}, id: 'info3' },
+].map(s => JSON.stringify(s)).join('\n'));
+const mirrorRun = runBatch(mirrorBatch);
+check(mirrorRun.lines.length && mirrorRun.lines.every(l => l.ok !== false), 'image mirror batch runs clean', mirrorRun.stdout + mirrorRun.stderr);
+check(mirrorRun.byId.rect && mirrorRun.byId.rect.result.mirrored === 'x',
+    'a mirrored draw reports which mirror it used', mirrorRun.byId.rect);
+const mirrorStats = mirrorRun.byId.info && mirrorRun.byId.info.result.stats;
+check(mirrorStats && mirrorStats.mirrorLeftRight === true && mirrorStats.mirrorLeftRightMismatch === 0,
+    '--mirror x paints a left/right symmetric shape', mirrorStats && mirrorStats.mirrorLeftRightMismatch);
+check(mirrorRun.byId.left.result.a === 255 && mirrorRun.byId.right.result.a === 255
+    && mirrorRun.byId.before.result.a === 0 && mirrorRun.byId.after.result.a === 0,
+    '--mirror x lands the copy exactly across the centre line',
+    [mirrorRun.byId.left, mirrorRun.byId.right, mirrorRun.byId.before, mirrorRun.byId.after]);
+check(mirrorRun.byId.info2.result.stats.mirrorLeftRight === false,
+    'the same rect without --mirror stays one-sided', mirrorRun.byId.info2.result.stats.mirrorLeftRightMismatch);
+check(mirrorRun.byId.info3.result.stats.mirrorLeftRight === true
+    && mirrorRun.byId.info3.result.stats.mirrorLeftRightMismatch === 0,
+    '--mirror x reflects --points geometry too', mirrorRun.byId.info3.result.stats.mirrorLeftRightMismatch);
+
+const xformBatch = path.join(scratch, 'image-xform.jsonl');
+fs.writeFileSync(xformBatch, [
+    { command: 'image.new', args: { width: 8, height: 4, background: 'transparent' }, id: 'new' },
+    { command: 'image.draw.rect', args: { x: 1, y: 0, width: 1, height: 1, filled: true, color: '#00ff00' }, id: 'mark' },
+    { command: 'image.flip', args: { axis: 'x' }, id: 'flipx' },
+    { command: 'image.pixel', args: { x: 6, y: 0 }, id: 'fx6' },
+    { command: 'image.pixel', args: { x: 1, y: 0 }, id: 'fx1' },
+    { command: 'image.rotate', args: { degrees: 90 }, id: 'rot' },
+    { command: 'image.pixel', args: { x: 3, y: 6 }, id: 'r36' },
+    { command: 'image.crop', args: { x: 2, y: 4, width: 2, height: 4 }, id: 'crop' },
+    { command: 'image.pixel', args: { x: 1, y: 2 }, id: 'c12' },
+    { command: 'image.info', args: {}, id: 'info' },
+].map(s => JSON.stringify(s)).join('\n'));
+const xformRun = runBatch(xformBatch);
+check(xformRun.lines.length && xformRun.lines.every(l => l.ok !== false), 'image transform batch runs clean', xformRun.stdout + xformRun.stderr);
+check(xformRun.byId.fx6.result.a === 255 && xformRun.byId.fx1.result.a === 0
+    && xformRun.byId.flipx.result.axis === 'x',
+    'image.flip --axis x swaps the columns', [xformRun.byId.flipx, xformRun.byId.fx6, xformRun.byId.fx1]);
+check(xformRun.byId.rot.result.width === 4 && xformRun.byId.rot.result.height === 8
+    && xformRun.byId.r36.result.hex === '#00ff00',
+    'image.rotate 90 swaps the canvas size and turns the mark clockwise',
+    [xformRun.byId.rot.result, xformRun.byId.r36]);
+check(xformRun.byId.crop.result.width === 2 && xformRun.byId.crop.result.height === 4
+    && xformRun.byId.c12.result.hex === '#00ff00',
+    'image.crop re-frames the mark', [xformRun.byId.crop.result, xformRun.byId.c12]);
+check(xformRun.byId.info.result.width === 2 && xformRun.byId.info.result.height === 4
+    && xformRun.byId.info.result.stats.coverage === 0.125,
+    'image.crop resizes the document every layer shares', xformRun.byId.info.result.stats.coverage);
+
+const stampBatch = path.join(scratch, 'image-stamp.jsonl');
+fs.writeFileSync(stampBatch, [
+    { command: 'image.new', args: { width: 4, height: 4, background: '#00ff00' }, id: 'dot' },
+    { command: 'image.save', args: { out: 'Assets/Textures/stamp_dot.png' }, id: 'sd' },
+    { command: 'image.new', args: { width: 4, height: 4, background: 'transparent' }, id: 'hole' },
+    { command: 'image.save', args: { out: 'Assets/Textures/stamp_hole.png' }, id: 'sh' },
+    // Stamp a file at an offset, then the same file scaled down.
+    { command: 'image.new', args: { width: 16, height: 16, background: '#ffffff' }, id: 'canvas' },
+    { command: 'image.stamp', args: { file: 'Assets/Textures/stamp_dot.png', x: 4, y: 4 }, id: 'stamp' },
+    { command: 'image.pixel', args: { x: 5, y: 5 }, id: 'inside' },
+    { command: 'image.pixel', args: { x: 3, y: 3 }, id: 'outside' },
+    { command: 'image.stamp', args: { file: 'Assets/Textures/stamp_dot.png', x: 0, y: 8, scale: 0.5 }, id: 'scaled' },
+    { command: 'image.pixel', args: { x: 0, y: 8 }, id: 'scaledIn' },
+    { command: 'image.pixel', args: { x: 2, y: 8 }, id: 'scaledOut' },
+    // Stamp another layer with half opacity: 0.5 magenta over white.
+    { command: 'image.layer.add', args: { name: 'Source', fill: '#ff00ff' }, id: 'add' },
+    { command: 'image.stamp', args: { from: 1, layer: 0, opacity: 0.5 }, id: 'fromLayer' },
+    { command: 'image.pixel', args: { x: 10, y: 10, layer: 0 }, id: 'blended' },
+    // A fully transparent source: `replace` punches a hole, `over` is a no-op.
+    { command: 'image.new', args: { width: 16, height: 16, background: '#ffffff' }, id: 'canvas2' },
+    { command: 'image.stamp', args: { file: 'Assets/Textures/stamp_hole.png', x: 0, y: 0, blend: 'replace' }, id: 'punch' },
+    { command: 'image.pixel', args: { x: 1, y: 1 }, id: 'punched' },
+    { command: 'image.stamp', args: { file: 'Assets/Textures/stamp_hole.png', x: 12, y: 12 }, id: 'noop' },
+    { command: 'image.pixel', args: { x: 13, y: 13 }, id: 'noopPixel' },
+    // An offset that hangs off the canvas keeps only the visible part.
+    { command: 'image.stamp', args: { file: 'Assets/Textures/stamp_dot.png', x: -2, y: -2 }, id: 'clipped' },
+    { command: 'image.pixel', args: { x: 0, y: 0 }, id: 'clippedPixel' },
+    { command: 'image.pixel', args: { x: 4, y: 4 }, id: 'clippedOutside' },
+].map(s => JSON.stringify(s)).join('\n'));
+const stampRun = runBatch(stampBatch);
+check(stampRun.lines.length && stampRun.lines.every(l => l.ok !== false), 'image stamp batch runs clean', stampRun.stdout + stampRun.stderr);
+check(stampRun.byId.stamp.result.painted === 16 && JSON.stringify(stampRun.byId.stamp.result.source) === '{"width":4,"height":4}'
+    && stampRun.byId.inside.result.hex === '#00ff00' && stampRun.byId.outside.result.hex === '#ffffff',
+    'image.stamp blits a file at an offset',
+    [stampRun.byId.stamp.result, stampRun.byId.inside, stampRun.byId.outside]);
+check(stampRun.byId.scaled.result.painted === 4 && stampRun.byId.scaled.result.source.width === 2
+    && stampRun.byId.scaledIn.result.hex === '#00ff00' && stampRun.byId.scaledOut.result.hex === '#ffffff',
+    'image.stamp --scale 0.5 halves the source',
+    [stampRun.byId.scaled.result, stampRun.byId.scaledIn, stampRun.byId.scaledOut]);
+check(stampRun.byId.fromLayer.result.painted === 256 && stampRun.byId.blended.result.hex === '#ff80ff'
+    && stampRun.byId.blended.result.a === 255,
+    'image.stamp --from composites another layer',
+    [stampRun.byId.fromLayer.result, stampRun.byId.blended]);
+check(stampRun.byId.punch.result.painted === 16 && stampRun.byId.punched.result.a === 0
+    && stampRun.byId.noop.result.painted === 0 && stampRun.byId.noopPixel.result.a === 255,
+    'image.stamp --blend replace overwrites alpha while over skips transparency',
+    [stampRun.byId.punch, stampRun.byId.punched, stampRun.byId.noop, stampRun.byId.noopPixel]);
+check(stampRun.byId.clipped.result.painted === 4 && stampRun.byId.clippedPixel.result.hex === '#00ff00'
+    && stampRun.byId.clippedOutside.result.hex === '#ffffff',
+    'image.stamp clips a source hanging off the canvas',
+    [stampRun.byId.clipped.result, stampRun.byId.clippedPixel, stampRun.byId.clippedOutside]);
+
+expectFail(['image.stamp'], 'invalid_arg');
+expectFail(['--project', projectDir, 'image.stamp', '--file', 'Assets/Textures/stamp_dot.png', '--from', '0'], 'invalid_arg');
+expectFail(['--project', projectDir, 'image.stamp', '--file', 'Assets/Textures/stamp_dot.png', '--scale', '0'], 'invalid_arg');
+expectFail(['image.rotate', '--degrees', '45'], 'invalid_arg');
+expectFail(['image.crop', '--x', '0', '--y', '0', '--width', '0', '--height', '4'], 'invalid_arg');
+expectFail(['--project', projectDir, '--image', 'Assets/Textures/stamp_dot.png', 'image.flip', '--axis', 'x', '--layer', '9'], 'not_found');
 
 // ---------------------------------------------------------------------------
 console.log('cli: export + preferences');

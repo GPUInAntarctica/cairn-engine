@@ -292,22 +292,51 @@ const drawArgs = {
     hardness: { type: 'number', default: 0.8, desc: 'Brush hardness 0-1 (1 = hard edge).' },
 };
 
+// `--mirror` draws the shape and its reflection about the canvas centre line,
+// which is how a symmetric character gets painted from one half.
+const mirrorArg = {
+    mirror: {
+        type: 'enum', enum: ['none', 'x', 'y', 'both'], default: 'none',
+        desc: 'Also paint the reflection about the canvas centre line (x = left/right, both = 180°).',
+    },
+};
+
 // Shared by the shape commands: `--filled` fills the interior, `--stroke`
 // adds an outline drawn *outside* the boundary (so it never eats the fill),
 // and `--strokeColor` lets fill and outline differ (e.g. a gold coin with a
 // dark rim) in a single call.
-const shapeArgs = Object.assign({}, drawArgs, {
+const shapeArgs = Object.assign({}, drawArgs, mirrorArg, {
     filled: { type: 'bool', default: false, desc: 'Fill the interior.' },
     stroke: { type: 'number', default: 0, desc: 'Outline width in pixels, drawn outside the shape (0 = none).' },
     strokeColor: { type: 'color', desc: 'Outline color (default: the fill color).' },
 });
 
-function draw(ctx, args, fn) {
+// Runs a draw operation. `fn(pass, data, w, h, layer)` receives the argument
+// set to use -- with `--mirror` the operation runs a second time on
+// `imaging.mirrorShapeArgs`'s reflected geometry and the returned pixel count
+// is the first pass's. `options.box` marks commands whose x/y is the corner of
+// a width/height box rather than a point.
+function draw(ctx, args, fn, options = {}) {
     if (args.stroke !== undefined && args.stroke < 0) throw invalidArg('--stroke must be 0 or greater');
     const layer = activeLayer(ctx, args);
     const doc = ctx.session._image;
-    const count = fn(layer.data, doc.width, doc.height, layer);
-    return { layer: doc.layers.indexOf(layer), pixels: count === undefined ? null : count, width: doc.width, height: doc.height };
+    const passes = [args];
+    if (args.mirror && args.mirror !== 'none') {
+        passes.push(imaging.mirrorShapeArgs(args, doc.width, doc.height, !!options.box));
+    }
+    let count;
+    for (const pass of passes) {
+        const result = fn(pass, layer.data, doc.width, doc.height, layer);
+        if (pass === args) count = result;
+    }
+    const out = {
+        layer: doc.layers.indexOf(layer),
+        pixels: count === undefined ? null : count,
+        width: doc.width,
+        height: doc.height,
+    };
+    if (passes.length > 1) out.mirrored = args.mirror;
+    return out;
 }
 
 def('image.draw.rect', {
@@ -318,33 +347,33 @@ def('image.draw.rect', {
         width: { type: 'number', required: true, desc: 'Rectangle width.' },
         height: { type: 'number', required: true, desc: 'Rectangle height.' },
     }),
-    returns: '{layer, pixels}',
+    returns: '{layer, pixels, mirrored?}',
     examples: [
         'cairn image.draw.rect --x 8 --y 8 --width 64 --height 64 --color "#ff8800" --filled',
         'cairn image.draw.rect --x 8 --y 8 --width 48 --height 48 --filled --stroke 2 --color "#ffd700" --strokeColor "#4a3200"',
     ],
     run(ctx, args) {
-        return draw(ctx, args, (data, w, h) => {
-            if (args.filled) imaging.fillRect(data, w, h, args.x, args.y, args.width, args.height, args.color, args.opacity);
-            if (args.stroke > 0) imaging.strokeRectRing(data, w, h, args.x, args.y, args.width, args.height, args.stroke, args.strokeColor || args.color, args.opacity);
-            else if (!args.filled) imaging.strokeRect(data, w, h, args.x, args.y, args.x + args.width, args.y + args.height, args.color, args.opacity, args.brush);
-        });
+        return draw(ctx, args, (a, data, w, h) => {
+            if (a.filled) imaging.fillRect(data, w, h, a.x, a.y, a.width, a.height, a.color, a.opacity);
+            if (a.stroke > 0) imaging.strokeRectRing(data, w, h, a.x, a.y, a.width, a.height, a.stroke, a.strokeColor || a.color, a.opacity);
+            else if (!a.filled) imaging.strokeRect(data, w, h, a.x, a.y, a.x + a.width, a.y + a.height, a.color, a.opacity, a.brush);
+        }, { box: true });
     },
 });
 
 def('image.draw.line', {
     summary: 'Draw a line segment.',
-    args: Object.assign({}, drawArgs, {
+    args: Object.assign({}, drawArgs, mirrorArg, {
         x1: { type: 'number', required: true, desc: 'Start X.' },
         y1: { type: 'number', required: true, desc: 'Start Y.' },
         x2: { type: 'number', required: true, desc: 'End X.' },
         y2: { type: 'number', required: true, desc: 'End Y.' },
     }),
-    returns: '{layer, pixels}',
+    returns: '{layer, pixels, mirrored?}',
     examples: ['cairn image.draw.line --x1 0 --y1 0 --x2 127 --y2 127 --color white --brush 3'],
     run(ctx, args) {
-        return draw(ctx, args, (data, w, h) => {
-            imaging.strokeLine(data, w, h, args.x1, args.y1, args.x2, args.y2, args.color, args.opacity, args.brush);
+        return draw(ctx, args, (a, data, w, h) => {
+            imaging.strokeLine(data, w, h, a.x1, a.y1, a.x2, a.y2, a.color, a.opacity, a.brush);
         });
     },
 });
@@ -357,19 +386,31 @@ def('image.draw.ellipse', {
         rx: { type: 'number', required: true, desc: 'Horizontal radius.' },
         ry: { type: 'number', required: true, desc: 'Vertical radius.' },
     }),
-    returns: '{layer, pixels}',
+    returns: '{layer, pixels, mirrored?}',
     examples: [
         'cairn image.draw.ellipse --cx 64 --cy 64 --rx 40 --ry 24 --filled --color "#3af"',
         'cairn image.draw.ellipse --cx 64 --cy 64 --rx 30 --ry 30 --filled --stroke 3 --color "#3af" --strokeColor "#124"',
     ],
     run(ctx, args) {
-        return draw(ctx, args, (data, w, h) => {
-            if (args.filled) imaging.fillEllipse(data, w, h, args.cx, args.cy, args.rx, args.ry, args.color, args.opacity);
-            if (args.stroke > 0) imaging.strokeEllipseRing(data, w, h, args.cx, args.cy, args.rx, args.ry, args.stroke, args.strokeColor || args.color, args.opacity);
-            else if (!args.filled) imaging.strokeEllipse(data, w, h, args.cx, args.cy, args.rx, args.ry, args.color, args.opacity, args.brush);
+        return draw(ctx, args, (a, data, w, h) => {
+            if (a.filled) imaging.fillEllipse(data, w, h, a.cx, a.cy, a.rx, a.ry, a.color, a.opacity);
+            if (a.stroke > 0) imaging.strokeEllipseRing(data, w, h, a.cx, a.cy, a.rx, a.ry, a.stroke, a.strokeColor || a.color, a.opacity);
+            else if (!a.filled) imaging.strokeEllipse(data, w, h, a.cx, a.cy, a.rx, a.ry, a.color, a.opacity, a.brush);
         });
     },
 });
+
+function pathPoints(a) {
+    const pts = imaging.parsePoints(a.points);
+    if (pts) return pts;
+    return a.sides === undefined ? null : imaging.regularPolygonPoints(a);
+}
+
+function pathPointsError() {
+    return invalidArg('image.draw.path needs --points or --sides (at least 2 vertices)', {
+        hint: 'e.g. --points "10,10 50,10 30,50" or --sides 6 --cx 32 --cy 32 --radius 24',
+    });
+}
 
 def('image.draw.path', {
     summary: 'Draw a closed polygon, an open polyline, or a regular polygon/star.',
@@ -383,30 +424,27 @@ def('image.draw.path', {
         rotation: { type: 'number', default: 0, desc: 'Rotation in degrees for --sides (0 points up).' },
         inner: { type: 'number', desc: 'Inner radius ratio 0-1; > 0 makes a star.' },
     }),
-    returns: '{layer, pixels}',
+    returns: '{layer, pixels, mirrored?}',
     examples: [
         'cairn image.draw.path --points "32,4 60,20 60,52 32,60 4,52 4,20" --filled --color "#4a90d9"',
         'cairn image.draw.path --sides 5 --inner 0.45 --cx 32 --cy 32 --radius 28 --filled --stroke 2 --color "#ffd700" --strokeColor "#4a3200"',
         'cairn image.draw.path --points "8,56 24,16 40,56" --closed false --stroke 3 --color white',
+        'cairn image.draw.path --points "4,40 12,4 20,40" --filled --color "#3a7de0" --mirror x',
     ],
     run(ctx, args) {
-        let points = imaging.parsePoints(args.points);
-        if (!points && args.sides !== undefined) points = imaging.regularPolygonPoints(args);
-        if (!points) {
-            throw invalidArg('image.draw.path needs --points or --sides (at least 2 vertices)', {
-                hint: 'e.g. --points "10,10 50,10 30,50" or --sides 6 --cx 32 --cy 32 --radius 24',
-            });
-        }
-        return draw(ctx, args, (data, w, h) => {
-            if (args.filled) imaging.fillPolygon(data, w, h, points, args.color, args.opacity);
-            if (args.stroke > 0) {
-                if (args.closed && points.length >= 3) {
-                    imaging.strokePolygonRing(data, w, h, points, args.stroke, args.strokeColor || args.color, args.opacity);
+        if (!pathPoints(args)) throw pathPointsError();
+        return draw(ctx, args, (a, data, w, h) => {
+            const points = pathPoints(a);
+            if (!points) throw pathPointsError();
+            if (a.filled) imaging.fillPolygon(data, w, h, points, a.color, a.opacity);
+            if (a.stroke > 0) {
+                if (a.closed && points.length >= 3) {
+                    imaging.strokePolygonRing(data, w, h, points, a.stroke, a.strokeColor || a.color, a.opacity);
                 } else {
-                    imaging.strokePolygon(data, w, h, points, args.strokeColor || args.color, args.opacity, args.stroke, args.closed);
+                    imaging.strokePolygon(data, w, h, points, a.strokeColor || a.color, a.opacity, a.stroke, a.closed);
                 }
-            } else if (!args.filled) {
-                imaging.strokePolygon(data, w, h, points, args.color, args.opacity, args.brush, args.closed);
+            } else if (!a.filled) {
+                imaging.strokePolygon(data, w, h, points, a.color, a.opacity, a.brush, a.closed);
             }
             return points.length;
         });
@@ -415,27 +453,28 @@ def('image.draw.path', {
 
 def('image.draw.brush', {
     summary: 'Paint a brush stroke along a path (single point when no end is given).',
-    args: Object.assign({}, drawArgs, {
+    args: Object.assign({}, drawArgs, mirrorArg, {
         x: { type: 'number', required: true, desc: 'Start X.' },
         y: { type: 'number', required: true, desc: 'Start Y.' },
         x2: { type: 'number', desc: 'End X for a stroke.' },
         y2: { type: 'number', desc: 'End Y for a stroke.' },
         erase: { type: 'bool', default: false, desc: 'Erase alpha instead of painting.' },
     }),
-    returns: '{layer, pixels}',
+    returns: '{layer, pixels, mirrored?}',
     examples: [
         'cairn image.draw.brush --x 20 --y 20 --brush 12 --color "#e8e8ee"',
         'cairn image.draw.brush --x 10 --y 10 --x2 90 --y2 90 --brush 6 --color red',
+        'cairn image.draw.brush --x 16 --y 30 --x2 16 --y2 60 --brush 5 --mirror x',
     ],
     run(ctx, args) {
-        return draw(ctx, args, (data, w, h) => {
-            const radius = Math.max(0.5, args.brush / 2);
-            const points = args.x2 === undefined || args.y2 === undefined
-                ? [[args.x, args.y]]
-                : interpolate(args.x, args.y, args.x2, args.y2, radius);
+        return draw(ctx, args, (a, data, w, h) => {
+            const radius = Math.max(0.5, a.brush / 2);
+            const points = a.x2 === undefined || a.y2 === undefined
+                ? [[a.x, a.y]]
+                : interpolate(a.x, a.y, a.x2, a.y2, radius);
             for (const [px, py] of points) {
-                if (args.erase) imaging.stampEraser(data, w, h, px, py, radius, args.opacity);
-                else imaging.stampDisc(data, w, h, px, py, radius, args.color, args.opacity, args.hardness);
+                if (a.erase) imaging.stampEraser(data, w, h, px, py, radius, a.opacity);
+                else imaging.stampDisc(data, w, h, px, py, radius, a.color, a.opacity, a.hardness);
             }
             return points.length;
         });
@@ -452,8 +491,8 @@ def('image.draw.fill', {
     returns: '{layer, pixels}',
     examples: ['cairn image.draw.fill --x 64 --y 64 --color "#2288ff"'],
     run(ctx, args) {
-        return draw(ctx, args, (data, w, h) => {
-            imaging.floodFill(data, w, h, args.x, args.y, args.color, args.opacity, args.tolerance);
+        return draw(ctx, args, (a, data, w, h) => {
+            imaging.floodFill(data, w, h, a.x, a.y, a.color, a.opacity, a.tolerance);
         });
     },
 });
@@ -485,23 +524,147 @@ def('image.replaceColor', {
     returns: '{layer, pixels}',
     examples: ['cairn image.replaceColor --from "#ff0000" --color "#00ff00"'],
     run(ctx, args) {
-        return draw(ctx, args, (data, w, h) => {
-            const target = args.from.map(v => v * 255);
+        return draw(ctx, args, (a, data, w, h) => {
+            const target = a.from.map(v => v * 255);
             let changed = 0;
             for (let p = 0; p < w * h; ++p) {
                 const o = p * 4;
-                if (Math.abs(data[o] - target[0]) > args.tolerance
-                    || Math.abs(data[o + 1] - target[1]) > args.tolerance
-                    || Math.abs(data[o + 2] - target[2]) > args.tolerance
-                    || Math.abs(data[o + 3] - target[3]) > args.tolerance) continue;
-                data[o] = Math.round(args.color[0] * 255);
-                data[o + 1] = Math.round(args.color[1] * 255);
-                data[o + 2] = Math.round(args.color[2] * 255);
-                data[o + 3] = Math.round(args.color[3] * 255);
+                if (Math.abs(data[o] - target[0]) > a.tolerance
+                    || Math.abs(data[o + 1] - target[1]) > a.tolerance
+                    || Math.abs(data[o + 2] - target[2]) > a.tolerance
+                    || Math.abs(data[o + 3] - target[3]) > a.tolerance) continue;
+                data[o] = Math.round(a.color[0] * 255);
+                data[o + 1] = Math.round(a.color[1] * 255);
+                data[o + 2] = Math.round(a.color[2] * 255);
+                data[o + 3] = Math.round(a.color[3] * 255);
                 changed++;
             }
             return changed;
         });
+    },
+});
+
+def('image.flip', {
+    summary: 'Mirror the document left/right or top/bottom.',
+    args: {
+        axis: { type: 'enum', enum: ['x', 'y', 'both'], default: 'x', desc: 'x = left/right, y = top/bottom.' },
+        layer: { type: 'int', desc: 'Flip only this layer instead of every layer.' },
+    },
+    returns: '{width, height, axis, layers}',
+    examples: [
+        'cairn image.flip --axis x',
+        'cairn image.flip --axis y --layer 2',
+    ],
+    run(ctx, args) {
+        const doc = getDoc(ctx);
+        const targets = args.layer === undefined ? doc.layers : [getLayer(ctx, args.layer)];
+        for (const layer of targets) imaging.flipLayerData(layer.data, doc.width, doc.height, args.axis);
+        return { width: doc.width, height: doc.height, axis: args.axis, layers: targets.length };
+    },
+});
+
+def('image.rotate', {
+    summary: 'Rotate every layer clockwise by a multiple of 90 degrees.',
+    args: {
+        degrees: { type: 'number', required: true, desc: 'Clockwise rotation; must be a multiple of 90 (90/270 swap the canvas width and height).' },
+    },
+    returns: '{width, height, degrees}',
+    examples: ['cairn image.rotate --degrees 90', 'cairn image.rotate --degrees 270'],
+    run(ctx, args) {
+        if (Math.abs(args.degrees % 90) > 1e-9) {
+            throw invalidArg('--degrees must be a multiple of 90', { degrees: args.degrees });
+        }
+        const doc = getDoc(ctx);
+        const rotated = doc.layers.map(layer => imaging.rotateRgba90(layer.data, doc.width, doc.height, args.degrees / 90));
+        doc.layers.forEach((layer, i) => { layer.data = rotated[i].data; });
+        doc.width = rotated[0].width;
+        doc.height = rotated[0].height;
+        return { width: doc.width, height: doc.height, degrees: args.degrees };
+    },
+});
+
+def('image.crop', {
+    summary: 'Crop every layer to a rectangle (clamped to the canvas).',
+    args: {
+        x: { type: 'int', required: true, desc: 'Left edge.' },
+        y: { type: 'int', required: true, desc: 'Top edge.' },
+        width: { type: 'int', required: true, desc: 'Crop width.' },
+        height: { type: 'int', required: true, desc: 'Crop height.' },
+    },
+    returns: '{x, y, width, height}',
+    examples: ['cairn image.crop --x 16 --y 16 --width 32 --height 32'],
+    run(ctx, args) {
+        if (args.width < 1 || args.height < 1) throw invalidArg('crop size must be at least 1x1');
+        const doc = getDoc(ctx);
+        const x = imaging.clamp(args.x, 0, doc.width - 1);
+        const y = imaging.clamp(args.y, 0, doc.height - 1);
+        const width = Math.min(args.width, doc.width - x);
+        const height = Math.min(args.height, doc.height - y);
+        for (const layer of doc.layers) {
+            layer.data = imaging.cropRgba(layer.data, doc.width, doc.height, x, y, width, height);
+        }
+        doc.width = width;
+        doc.height = height;
+        return { x, y, width, height };
+    },
+});
+
+def('image.stamp', {
+    summary: 'Composite an image file or another layer onto a layer at an offset.',
+    args: {
+        file: { type: 'string', desc: 'PNG/BMP file to stamp (project-relative or absolute).' },
+        from: { type: 'int', desc: 'Source layer index inside this document.' },
+        layer: { type: 'int', desc: 'Target layer (default: the top layer).' },
+        x: { type: 'number', default: 0, desc: 'Destination left.' },
+        y: { type: 'number', default: 0, desc: 'Destination top.' },
+        scale: { type: 'number', default: 1, desc: 'Scale the source before stamping (nearest neighbour).' },
+        opacity: { type: 'number', default: 1, desc: 'Alpha multiplier 0-1.' },
+        blend: { type: 'enum', enum: ['over', 'replace'], default: 'over', desc: 'Source-over, or replace that also copies alpha.' },
+    },
+    returns: '{layer, painted, source, width, height}',
+    examples: [
+        'cairn image.stamp --file Assets/Sprites/coin.png --x 64 --y 32',
+        'cairn image.stamp --from 0 --x 16 --y 16 --scale 0.5 --opacity 0.6',
+        'cairn image.stamp --file Assets/Sprites/tile.png --x 0 --y 0 --blend replace',
+    ],
+    run(ctx, args) {
+        if (!args.file && args.from === undefined) throw invalidArg('image.stamp needs --file or --from');
+        if (args.file && args.from !== undefined) throw invalidArg('give either --file or --from, not both');
+        if (args.scale <= 0) throw invalidArg('--scale must be greater than 0', { scale: args.scale });
+        const doc = getDoc(ctx);
+        let src;
+        if (args.file) {
+            const file = ctx.session.resolveAssetPath(args.file);
+            let image;
+            try {
+                image = imaging.loadImage(file);
+            } catch (err) {
+                throw invalidArg(`cannot read image: ${err.message}`, { file });
+            }
+            src = { width: image.width, height: image.height, data: image.layers[0].data };
+        } else {
+            const layer = getLayer(ctx, args.from);
+            src = { width: doc.width, height: doc.height, data: Buffer.from(layer.data) };
+        }
+        if (args.scale !== 1) {
+            const width = Math.max(1, Math.round(src.width * args.scale));
+            const height = Math.max(1, Math.round(src.height * args.scale));
+            src = { width, height, data: imaging.resizeRgba(src.data, src.width, src.height, width, height) };
+        }
+        const target = activeLayer(ctx, args);
+        const painted = imaging.stampImage(target.data, doc.width, doc.height, src, {
+            x: args.x,
+            y: args.y,
+            alpha: args.opacity,
+            blend: args.blend,
+        });
+        return {
+            layer: doc.layers.indexOf(target),
+            painted,
+            source: { width: src.width, height: src.height },
+            width: doc.width,
+            height: doc.height,
+        };
     },
 });
 

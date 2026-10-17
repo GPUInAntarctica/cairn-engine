@@ -528,6 +528,148 @@ function regularPolygonPoints(options) {
     return pts;
 }
 
+// ---------------------------------------------------------------- transforms
+// Image-level operations behind `image.flip/rotate/crop` and the `--mirror`
+// draw option. `axis` strings accept x, y, both or xy.
+
+function flipLayerData(data, w, h, axis) {
+    const flipX = axis === 'x' || axis === 'both' || axis === 'xy';
+    const flipY = axis === 'y' || axis === 'both' || axis === 'xy';
+    if (flipX) {
+        for (let y = 0; y < h; ++y) {
+            for (let x = 0; x < (w >> 1); ++x) {
+                const a = (y * w + x) * 4, b = (y * w + (w - 1 - x)) * 4;
+                for (let c = 0; c < 4; ++c) { const t = data[a + c]; data[a + c] = data[b + c]; data[b + c] = t; }
+            }
+        }
+    }
+    if (flipY) {
+        for (let y = 0; y < (h >> 1); ++y) {
+            for (let x = 0; x < w; ++x) {
+                const a = (y * w + x) * 4, b = ((h - 1 - y) * w + x) * 4;
+                for (let c = 0; c < 4; ++c) { const t = data[a + c]; data[a + c] = data[b + c]; data[b + c] = t; }
+            }
+        }
+    }
+    return data;
+}
+
+// Rotates a buffer by `turns * 90` degrees clockwise. Returns the new size and
+// a fresh buffer (0 and 180 keep the dimensions, 90 and 270 swap them).
+function rotateRgba90(data, w, h, turns) {
+    const t = ((Math.round(turns) % 4) + 4) % 4;
+    if (t === 0) return { width: w, height: h, data: Buffer.from(data) };
+    if (t === 2) {
+        const out = Buffer.alloc(w * h * 4);
+        for (let y = 0; y < h; ++y) {
+            for (let x = 0; x < w; ++x) {
+                const s = (y * w + x) * 4, d = ((h - 1 - y) * w + (w - 1 - x)) * 4;
+                for (let c = 0; c < 4; ++c) out[d + c] = data[s + c];
+            }
+        }
+        return { width: w, height: h, data: out };
+    }
+    const nw = h, nh = w;
+    const out = Buffer.alloc(nw * nh * 4);
+    for (let y = 0; y < h; ++y) {
+        for (let x = 0; x < w; ++x) {
+            const s = (y * w + x) * 4;
+            const dx = t === 1 ? h - 1 - y : y;
+            const dy = t === 1 ? x : w - 1 - x;
+            const d = (dy * nw + dx) * 4;
+            for (let c = 0; c < 4; ++c) out[d + c] = data[s + c];
+        }
+    }
+    return { width: nw, height: nh, data: out };
+}
+
+// Copies a sub-rectangle out of a buffer, padding with transparency where the
+// rectangle reaches past the source.
+function cropRgba(data, w, h, x, y, cw, ch) {
+    const out = Buffer.alloc(cw * ch * 4);
+    for (let j = 0; j < ch; ++j) {
+        const sy = y + j;
+        if (sy < 0 || sy >= h) continue;
+        for (let i = 0; i < cw; ++i) {
+            const sx = x + i;
+            if (sx < 0 || sx >= w) continue;
+            const s = (sy * w + sx) * 4, d = (j * cw + i) * 4;
+            out[d] = data[s]; out[d + 1] = data[s + 1]; out[d + 2] = data[s + 2]; out[d + 3] = data[s + 3];
+        }
+    }
+    return out;
+}
+
+// Composites `src` ({width, height, data}) into `dst` at an offset, either
+// source-over (the default) or as a hard replace that also copies alpha.
+function stampImage(dst, dw, dh, src, options = {}) {
+    const alpha = clamp(options.alpha === undefined ? 1 : options.alpha, 0, 1);
+    const dx = Math.round(options.x === undefined ? 0 : options.x);
+    const dy = Math.round(options.y === undefined ? 0 : options.y);
+    const replace = options.blend === 'replace';
+    let painted = 0;
+    for (let y = 0; y < src.height; ++y) {
+        const ty = dy + y;
+        if (ty < 0 || ty >= dh) continue;
+        for (let x = 0; x < src.width; ++x) {
+            const tx = dx + x;
+            if (tx < 0 || tx >= dw) continue;
+            const s = (y * src.width + x) * 4, d = (ty * dw + tx) * 4;
+            const sa = (src.data[s + 3] / 255) * alpha;
+            if (replace) {
+                dst[d] = src.data[s];
+                dst[d + 1] = src.data[s + 1];
+                dst[d + 2] = src.data[s + 2];
+                dst[d + 3] = Math.round(sa * 255);
+                painted++;
+                continue;
+            }
+            if (sa <= 0) continue;
+            const da = dst[d + 3] / 255;
+            const oa = sa + da * (1 - sa);
+            for (let c = 0; c < 3; ++c) {
+                const sc = (src.data[s + c] / 255) * sa;
+                const dc = (dst[d + c] / 255) * da * (1 - sa);
+                dst[d + c] = Math.round(clamp((sc + dc) / oa, 0, 1) * 255);
+            }
+            dst[d + 3] = Math.round(clamp(oa, 0, 1) * 255);
+            painted++;
+        }
+    }
+    return painted;
+}
+
+// Reflects a draw call's geometry about the canvas centre lines so `--mirror`
+// paints the shape and its reflection in one call. `box` marks commands whose
+// x/y is the top-left corner of a width/height box (a rectangle) rather than a
+// point. Returns a copy with `mirror` cleared.
+function mirrorShapeArgs(args, w, h, box = false) {
+    const out = Object.assign({}, args);
+    const mode = String(args.mirror || 'none');
+    const flipX = mode === 'x' || mode === 'both' || mode === 'xy';
+    const flipY = mode === 'y' || mode === 'both' || mode === 'xy';
+    if (flipX) {
+        const f = v => w - v;
+        for (const k of ['x', 'x1', 'x2', 'cx']) if (out[k] !== undefined) out[k] = f(out[k]);
+        if (box && args.x !== undefined && args.width !== undefined) out.x = f(args.x + args.width);
+        if (out.points !== undefined) {
+            const pts = parsePoints(out.points);
+            if (pts) out.points = pts.map(p => [f(p[0]), p[1]]);
+        }
+    }
+    if (flipY) {
+        const f = v => h - v;
+        for (const k of ['y', 'y1', 'y2', 'cy']) if (out[k] !== undefined) out[k] = f(out[k]);
+        if (box && args.y !== undefined && args.height !== undefined) out.y = f(args.y + args.height);
+        if (out.points !== undefined) {
+            const pts = parsePoints(out.points);
+            if (pts) out.points = pts.map(p => [p[0], f(p[1])]);
+        }
+    }
+    out.mirror = 'none';
+    return out;
+}
+
 // --------------------------------------------------------------- normal maps
 // Height field -> tangent-space normal map (Sobel), as used by the editor.
 function normalMapFromHeight(rgba, w, h, options = {}) {
@@ -681,6 +823,11 @@ function previewText(doc, options = {}) {
         ? (format === 'blocks' ? ' \u2591\u2592\u2593\u2588' : ' .:-=+*#%@')
         : String(options.chars);
     const empty = options.empty === undefined || options.empty === null ? ' ' : String(options.empty).charAt(0);
+    // A hex cell is 7 characters wide, so an empty cell has to be padded to
+    // match or the grid stops lining up wherever there is transparency.
+    const cellWidth = format === 'hex' ? 7 : 1;
+    const emptyCell = empty.repeat(cellWidth);
+    const sep = format === 'hex' && cols > 1 ? ' ' : '';
     const lines = [];
     for (let ry = 0; ry < rows; ++ry) {
         const y1 = Math.min(h, (ry + 1) * scale);
@@ -700,10 +847,10 @@ function previewText(doc, options = {}) {
                 }
             }
             const alpha = cells ? sa / cells : 0;
-            if (alpha <= 0.002) { line += empty; continue; }
+            if (alpha <= 0.002) { line += emptyCell + (rx < cols - 1 ? sep : ''); continue; }
             const r = sr / sa, g = sg / sa, b = sb / sa;
             if (format === 'hex') {
-                line += rgbaToHex([r / 255, g / 255, b / 255]) + (rx < cols - 1 ? ' ' : '');
+                line += rgbaToHex([r / 255, g / 255, b / 255]) + (rx < cols - 1 ? sep : '');
             } else {
                 const luma = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
                 const idx = clamp(Math.round(luma * (ramp.length - 1)), 0, ramp.length - 1);
@@ -952,6 +1099,11 @@ module.exports = {
     strokePolygonRing,
     offsetPolygon,
     regularPolygonPoints,
+    flipLayerData,
+    rotateRgba90,
+    cropRgba,
+    stampImage,
+    mirrorShapeArgs,
     normalMapFromHeight,
     analyze,
     previewText,
