@@ -289,7 +289,7 @@ the sheet size followed by one `image.stamp` per cell.
 
 | Command | Arguments | Description |
 | --- | --- | --- |
-| `component.add` | `--id` (int, required)<br>`--type` (enum, required, one of Camera \| Light \| MeshRenderer \| SpriteRenderer \| TextRenderer \| RigidBody \| BoxCollider \| SphereCollider \| Collider2D \| CapsuleCollider \| CharacterController \| DistanceJoint \| Script)<br>`--props` (json) | Add a component to an entity (properties get their defaults). |
+| `component.add` | `--id` (int, required)<br>`--type` (enum, required, one of Camera \| Light \| MeshRenderer \| SpriteRenderer \| TextRenderer \| RigidBody \| BoxCollider \| SphereCollider \| Collider2D \| CapsuleCollider \| CharacterController \| DistanceJoint \| HingeJoint \| FixedJoint \| Script)<br>`--props` (json) | Add a component to an entity (properties get their defaults). |
 | `component.enable` | `--id` (int, required)<br>`--type` (string, required)<br>`--enabled` (bool, default true) | Enable or disable a component. |
 | `component.get` | `--id` (int, required)<br>`--type` (string, required) | Read one component with all its property values and editor metadata. |
 | `component.getProp` | `--id` (int, required)<br>`--type` (string, required)<br>`--prop` (string, required) | Read a single component property value. |

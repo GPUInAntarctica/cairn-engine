@@ -99,6 +99,22 @@ cc->SimpleMove(Vec3(x, 0, z));// per-second velocity + gravity (ignores input y)
 
 Joints: `DistanceJoint` keeps two bodies a fixed distance apart (or a spring/damper with `spring`/`damping`). Set `connectedGuid` to the target GameObject's GUID, or leave it empty to anchor to a world point; `breakForce` snaps the joint.
 
+`HingeJoint` pins one body to another (or to the world) and leaves rotation about `axis` free: `anchor`/`connectedAnchor` are the pinned points in each body's local space, `axis` is the hinge line in this body's local space. Optional `useLimits` + `limitsMin`/`limitsMax` (degrees) stop the swing, and `useMotor` + `motorVelocity` (degrees/second) + `motorForce` drive it - a force of 0 is a disabled motor. The angle is measured from the pose the joint captures on its first step, from the connected body's reference to this body's, so with a `connectedGuid` a positive speed turns *the connected body* and anchored to the world it turns *this* body.
+
+`FixedJoint` welds two bodies into one rigid cluster by locking the relative pose it captures on its first step. It has no anchor - place the bodies where you want them, then add the joint; afterwards moving one drags the other. Both joints break on `breakForce` (0 = unbreakable), the same field and formula as `DistanceJoint`.
+
+```cpp
+auto* hinge = gameObject().AddComponent<HingeJoint>();
+hinge->anchor = Vec3(-1, 0, 0);          // this body's edge
+hinge->connectedAnchor = Vec3(0, 0, 0);  // empty connectedGuid -> world point
+hinge->axis = Vec3(0, 1, 0);             // free spin line
+hinge->useLimits = true;
+hinge->limitsMin = -90.0f;
+hinge->limitsMax = 0.0f;                 // a door that only opens one way
+```
+
+Two details make a joint feel solid rather than springy: the pinned points are held by an exact effective-mass solve each step (not a per-axis approximation), and the motor/limit turn the body *about the pin* rather than about its centre of mass, so the pin never visibly slips. Joined rigidbodies should not sit under a rotated parent - like the integrator, the solver reads `Transform::rotation` as a world rotation.
+
 Sleeping: rigidbodies that stay slow for `sleepDelay` seconds stop integrating until disturbed (`AddForce`/`AddImpulse`/`AddTorque`, a written `velocity`, or a moving body touching them). Tune with `allowSleep`, `sleepThreshold`, `sleepDelay`.
 
 Profiling: wrap hot code with a named sample and read the rolling window from the CLI (`engine.profile`).

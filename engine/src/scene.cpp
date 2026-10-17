@@ -136,6 +136,8 @@ bool GameObject::AddComponentByName(const std::string& typeName) {
     else if (typeName == "CapsuleCollider") owned.reset(new (std::nothrow) CapsuleCollider());
     else if (typeName == "CharacterController") owned.reset(new (std::nothrow) CharacterController());
     else if (typeName == "DistanceJoint") owned.reset(new (std::nothrow) DistanceJoint());
+    else if (typeName == "HingeJoint") owned.reset(new (std::nothrow) HingeJoint());
+    else if (typeName == "FixedJoint") owned.reset(new (std::nothrow) FixedJoint());
     else if (typeName == "Script") owned.reset(new (std::nothrow) ScriptComponent());
     else if (typeName == "PrefabInstance") owned.reset(new (std::nothrow) PrefabInstance());
     if (!owned) return false;

@@ -332,6 +332,94 @@ check(sleeperStep && Math.abs(sleeperStep.result.transform.position[1] - 1.0) < 
     'physics.step settles a falling body on the floor', sleeperStep && sleeperStep.result && sleeperStep.result.transform);
 
 
+// ---------------------------------------------------------------------------
+console.log('cli: hinge + fixed joints');
+// ---------------------------------------------------------------------------
+// A hand-written scene pins the whole path: the joint components must come back
+// from their serialized properties, the weld must resolve its connected body by
+// GUID, and the step must then actually constrain the bodies.
+const jointScene = path.join(projectDir, 'Assets', 'Scenes', 'Joints.cscene');
+fs.writeFileSync(jointScene, JSON.stringify({
+    format: 'cairn-scene', version: 1, name: 'Joints',
+    settings: { gravity: [0, -9.81, 0] },
+    entities: [
+        { id: 1, name: 'Deck', guid: 'aaaa1111aaaa1111aaaa1111aaaa1111', active: true, components: [
+            { type: 'Transform', position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            { type: 'SphereCollider', properties: { radius: 0.1 } },
+            { type: 'RigidBody', properties: { isKinematic: true, useGravity: false } },
+            { type: 'FixedJoint', properties: { connectedGuid: 'bbbb2222bbbb2222bbbb2222bbbb2222' } },
+        ] },
+        { id: 2, name: 'Crate', guid: 'bbbb2222bbbb2222bbbb2222bbbb2222', active: true, components: [
+            { type: 'Transform', position: [2, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            { type: 'SphereCollider', properties: { radius: 0.1 } },
+            { type: 'RigidBody', properties: { useGravity: true } },
+        ] },
+        { id: 3, name: 'Door', guid: 'cccc3333cccc3333cccc3333cccc3333', active: true, components: [
+            { type: 'Transform', position: [1, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            { type: 'SphereCollider', properties: { radius: 0.1 } },
+            { type: 'RigidBody', properties: { useGravity: true } },
+            { type: 'HingeJoint', properties: { anchor: [-1, 0, 0], connectedAnchor: [0, 0, 0],
+                axis: [0, 0, 1], useLimits: true, limitsMin: -45, limitsMax: 45 } },
+        ] },
+        { id: 4, name: 'Wheel', guid: 'dddd4444dddd4444dddd4444dddd4444', active: true, components: [
+            { type: 'Transform', position: [5, 1, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+            { type: 'SphereCollider', properties: { radius: 0.1 } },
+            { type: 'RigidBody', properties: { useGravity: false } },
+            { type: 'HingeJoint', properties: { anchor: [-1, 0, 0], connectedAnchor: [4, 1, 0],
+                axis: [0, 1, 0], useMotor: true, motorVelocity: 90, motorForce: 50 } },
+        ] },
+    ],
+}));
+const jointBatch = path.join(scratch, 'joints.jsonl');
+fs.writeFileSync(jointBatch, [
+    { command: 'scene.load', args: { file: 'Assets/Scenes/Joints.cscene' } },
+    { command: 'component.getProp', args: { id: 1, type: 'FixedJoint', prop: 'connectedGuid' }, id: 'weld' },
+    { command: 'component.schema', args: { type: 'HingeJoint', includeTransform: false }, id: 'schema' },
+    { command: 'scene.tree', args: { component: 'HingeJoint' }, id: 'tree' },
+    { command: 'physics.step', args: { dt: 0.016667, steps: 61 }, id: 'sim' },
+    { command: 'entity.get', args: { id: 4 }, id: 'wheel' },
+    { command: 'physics.step', args: { dt: 0.016667, steps: 30 }, id: 'sim2' },
+    { command: 'entity.get', args: { id: 2 }, id: 'crate' },
+    { command: 'entity.get', args: { id: 3 }, id: 'door' },
+].map(s => JSON.stringify(s)).join('\n'));
+const jointRun = spawnSync(process.execPath, [cli, '--project', projectDir, 'exec.run', '--file', jointBatch],
+    { encoding: 'utf8', cwd: scratch, env: batchEnv() });
+const jointLines = jointRun.stdout.trim().split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+const jointSteps = jointLines.filter(l => typeof l.index === 'number');
+check(jointSteps.length === 9 && jointSteps.every(l => l.ok === true), 'joint batch is clean',
+    jointRun.stdout + jointRun.stderr);
+const weldStep = jointLines.find(l => l.id === 'weld');
+check(weldStep && weldStep.result.value === 'bbbb2222bbbb2222bbbb2222bbbb2222',
+    'FixedJoint.connectedGuid round-trips through the scene file', weldStep && weldStep.result);
+const schemaStep = jointLines.find(l => l.id === 'schema');
+const hingeProps = schemaStep && schemaStep.result.components[0] ? schemaStep.result.components[0].props : [];
+check(['connectedGuid', 'anchor', 'axis', 'useLimits', 'limitsMin', 'useMotor', 'motorForce']
+    .every(p => hingeProps.includes(p)),
+    'component.schema lists the hinge properties', hingeProps);
+const treeJoints = jointLines.find(l => l.id === 'tree');
+check(treeJoints && treeJoints.result.count === 2, 'scene.tree finds both hinged entities',
+    treeJoints && treeJoints.result);
+const simJoints = jointLines.find(l => l.id === 'sim');
+check(simJoints && simJoints.result.steps === 61, 'physics.step runs with joints attached',
+    simJoints && simJoints.result);
+const wheelStep = jointLines.find(l => l.id === 'wheel');
+// 61 steps of 90 degrees a second is a quarter turn: the motor reaches its
+// target rate on its first step, and the pin keeps the arm exactly one unit
+// from the pivot the whole time.
+check(wheelStep && Math.abs(wheelStep.result.transform.rotation[1] - 90) < 3,
+    'a hinge motor turns its body at the target rate', wheelStep && wheelStep.result.transform);
+check(wheelStep && Math.abs(wheelStep.result.transform.position[0] - 4) < 0.05
+    && Math.abs(wheelStep.result.transform.position[2] + 1) < 0.05,
+    'the motorised arm stays on its circle', wheelStep && wheelStep.result.transform);
+const crateStep = jointLines.find(l => l.id === 'crate');
+check(crateStep && Math.abs(crateStep.result.transform.position[0] - 2) < 0.02
+    && Math.abs(crateStep.result.transform.position[1]) < 0.02,
+    'a weld holds a falling body against its kinematic partner', crateStep && crateStep.result.transform);
+const doorStep = jointLines.find(l => l.id === 'door');
+check(doorStep && Math.abs(doorStep.result.transform.position[0] - Math.SQRT1_2) < 0.02
+    && Math.abs(doorStep.result.transform.position[1] + Math.SQRT1_2) < 0.02,
+    'a hinge limit stops the swinging door', doorStep && doorStep.result.transform);
+
 const build = expectOk(['--project', projectDir, 'script.build']);
 check(build && build.ok === true && build.output.endsWith('.so'),
     'script.build compiles the template scripts', build && build.diagnostics);

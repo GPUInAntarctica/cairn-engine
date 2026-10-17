@@ -62,6 +62,8 @@ class Collider2D;
 class CapsuleCollider;
 class CharacterController;
 class DistanceJoint;
+class HingeJoint;
+class FixedJoint;
 class ScriptComponent;
 class PrefabInstance;
 struct ScriptMeta;
@@ -116,7 +118,9 @@ enum class ComponentTypeId : int {
     // Added in 0.1.6. Appended so existing numeric values stay stable.
     CapsuleCollider, CharacterController,
     // Added in 0.1.7.
-    DistanceJoint, Other = 99,
+    DistanceJoint,
+    // Added in 0.1.16.
+    HingeJoint, FixedJoint, Other = 99,
 };
 
 template <typename T>
@@ -142,6 +146,8 @@ CAIRN_COMPONENT_TYPE(PrefabInstance, PrefabInstance)
 CAIRN_COMPONENT_TYPE(CapsuleCollider, CapsuleCollider)
 CAIRN_COMPONENT_TYPE(CharacterController, CharacterController)
 CAIRN_COMPONENT_TYPE(DistanceJoint, DistanceJoint)
+CAIRN_COMPONENT_TYPE(HingeJoint, HingeJoint)
+CAIRN_COMPONENT_TYPE(FixedJoint, FixedJoint)
 
 // ---------------------------------------------------------------------------
 // Component - base class for all behaviour. Gameplay scripts subclass this.
@@ -538,6 +544,69 @@ public:
     ComponentTypeId TypeId() const override { return ComponentTypeId::DistanceJoint; }
 
     float m_captured = 0.0f;        // engine-internal: cached 0-distance target
+};
+
+// ---------------------------------------------------------------------------
+// HingeJoint - allows rotation about a single axis (a door, a pendulum, a
+// wheel). The anchor point of this body is pinned to the anchor point of the
+// connected body and the two hinge axes are kept parallel, which leaves exactly
+// one degree of freedom: rotation about `axis`. With `useLimits` the hinge
+// angle (measured from the pose the joint first saw) is clamped to
+// [limitsMin, limitsMax] degrees; with `useMotor` the joint drives itself toward
+// `motorVelocity` degrees per second, using at most `motorForce`.
+// `connectedGuid` is the target GameObject's stable GUID; an empty GUID anchors
+// to a fixed world point. At least one of the two bodies needs a RigidBody; a
+// body without one acts as a static anchor.
+// ---------------------------------------------------------------------------
+class HingeJoint : public Component {
+public:
+    std::string connectedGuid;      // target GameObject GUID ("" = fixed world point)
+    Vec3 anchor{0, 0, 0};           // local anchor on this body (a point on the axis)
+    Vec3 connectedAnchor{0, 0, 0};  // local anchor on the target (world point if unconnected)
+    Vec3 axis{1, 0, 0};             // local hinge axis on this body
+    bool useLimits = false;
+    float limitsMin = -45.0f;       // degrees, relative to the captured pose
+    float limitsMax = 45.0f;        // degrees
+    bool useMotor = false;
+    float motorVelocity = 0.0f;     // degrees per second
+    float motorForce = 0.0f;        // torque cap; 0 disables the motor (as in Unity)
+    float breakForce = 0.0f;        // 0 = unbreakable; otherwise disables the joint above this force
+
+    const char* TypeName() const override { return "HingeJoint"; }
+    ComponentTypeId TypeId() const override { return ComponentTypeId::HingeJoint; }
+
+    // Engine-internal runtime state (captured on the first step, never
+    // serialized): the matching hinge axis and angle reference on the target,
+    // and the captured rest angle the limits are measured from.
+    bool m_captured = false;
+    Vec3 m_axisB{1, 0, 0};
+    Vec3 m_refA{0, 0, 1};
+    Vec3 m_refB{0, 0, 1};
+    float m_restAngle = 0.0f;
+};
+
+// ---------------------------------------------------------------------------
+// FixedJoint - welds two bodies into one rigid cluster. The relative position
+// and rotation the joint first sees are locked, so the pair then translates and
+// spins as a single body (corrections are shared by mass and inertia) until
+// `breakForce` snaps it. `connectedGuid` is the target GameObject's stable GUID;
+// an empty GUID anchors this body rigidly to a fixed world pose. At least one of
+// the two bodies needs a RigidBody; a body without one is a static anchor.
+// ---------------------------------------------------------------------------
+class FixedJoint : public Component {
+public:
+    std::string connectedGuid;      // target GameObject GUID ("" = fixed world pose)
+    float breakForce = 0.0f;        // 0 = unbreakable; otherwise disables the joint above this force
+
+    const char* TypeName() const override { return "FixedJoint"; }
+    ComponentTypeId TypeId() const override { return ComponentTypeId::FixedJoint; }
+
+    // Engine-internal: three local point pairs (in each body's own frame) that
+    // coincide at capture. Three non-collinear points lock all six degrees of
+    // freedom, so one shared point-constraint solver covers the whole weld.
+    bool m_captured = false;
+    Vec3 m_localA[3] = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)};
+    Vec3 m_localB[3] = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)};
 };
 
 // ---------------------------------------------------------------------------

@@ -84,6 +84,8 @@ export const dict = {
     'comp.capsuleCollider': '胶囊碰撞体',
     'comp.characterController': '角色控制器',
     'comp.distanceJoint': '距离关节',
+    'comp.hingeJoint': '铰链关节',
+    'comp.fixedJoint': '焊接关节',
     'comp.script': '脚本',
     'comp.none': '未选中实体。',
     'comp.script.noClass': '构建脚本 (Ctrl+B) 后可加载玩法类。',

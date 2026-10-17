@@ -33,6 +33,8 @@ const COMP_TITLE = {
     CapsuleCollider: 'comp.capsuleCollider',
     CharacterController: 'comp.characterController',
     DistanceJoint: 'comp.distanceJoint',
+    HingeJoint: 'comp.hingeJoint',
+    FixedJoint: 'comp.fixedJoint',
     Script: 'comp.script',
 };
 
@@ -261,7 +263,8 @@ export class Inspector {
         import('./contextmenu.js').then(({ showContextMenu }) => {
             const names = ['Camera', 'Light', 'MeshRenderer', 'SpriteRenderer', 'TextRenderer',
                 'RigidBody', 'BoxCollider', 'SphereCollider', 'Collider2D',
-                'CapsuleCollider', 'CharacterController', 'DistanceJoint', 'Script'];
+                'CapsuleCollider', 'CharacterController', 'DistanceJoint',
+                'HingeJoint', 'FixedJoint', 'Script'];
             showContextMenu(ev.clientX, ev.clientY, names.map(n => ({
                 label: t(COMP_TITLE[n] || 'comp.script'),
                 run: () => {

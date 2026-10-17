@@ -84,6 +84,8 @@ export const dict = {
     'comp.capsuleCollider': 'Capsule Collider',
     'comp.characterController': 'Character Controller',
     'comp.distanceJoint': 'Distance Joint',
+    'comp.hingeJoint': 'Hinge Joint',
+    'comp.fixedJoint': 'Fixed Joint',
     'comp.script': 'Script',
     'comp.none': 'No entity selected.',
     'comp.script.noClass': 'Build scripts (Ctrl+B) to load gameplay classes.',

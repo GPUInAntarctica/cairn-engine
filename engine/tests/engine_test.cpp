@@ -1629,6 +1629,191 @@ static void TestJoints() {
     CHECK(bob->transform().position.y < 1.0f);
 }
 
+// The angle (degrees) an arm that started along +X has swung about the vertical
+// axis, read back from where it points now. Used by the hinge tests.
+static float HingeSwingDegrees(GameObject* go) {
+    Vec3 p = go->transform().position;
+    return std::atan2(-p.z, p.x) * 180.0f / 3.14159265f;
+}
+
+static void TestHingeJoint() {
+    // A pendulum pinned to a world point: the anchor uses up every translation,
+    // the axis point every tilt, and rotation about the axis is left free, so
+    // the body swings around a circle of exactly one arm length.
+    Scene scene;
+    GameObject* bob = scene.CreateEntity("Bob");
+    bob->transform().position = Vec3(0, 1, 0);
+    bob->transform().rotation = Quat::FromAxisAngle(Vec3(0, 0, 1), 0.1745f);  // 10 deg off vertical
+    bob->AddComponent<SphereCollider>()->radius = 0.1f;
+    auto* rb = bob->AddComponent<RigidBody>();
+    rb->drag = 1.0f;
+    auto* hinge = bob->AddComponent<HingeJoint>();
+    hinge->anchor = Vec3(0, -1, 0);  // the pivot is the world origin
+    hinge->connectedAnchor = Vec3(0, 0, 0);
+    hinge->axis = Vec3(0, 0, 1);
+
+    for (int i = 0; i < 600; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    Vec3 p = bob->transform().position;
+    CHECK(NearlyEqual(p.Length(), 1.0f, 0.02f));  // the anchor held
+    CHECK(NearlyEqual(p.z, 0.0f, 1e-3f));         // the axis held: no out-of-plane drift
+    CHECK(NearlyEqual(p.y, -1.0f, 0.05f));        // free to swing: it hung straight down
+
+    // A gravity-loaded door on a horizontal axis: the swing is planar, so the
+    // axis point pair is what keeps it in that plane, and the limit stops it
+    // hanging straight down.
+    Scene swingScene;
+    GameObject* swing = swingScene.CreateEntity("Swing");
+    swing->transform().position = Vec3(1, 0, 0);
+    swing->AddComponent<SphereCollider>()->radius = 0.1f;
+    auto* sb = swing->AddComponent<RigidBody>();  // gravity on
+    auto* sj = swing->AddComponent<HingeJoint>();
+    sj->anchor = Vec3(-1, 0, 0);
+    sj->connectedAnchor = Vec3(0, 0, 0);
+    sj->axis = Vec3(0, 0, 1);
+    sj->useLimits = true;
+    sj->limitsMin = -45.0f;
+    sj->limitsMax = 45.0f;
+    for (int i = 0; i < 120; ++i) PhysicsStep(swingScene, 1.0f / 60.0f);
+    Vec3 sp = swing->transform().position;
+    CHECK(NearlyEqual(sp.x, 0.7071f, 0.01f));  // hanging on the -45 limit
+    CHECK(NearlyEqual(sp.y, -0.7071f, 0.01f));
+    CHECK(NearlyEqual(sp.z, 0.0f, 1e-3f));     // the axis pair kept it in plane
+
+    // The second point pair is what keeps the swing planar: a shove out of that
+    // plane and a spin across the axis are violations it takes out, not motions
+    // a hinge can leave standing.
+    sj->useLimits = false;
+    sb->velocity = Vec3(0, 0, 3);
+    sb->angularVelocity = Vec3(6, 0, 0);
+    for (int i = 0; i < 60; ++i) PhysicsStep(swingScene, 1.0f / 60.0f);
+    Vec3 axisNow = swing->transform().rotation * Vec3(0, 0, 1);
+    CHECK(NearlyEqual(axisNow.z, 1.0f, 1e-3f));                        // axis unmoved
+    CHECK(NearlyEqual(swing->transform().position.z, 0.0f, 1e-2f));   // and swung in plane
+    CHECK(NearlyEqual(swing->transform().position.Length(), 1.0f, 1e-2f));  // still pinned
+
+    // Limits clamp the angle. A door on a vertical hinge has no gravity torque,
+    // so it only moves when pushed - and stops dead at the configured limit. The
+    // hinge angle runs from the pose the joint captures on its first step, so
+    // let the unmoved door settle for that step before pushing it.
+    Scene doorScene;
+    GameObject* door = doorScene.CreateEntity("Door");
+    door->transform().position = Vec3(1, 0, 0);
+    door->AddComponent<SphereCollider>()->radius = 0.1f;
+    auto* db = door->AddComponent<RigidBody>();
+    db->useGravity = false;
+    auto* dj = door->AddComponent<HingeJoint>();
+    dj->anchor = Vec3(-1, 0, 0);
+    dj->connectedAnchor = Vec3(0, 0, 0);
+    dj->axis = Vec3(0, 1, 0);
+    dj->useLimits = true;
+    dj->limitsMin = -30.0f;
+    dj->limitsMax = 45.0f;
+    PhysicsStep(doorScene, 1.0f / 60.0f);  // captures the rest pose at 0 degrees
+    db->velocity = Vec3(0, 0, -3);  // swinging about the pivot at one arm length
+    db->angularVelocity = Vec3(0, 3, 0);
+    for (int i = 0; i < 120; ++i) PhysicsStep(doorScene, 1.0f / 60.0f);
+    CHECK(NearlyEqual(HingeSwingDegrees(door), 45.0f, 2.0f));
+
+    // The same limit holds on the way back.
+    db->velocity = Vec3(0, 0, 3);
+    db->angularVelocity = Vec3(0, -3, 0);
+    for (int i = 0; i < 240; ++i) PhysicsStep(doorScene, 1.0f / 60.0f);
+    CHECK(NearlyEqual(HingeSwingDegrees(door), -30.0f, 2.0f));
+
+    // A limit firing must not break the pin. Turn the door past its stop and take
+    // one single step: the angle lands on the limit and the anchor is still
+    // exactly on its pivot the instant the step returns. (The door has been
+    // resting long enough to sleep, and sleeping ends are frozen, so nudge it.)
+    db->velocity = Vec3(0.01f, 0.0f, 0.0f);
+    door->transform().rotation = Quat::FromAxisAngle(Vec3(0, 1, 0), 1.0f);  // 57 deg
+    door->transform().position = Vec3(std::cos(1.0f), 0.0f, -std::sin(1.0f));
+    PhysicsStep(doorScene, 1.0f / 60.0f);
+    Vec3 pinned = door->transform().WorldMatrix().TransformPoint(dj->anchor);
+    CHECK(pinned.Length() < 1e-4f);
+    CHECK(NearlyEqual(HingeSwingDegrees(door), 45.0f, 1.0f));
+
+    // A motor drives the hinge toward its target rate.
+    Scene wheelScene;
+    GameObject* wheel = wheelScene.CreateEntity("Wheel");
+    wheel->transform().position = Vec3(1, 0, 0);
+    wheel->AddComponent<SphereCollider>()->radius = 0.1f;
+    auto* wb = wheel->AddComponent<RigidBody>();
+    wb->useGravity = false;
+    auto* wj = wheel->AddComponent<HingeJoint>();
+    wj->anchor = Vec3(-1, 0, 0);
+    wj->connectedAnchor = Vec3(0, 0, 0);
+    wj->axis = Vec3(0, 1, 0);
+    wj->useMotor = true;
+    wj->motorVelocity = 90.0f;  // degrees per second
+    wj->motorForce = 50.0f;
+    // The drive acts on the joint, not on the body's centre of mass, so the
+    // wheel is at the target rate on the first step rather than spooling up.
+    for (int i = 0; i < 30; ++i) PhysicsStep(wheelScene, 1.0f / 60.0f);
+    float half = HingeSwingDegrees(wheel);
+    for (int i = 0; i < 30; ++i) PhysicsStep(wheelScene, 1.0f / 60.0f);
+    float full = HingeSwingDegrees(wheel);
+    CHECK(NearlyEqual(half, 45.0f, 2.0f));          // a quarter turn in half a second
+    CHECK(NearlyEqual(full, 90.0f, 3.0f));
+    CHECK(NearlyEqual(full - half, 45.0f, 1.0f));   // still exactly 90 degrees a second
+    CHECK(NearlyEqual(wheel->transform().position.Length(), 1.0f, 1e-3f));  // the pin held
+
+    // breakForce snaps the hinge when the constraint is overloaded.
+    dj->useLimits = false;
+    dj->breakForce = 10.0f;
+    door->transform().position = Vec3(4, 0, 0);
+    db->velocity = Vec3();
+    db->angularVelocity = Vec3();
+    for (int i = 0; i < 4; ++i) PhysicsStep(doorScene, 1.0f / 60.0f);
+    CHECK(!dj->enabled);
+}
+
+// FixedJoint welds two bodies: their relative pose is locked, corrections are
+// shared by mass, and the pair then moves and spins as a single body.
+static void TestFixedJoint() {
+    Scene scene;
+    GameObject* a = scene.CreateEntity("A");
+    a->AddComponent<SphereCollider>()->radius = 0.1f;
+    auto* ra = a->AddComponent<RigidBody>();
+    ra->useGravity = false;
+    GameObject* b = scene.CreateEntity("B");
+    b->transform().position = Vec3(2, 0, 0);
+    b->AddComponent<SphereCollider>()->radius = 0.1f;
+    auto* rb = b->AddComponent<RigidBody>();
+    rb->useGravity = false;
+    auto* weld = a->AddComponent<FixedJoint>();
+    weld->connectedGuid = b->guid();
+
+    // A weld that already matches its captured pose disturbs nothing.
+    for (int i = 0; i < 30; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(NearlyEqual(a->transform().position.x, 0.0f, 1e-3f));
+    CHECK(NearlyEqual(b->transform().position.x, 2.0f, 1e-3f));
+
+    // Pushing one end drags the other along: equal masses share the motion, and
+    // the captured offset survives.
+    ra->velocity = Vec3(2, 0, 0);
+    for (int i = 0; i < 60; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(NearlyEqual(a->transform().position.x, 1.0f, 0.05f));
+    CHECK(NearlyEqual(b->transform().position.x - a->transform().position.x, 2.0f, 0.02f));
+
+    // Spinning one end turns the pair together, relative pose intact.
+    rb->AddTorque(Vec3(0, 30, 0));
+    for (int i = 0; i < 120; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    Quat qa = a->transform().rotation;
+    Quat qb = b->transform().rotation;
+    Vec3 rel = qa.Conjugate() * (b->transform().position - a->transform().position);
+    CHECK(NearlyEqual(rel.x, 2.0f, 0.02f));           // B is still 2 units along A's +X
+    CHECK(std::fabs(qa.w) < 0.999f);                  // ...and the pair really turned
+    CHECK(std::fabs(qb.w) < 0.999f);
+    Vec3 together = (qa.Conjugate() * qb) * Vec3(1, 0, 0);
+    CHECK(NearlyEqual(together.x, 1.0f, 0.01f));      // the two orientations match
+
+    // breakForce releases the weld when it is violently overloaded.
+    weld->breakForce = 20.0f;
+    ra->velocity = Vec3(100, 0, 0);
+    for (int i = 0; i < 3; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(!weld->enabled);
+}
+
 // Rigidbodies parked at rest stop integrating until something wakes them.
 static void TestSleeping() {
     Scene scene;
@@ -1962,6 +2147,8 @@ int main() {
     TestCapsulePhysics();
     TestCharacterController();
     TestJoints();
+    TestHingeJoint();
+    TestFixedJoint();
     TestSleeping();
     TestContinuousCollision();
     TestProfiler();

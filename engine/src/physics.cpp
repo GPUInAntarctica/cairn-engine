@@ -55,6 +55,15 @@ float BodyInvMass(RigidBody* rb) {
     return 1.0f / (rb->mass > 0.0f ? rb->mass : 1.0f);
 }
 
+// Inverse inertia, using the same isotropic approximation the angular
+// integrator assumes (`mass * 0.4`), so a joint impulse and a torque agree on
+// how much a given spin costs.
+float BodyInvInertia(RigidBody* rb) {
+    if (!rb || !rb->enabled || rb->isKinematic || rb->sleeping) return 0.0f;
+    float mass = rb->mass > 0.0f ? rb->mass : 1.0f;
+    return 1.0f / std::max(1e-4f, mass * 0.4f);
+}
+
 struct Contact {
     Vec3 normal;      // points from B toward A
     float penetration = 0;
@@ -408,6 +417,419 @@ void MoveWorld(Transform& t, const Vec3& worldDelta) {
         t.position = inv.TransformPoint(worldPos);
     }
     t.MarkWorldDirty();
+}
+
+// ---------------------------------------------------------------------------
+// Joints.
+//
+// Every joint is built from one primitive: a *point constraint* that drives a
+// world point on one body onto a world point on the other, in position and in
+// velocity. Because those points sit away from the centre of mass, solving one
+// also spins the body - which is what lets a handful of point pairs express
+// rotation as well as translation:
+//
+//   * HingeJoint  two pairs along the hinge axis; rotation about that axis is
+//                 the one motion that leaves both pairs together.
+//   * FixedJoint  three non-collinear pairs; nothing is left free.
+//
+// Bodies are point masses with the isotropic inertia the angular integrator
+// assumes (see BodyInvInertia), and orientations are read from
+// `Transform::rotation` as if it were world space - the same simplification the
+// integrator makes, so a joined rigidbody should not sit under a rotated
+// parent. A joint with no connected body anchors to a fixed world pose.
+// ---------------------------------------------------------------------------
+constexpr float kJointArmScale = 1.0f;  // lever arm of an angular point pair
+constexpr int kJointIterations = 6;
+constexpr int kJointMaxPoints = 3;
+
+// One end of a joint. A null transform marks a fixed world pose: it never
+// moves, so every correction simply leaves it where it is.
+struct JointEnd {
+    RigidBody* rb = nullptr;
+    Transform* tf = nullptr;
+    Vec3 center;   // world position of the body origin
+    Quat rot;      // orientation, treated as world space (see above)
+    float invM = 0.0f;
+    float invI = 0.0f;
+};
+
+JointEnd MakeJointEnd(GameObject* go) {
+    JointEnd e;
+    if (!go) return e;
+    e.tf = &go->transform();
+    RigidBody* rb = go->GetComponent<RigidBody>();
+    if (rb && (!rb->enabled || rb->isKinematic)) rb = nullptr;
+    e.rb = rb;
+    e.invM = BodyInvMass(rb);
+    e.invI = BodyInvInertia(rb);
+    e.center = e.tf->WorldMatrix().GetTranslation();
+    e.rot = e.tf->rotation;
+    return e;
+}
+
+// A body-less end pinned to the origin, so its local offsets are world points.
+JointEnd MakeFrozenEnd() {
+    return JointEnd();
+}
+
+void RefreshJointEnd(JointEnd& e) {
+    if (!e.tf) return;
+    e.center = e.tf->WorldMatrix().GetTranslation();
+    e.rot = e.tf->rotation;
+}
+
+// World position of a local offset. A frozen end stores world offsets.
+Vec3 JointPoint(const JointEnd& e, const Vec3& local) {
+    if (e.tf) return e.tf->WorldMatrix().TransformPoint(local);
+    return e.center + local;
+}
+
+// World direction of a local direction (unit length; rotation preserves the
+// perpendicularity the hinge relies on).
+Vec3 JointDirection(const JointEnd& e, const Vec3& local) {
+    return (e.rot * local).Normalized();
+}
+
+// World point -> local offset, so a captured world point can be replayed
+// through that body's transform on later steps.
+Vec3 JointLocal(const JointEnd& e, const Vec3& world) {
+    if (e.tf) return e.tf->WorldMatrix().Inverted().TransformPoint(world);
+    return world - e.center;
+}
+
+Vec3 PointVelocity(const JointEnd& e, const Vec3& p) {
+    if (!e.rb) return Vec3();
+    return e.rb->velocity + Vec3::Cross(e.rb->angularVelocity, p - e.center);
+}
+
+void ApplyPointImpulse(const JointEnd& e, const Vec3& p, const Vec3& imp) {
+    if (!e.rb) return;
+    e.rb->velocity += imp * e.invM;
+    e.rb->angularVelocity += Vec3::Cross(p - e.center, imp) * e.invI;
+}
+
+// Changes an end's spin while keeping its pinned point still: a body that gains
+// angular velocity about a point must also gain the linear velocity that turns
+// it about that point instead of about its own centre. Both hinge point pairs
+// stay satisfied, which is exactly the joint's free rotation.
+void SpinAboutPoint(const JointEnd& e, const Vec3& p, const Vec3& spin) {
+    if (!e.rb) return;
+    e.rb->angularVelocity += spin;
+    e.rb->velocity -= Vec3::Cross(spin, p - e.center);
+}
+
+// Turns a body about its centre of mass, the way the angular integrator does.
+void RotateTransform(Transform& t, const Vec3& axis, float angle) {
+    t.rotation = (Quat::FromAxisAngle(axis, angle) * t.rotation).Normalized();
+    t.MarkWorldDirty();
+}
+
+// Turns a body about a world pivot instead: the spin is the same, but the
+// origin is moved so `pivot` stays put. Rotating a hinge about its anchor this
+// way leaves the pin satisfied while the free angle moves.
+void RotateAboutPivot(Transform& t, const Vec3& pivot, const Vec3& axis, float angle) {
+    const Vec3 before = t.WorldMatrix().GetTranslation();
+    Quat turn = Quat::FromAxisAngle(axis, angle);
+    t.rotation = (turn * t.rotation).Normalized();
+    t.MarkWorldDirty();
+    const Vec3 after = t.WorldMatrix().GetTranslation();
+    MoveWorld(t, pivot + turn * (before - pivot) - after);
+}
+
+// A joint impulse used as a position correction: the linear part moves the
+// body, the angular part rotates it about its centre of mass.
+void ApplyPointCorrection(const JointEnd& e, const Vec3& p, const Vec3& corr) {
+    if (!e.rb || !e.tf) return;
+    MoveWorld(*e.tf, corr * e.invM);
+    Vec3 spin = Vec3::Cross(p - e.center, corr) * e.invI;
+    float angle = spin.Length();
+    if (angle > 1e-9f) RotateTransform(*e.tf, spin / angle, angle);
+}
+
+// The world points of a joint's constraint set, rebuilt from the live
+// transforms so every iteration sees the corrections the previous one made.
+struct JointPoints {
+    Vec3 a[kJointMaxPoints];
+    Vec3 b[kJointMaxPoints];
+    int count = 0;
+};
+
+// Inverse of the effective point mass matrix a pair presents,
+//   M = (invM_A + invM_B) I - invI_A rA rA^T - invI_B rB rB^T,
+// applied to `rhs`. Isotropic inertia makes the rotational response a rank-one
+// outer product around each body's centre of mass, so M is a diagonal minus two
+// rank-one terms; Cramer's rule on that small symmetric system is exact.
+// False if M is somehow singular (impossible while an end has mass).
+bool SolvePointMass(float d, float a, const Vec3& rA, float b, const Vec3& rB,
+                    const Vec3& rhs, Vec3* out) {
+    const float ra[3] = {rA.x, rA.y, rA.z};
+    const float rb[3] = {rB.x, rB.y, rB.z};
+    const float r[3] = {rhs.x, rhs.y, rhs.z};
+    float m[3][3];
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            m[i][j] = (i == j ? d : 0.0f) - a * ra[i] * ra[j] - b * rb[i] * rb[j];
+        }
+    }
+    auto det3 = [](const float q[3][3]) {
+        return q[0][0] * (q[1][1] * q[2][2] - q[1][2] * q[2][1])
+             - q[0][1] * (q[1][0] * q[2][2] - q[1][2] * q[2][0])
+             + q[0][2] * (q[1][0] * q[2][1] - q[1][1] * q[2][0]);
+    };
+    float det = det3(m);
+    if (!(std::fabs(det) > 1e-12f)) return false;
+    float x[3];
+    for (int col = 0; col < 3; ++col) {
+        float c[3][3];
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) c[i][j] = (j == col) ? r[i] : m[i][j];
+        }
+        x[col] = det3(c) / det;
+    }
+    *out = Vec3(x[0], x[1], x[2]);
+    return true;
+}
+
+// Brings one point pair together in one shot: the whole three-component
+// position error, then the whole relative velocity, each against the pair's
+// effective mass. Both ends share one impulse, so what moves one moves the
+// other the opposite way and the pair ends up exactly coincident and still.
+void SolvePointPair(const JointEnd& A, const Vec3& pA, const JointEnd& B, const Vec3& pB) {
+    Vec3 rA = pA - A.center;
+    Vec3 rB = pB - B.center;
+    float d = A.invM + B.invM + A.invI * rA.LengthSq() + B.invI * rB.LengthSq();
+    Vec3 j;
+    if (!SolvePointMass(d, A.invI, rA, B.invI, rB, pB - pA, &j)) return;
+    ApplyPointCorrection(A, pA, j);
+    ApplyPointCorrection(B, pB, -j);
+    Vec3 rel = PointVelocity(B, pB) - PointVelocity(A, pA);
+    if (!SolvePointMass(d, A.invI, rA, B.invI, rB, rel, &j)) return;
+    ApplyPointImpulse(A, pA, j);
+    ApplyPointImpulse(B, pB, -j);
+}
+
+// How hard a joint's points are being pulled apart this step; the basis for
+// waking sleeping ends and for `breakForce`.
+struct JointLoad {
+    float error = 0.0f;     // largest positional error (world units)
+    float relSpeed = 0.0f;  // largest relative point speed (world units/second)
+};
+
+JointLoad MeasureJoint(const JointEnd& A, const JointEnd& B, const JointPoints& p) {
+    JointLoad l;
+    for (int i = 0; i < p.count; ++i) {
+        l.error = std::max(l.error, (p.a[i] - p.b[i]).Length());
+        l.relSpeed = std::max(l.relSpeed, (PointVelocity(A, p.a[i]) - PointVelocity(B, p.b[i])).Length());
+    }
+    return l;
+}
+
+// A joint that is off its pose (or carrying speed) is a disturbance: wake both
+// ends so the constraint can actually be enforced, and reload their masses.
+void WakeJointEnds(JointEnd* A, JointEnd* B, GameObject* goA, GameObject* goB, const JointLoad& load) {
+    if (load.error <= 1e-4f && load.relSpeed <= 1e-4f) return;
+    if (A->rb && A->rb->sleeping) { WakeBody(A->rb); *A = MakeJointEnd(goA); }
+    if (B->rb && B->rb->sleeping) { WakeBody(B->rb); *B = MakeJointEnd(goB); }
+}
+
+// `breakForce` reads the same way DistanceJoint does: the corrective impulse
+// the step needed, divided by the step.
+bool JointBreaks(float breakForce, const JointLoad& load, float invSum, float dt) {
+    if (breakForce <= 0.0f || invSum <= 1e-6f) return false;
+    float step = dt > 0.0f ? dt : 1.0f;
+    return (load.error + load.relSpeed * step) / (invSum * step) > breakForce;
+}
+
+// Any unit direction perpendicular to `v`, used as a hinge's angle reference.
+Vec3 PerpendicularTo(const Vec3& v) {
+    return std::fabs(v.x) < 0.9f ? Vec3::Cross(v, Vec3(1, 0, 0)).Normalized()
+                                 : Vec3::Cross(v, Vec3(0, 1, 0)).Normalized();
+}
+
+// The two point pairs of a hinge: the anchor, and a point one arm length up the
+// hinge axis. Rotation about the axis leaves both pairs together.
+JointPoints HingePoints(const JointEnd& A, const JointEnd& B, const Vec3& localAnchor,
+                        const Vec3& anchorB, const Vec3& localAxis, const Vec3& axisB) {
+    JointPoints p;
+    p.count = 2;
+    p.a[0] = JointPoint(A, localAnchor);
+    p.b[0] = JointPoint(B, anchorB);
+    p.a[1] = p.a[0] + JointDirection(A, localAxis) * kJointArmScale;
+    p.b[1] = p.b[0] + JointDirection(B, axisB) * kJointArmScale;
+    return p;
+}
+
+// Solves one hinge pair, rebuilding its world points from the live transforms.
+// The other pair of this iteration has already moved the bodies, so solving a
+// pair against coordinates captured before that move would fight it.
+void SolveHingePoint(const JointEnd& A, const JointEnd& B, const Vec3& localAnchor,
+                     const Vec3& anchorB, const Vec3& localAxis, const Vec3& axisB, int index) {
+    JointPoints p = HingePoints(A, B, localAnchor, anchorB, localAxis, axisB);
+    SolvePointPair(A, p.a[index], B, p.b[index]);
+}
+
+// Signed angle from this body's reference direction to the target's, about the
+// hinge axis.
+float HingeAngle(const JointEnd& A, const JointEnd& B, const Vec3& localAxis,
+                 const HingeJoint& joint) {
+    Vec3 n = JointDirection(A, localAxis);
+    Vec3 refA = JointDirection(A, joint.m_refA);
+    Vec3 refB = JointDirection(B, joint.m_refB);
+    // Both references are perpendicular to the axis by construction; re-project
+    // against numerical drift before measuring.
+    refA = (refA - n * Vec3::Dot(refA, n)).Normalized();
+    refB = (refB - n * Vec3::Dot(refB, n)).Normalized();
+    return std::atan2(Vec3::Dot(Vec3::Cross(refA, refB), n), Vec3::Dot(refA, refB));
+}
+
+// A hinge pins its anchor to the target's and keeps the two axes parallel,
+// leaving rotation about the axis free. Limits and the motor act on the one
+// remaining degree of freedom.
+void SolveHingeJoint(Scene& scene, GameObject& go, HingeJoint& joint, float dt) {
+    GameObject* target = joint.connectedGuid.empty() ? nullptr : scene.FindByGuid(joint.connectedGuid);
+    JointEnd A = MakeJointEnd(&go);
+    JointEnd B = target ? MakeJointEnd(target) : MakeFrozenEnd();
+    if (!A.rb && !B.rb) return;  // nothing can move
+
+    Vec3 localAxis = joint.axis.Normalized();
+    if (localAxis.LengthSq() < 0.5f) localAxis = Vec3(1, 0, 0);
+
+    if (!joint.m_captured) {
+        joint.m_captured = true;
+        Vec3 axisWorld = JointDirection(A, localAxis);
+        Vec3 refLocal = PerpendicularTo(localAxis);
+        joint.m_refA = refLocal;
+        if (target) {
+            // The target's axis and reference ride on its transform, so they
+            // stay parallel to this body's as either one turns.
+            joint.m_axisB = B.rot.Conjugate() * axisWorld;
+            joint.m_refB = B.rot.Conjugate() * (A.rot * refLocal);
+        } else {
+            // Anchored to the world: the axis and reference are simply frozen.
+            joint.m_axisB = axisWorld;
+            joint.m_refB = A.rot * refLocal;
+        }
+        joint.m_restAngle = HingeAngle(A, B, localAxis, joint);
+    }
+
+    JointPoints pts = HingePoints(A, B, joint.anchor, joint.connectedAnchor, localAxis, joint.m_axisB);
+    JointLoad load = MeasureJoint(A, B, pts);
+    WakeJointEnds(&A, &B, &go, target, load);
+    pts = HingePoints(A, B, joint.anchor, joint.connectedAnchor, localAxis, joint.m_axisB);
+
+    float invSum = A.invM + B.invM;
+    if (JointBreaks(joint.breakForce, load, invSum, dt)) {
+        joint.enabled = false;  // the joint snaps; bodies fall free
+        return;
+    }
+
+    for (int iter = 0; iter < kJointIterations; ++iter) {
+        for (int i = 0; i < 2; ++i) {
+            RefreshJointEnd(A);
+            RefreshJointEnd(B);
+            SolveHingePoint(A, B, joint.anchor, joint.connectedAnchor, localAxis, joint.m_axisB, i);
+        }
+    }
+    RefreshJointEnd(A);
+    RefreshJointEnd(B);
+
+    float invISum = A.invI + B.invI;
+    if (invISum <= 1e-9f) return;  // both ends pinned: the axis needs nothing
+    const Vec3 n = JointDirection(A, localAxis);
+    const Vec3 spinA = A.rb ? A.rb->angularVelocity : Vec3();
+    const Vec3 spinB = B.rb ? B.rb->angularVelocity : Vec3();
+    // The angle runs from the other end's reference to this body's. A world
+    // anchor cannot turn, so for it the reference is this body's rest pose: the
+    // angle is then the body's own swing, and a positive motor or limit turns
+    // *this* body the way the axis' right-hand rule says. With a connected body
+    // the angle is that body's rotation relative to this one, and a positive
+    // motor or limit turns *it*. Both read limitsMin/limitsMax the same way, so
+    // one sign flip covers the world-anchored case for angle, spin and torque.
+    const float anchorSign = target ? 1.0f : -1.0f;
+    float relSpin = anchorSign * Vec3::Dot(spinB - spinA, n);
+
+    // Motor: drive the relative spin toward the target, capped by its force.
+    if (joint.useMotor && joint.motorForce > 0.0f) {
+        float j = (joint.motorVelocity * kDegToRad - relSpin) / invISum;
+        j = std::clamp(j, -joint.motorForce * dt, joint.motorForce * dt);
+        SpinAboutPoint(A, JointPoint(A, joint.anchor), n * (-anchorSign * j * A.invI));
+        SpinAboutPoint(B, JointPoint(B, joint.connectedAnchor), n * (anchorSign * j * B.invI));
+        relSpin += j * invISum;
+    }
+
+    // Limits: clamp the angle, and stop only the spin that pushed past it.
+    if (joint.useLimits) {
+        float lo = joint.limitsMin * kDegToRad;
+        float hi = joint.limitsMax * kDegToRad;
+        if (lo > hi) std::swap(lo, hi);
+        float theta = anchorSign * (HingeAngle(A, B, localAxis, joint) - joint.m_restAngle);
+        float delta = theta < lo ? lo - theta : (theta > hi ? hi - theta : 0.0f);
+        if (delta != 0.0f) {
+            // Turning the driven end forward by +d raises the measured angle by
+            // exactly d, so share the correction out by inverse inertia. Each
+            // body turns about the shared anchor, so the pin stays satisfied.
+            Vec3 pivot = JointPoint(A, joint.anchor);
+            if (B.tf) pivot = (pivot + JointPoint(B, joint.connectedAnchor)) * 0.5f;
+            float turn = anchorSign * delta;
+            if (A.rb && A.tf) RotateAboutPivot(*A.tf, pivot, n, -turn * (A.invI / invISum));
+            if (B.rb && B.tf) RotateAboutPivot(*B.tf, pivot, n, turn * (B.invI / invISum));
+            bool outward = (delta > 0.0f && relSpin < 0.0f) || (delta < 0.0f && relSpin > 0.0f);
+            if (outward) {
+                RefreshJointEnd(A);
+                RefreshJointEnd(B);
+                float j = -relSpin / invISum;
+                SpinAboutPoint(A, JointPoint(A, joint.anchor), n * (-anchorSign * j * A.invI));
+                SpinAboutPoint(B, JointPoint(B, joint.connectedAnchor), n * (anchorSign * j * B.invI));
+            }
+        }
+    }
+}
+
+// A fixed joint welds two bodies into one rigid cluster. The relative pose it
+// first sees is locked, so the pair then translates and spins as a single body
+// (corrections shared by mass and inertia) until `breakForce` snaps it.
+void SolveFixedJoint(Scene& scene, GameObject& go, FixedJoint& joint, float dt) {
+    GameObject* target = joint.connectedGuid.empty() ? nullptr : scene.FindByGuid(joint.connectedGuid);
+    JointEnd A = MakeJointEnd(&go);
+    JointEnd B = target ? MakeJointEnd(target) : MakeFrozenEnd();
+    if (!A.rb && !B.rb) return;
+
+    if (!joint.m_captured) {
+        joint.m_captured = true;
+        // Three non-collinear points on this body, and the matching local
+        // points on the target chosen so every pair already coincides: locking
+        // all three pairs locks the whole relative pose, which is the weld.
+        const Vec3 arm[3] = {Vec3(0, 0, 0), Vec3(kJointArmScale, 0, 0), Vec3(0, kJointArmScale, 0)};
+        for (int i = 0; i < 3; ++i) {
+            joint.m_localA[i] = arm[i];
+            joint.m_localB[i] = JointLocal(B, JointPoint(A, arm[i]));
+        }
+    }
+
+    JointPoints pts;
+    pts.count = 3;
+    for (int i = 0; i < 3; ++i) {
+        pts.a[i] = JointPoint(A, joint.m_localA[i]);
+        pts.b[i] = JointPoint(B, joint.m_localB[i]);
+    }
+    JointLoad load = MeasureJoint(A, B, pts);
+    WakeJointEnds(&A, &B, &go, target, load);
+
+    float invSum = A.invM + B.invM;
+    if (invSum <= 1e-6f) return;  // both ends pinned
+    if (JointBreaks(joint.breakForce, load, invSum, dt)) {
+        joint.enabled = false;
+        return;
+    }
+
+    for (int iter = 0; iter < kJointIterations; ++iter) {
+        for (int i = 0; i < 3; ++i) {
+            RefreshJointEnd(A);
+            RefreshJointEnd(B);
+            SolvePointPair(A, JointPoint(A, joint.m_localA[i]), B,
+                           JointPoint(B, joint.m_localB[i]));
+        }
+    }
 }
 
 // Gather every enabled collider of one object in world space.
@@ -834,6 +1256,19 @@ void PhysicsStep(Scene& scene, float dt) {
             float j = -rel / invSum;
             if (rbA) rbA->velocity += n * (j * invA);
             if (rbB) rbB->velocity -= n * (j * invB);
+        }
+    }
+
+    // Hinge and fixed joints run in the same constraint pass, through the shared
+    // point-constraint solver.
+    for (const auto& go : scene.objects) {
+        if (!go->ActiveInHierarchy()) continue;
+        if (auto* hinge = go->GetComponent<HingeJoint>(); hinge && hinge->enabled) {
+            SolveHingeJoint(scene, *go, *hinge, dt);
+            continue;
+        }
+        if (auto* fixed = go->GetComponent<FixedJoint>(); fixed && fixed->enabled) {
+            SolveFixedJoint(scene, *go, *fixed, dt);
         }
     }
 
