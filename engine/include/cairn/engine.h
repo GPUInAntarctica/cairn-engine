@@ -108,6 +108,20 @@ public:
     // Replaces the instance with a fresh copy; returns the new entity id.
     EntityId RevertPrefab(EntityId id, std::string* error);
 
+    // --- Prefab per-property overrides. An instance keeps a record of how it
+    // differs from its asset; re-pulling the asset leaves those differences
+    // alone, so an edited prefab reaches every instance that did not override
+    // the property. id == 0 means every instance in the scene throughout.
+    // Recomputes an instance's differences and stores them on the component
+    // (the scene is saved with them). Returns how many were refreshed, -1 when
+    // an explicitly named instance's asset could not be read.
+    int RefreshPrefabOverrides(EntityId id, std::string* error = nullptr);
+    // The stored differences of one instance ({} when it has none). A copy.
+    Json PrefabOverrides(EntityId id);
+    // Pulls the assets into instances, keeping their overrides. Returns how
+    // many were synced, -1 on error.
+    int SyncPrefabs(EntityId id, std::string* error = nullptr);
+
     // --- Components.
     bool AddComponent(EntityId id, const std::string& typeName);
     bool RemoveComponent(EntityId id, const std::string& typeName);

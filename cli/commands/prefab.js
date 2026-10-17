@@ -58,7 +58,7 @@ def('prefab.instantiate', {
 });
 
 def('prefab.apply', {
-    summary: 'Push an instance\'s current state back into its .prefab file.',
+    summary: 'Push an instance\'s per-property overrides back into its .prefab file (its siblings follow).',
     args: {
         id: { type: 'int', required: true, desc: 'Prefab instance root entity id.' },
     },
@@ -72,6 +72,49 @@ def('prefab.apply', {
         const result = ctx.session.engine().applyPrefab(args.id);
         if (!result.ok) throw invalidArg(result.error, { id: args.id });
         return { ok: true, path: prefabComp.props.prefabPath };
+    },
+});
+
+def('prefab.overrides', {
+    summary: 'List the properties an instance overrides relative to its .prefab asset.',
+    args: {
+        id: { type: 'int', required: true, desc: 'Prefab instance root entity id.' },
+    },
+    returns: '{id, path, count, nodes, overrides:[{node,key,value}]}',
+    needsEngine: true,
+    examples: ['cairn --project ./game prefab.overrides --id 5'],
+    run(ctx, args) {
+        const entity = requireEntity(ctx, args.id);
+        const prefabComp = entity.components.find(c => c.type === 'PrefabInstance');
+        if (!prefabComp) throw invalidArg(`entity ${args.id} is not a prefab instance`);
+        const engine = ctx.session.engine();
+        const refreshed = engine.refreshPrefabOverrides(args.id);
+        if (!refreshed.ok) throw invalidArg(refreshed.error, { id: args.id });
+        const overrides = engine.prefabOverrides(args.id) || {};
+        const rows = flattenOverrides(overrides);
+        return {
+            id: args.id,
+            path: prefabComp.props.prefabPath,
+            count: rows.length,
+            nodes: Object.keys(overrides).length,
+            overrides: rows,
+        };
+    },
+});
+
+def('prefab.sync', {
+    summary: 'Pull the .prefab assets back into their instances, keeping each instance\'s overrides.',
+    args: {
+        id: { type: 'int', default: 0, desc: 'Instance root entity id, or 0 for every instance in the scene.' },
+    },
+    returns: '{id, synced}',
+    needsEngine: true,
+    needsProject: true,
+    examples: ['cairn --project ./game prefab.sync', 'cairn --project ./game prefab.sync --id 5'],
+    run(ctx, args) {
+        const result = ctx.session.engine().syncPrefabs(args.id);
+        if (!result.ok) throw invalidArg(result.error, { id: args.id });
+        return { id: args.id, synced: result.count };
     },
 });
 
@@ -121,6 +164,16 @@ def('prefab.info', {
         };
     },
 });
+
+// One row per overridden property, so an agent can read the list without
+// knowing the node-path shape of the stored record.
+function flattenOverrides(overrides) {
+    const rows = [];
+    for (const [node, entry] of Object.entries(overrides || {})) {
+        for (const [key, value] of Object.entries(entry || {})) rows.push({ node, key, value });
+    }
+    return rows;
+}
 
 function countEntities(node) {
     if (!node || typeof node !== 'object') return 0;

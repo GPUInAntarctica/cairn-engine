@@ -156,6 +156,9 @@ public:
             InstanceMethod("instantiatePrefab", &EngineWrap::InstantiatePrefab),
             InstanceMethod("applyPrefab", &EngineWrap::ApplyPrefab),
             InstanceMethod("revertPrefab", &EngineWrap::RevertPrefab),
+            InstanceMethod("refreshPrefabOverrides", &EngineWrap::RefreshPrefabOverrides),
+            InstanceMethod("prefabOverrides", &EngineWrap::PrefabOverrides),
+            InstanceMethod("syncPrefabs", &EngineWrap::SyncPrefabs),
             InstanceMethod("getLayerMatrix", &EngineWrap::GetLayerMatrix),
             InstanceMethod("setLayerCollision", &EngineWrap::SetLayerCollision),
             InstanceMethod("physicsRaycast", &EngineWrap::PhysicsRaycast),
@@ -662,6 +665,31 @@ private:
         o.Set("id", (double)id);
         return o;
     }
+    // Per-property overrides: the differences between an instance and its asset.
+    Napi::Value RefreshPrefabOverrides(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        std::string err;
+        int n = engine_->RefreshPrefabOverrides((EntityId)GetNumber(info, 0, 0), &err);
+        Napi::Object o = Napi::Object::New(env);
+        o.Set("ok", n >= 0);
+        if (n < 0) o.Set("error", err);
+        else o.Set("count", (double)n);
+        return o;
+    }
+    Napi::Value PrefabOverrides(const Napi::CallbackInfo& info) {
+        Json overrides = engine_->PrefabOverrides((EntityId)GetNumber(info, 0, 0));
+        return JsonToValue(info.Env(), overrides);
+    }
+    Napi::Value SyncPrefabs(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        std::string err;
+        int n = engine_->SyncPrefabs((EntityId)GetNumber(info, 0, 0), &err);
+        Napi::Object o = Napi::Object::New(env);
+        o.Set("ok", n >= 0);
+        if (n < 0) o.Set("error", err);
+        else o.Set("count", (double)n);
+        return o;
+    }
 
     // -- physics queries + layers -------------------------------------------
     static bool ReadVec3(const Napi::Value& v, Vec3* out) {
@@ -860,7 +888,7 @@ Napi::FunctionReference EngineWrap::constructor;
 
 Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
     EngineWrap::Init(env, exports);
-    exports.Set("engineVersion", Napi::String::New(env, "0.1.16"));
+    exports.Set("engineVersion", Napi::String::New(env, "0.1.17"));
     return exports;
 }
 

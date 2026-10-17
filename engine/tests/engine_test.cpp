@@ -1391,6 +1391,121 @@ static void TestPrefabs() {
     std::filesystem::remove_all(dir);
 }
 
+// Prefab per-property overrides: an instance records how it differs from its
+// asset, so editing the asset reaches every instance that left the property
+// alone while a per-instance tweak survives a reload.
+static void TestPrefabOverrides() {
+    const std::string dir =
+        (std::filesystem::temp_directory_path() / "cairn-test-prefab-overrides").string();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir + "/Assets/Prefabs");
+    std::filesystem::create_directories(dir + "/Assets/Scenes");
+    Engine engine;
+    engine.SetProjectRoot(dir);
+    engine.NewScene("O");
+
+    GameObject* source = engine.scene().CreateEntity("Crate");
+    source->AddComponent<MeshRenderer>()->albedoColor = Color(0.8f, 0.3f, 0.2f, 1);
+    GameObject* lid = engine.scene().CreateEntity("Lid", source);
+    lid->AddComponent<MeshRenderer>()->albedoColor = Color(0.5f, 0.5f, 0.5f, 1);
+
+    std::string err;
+    CHECK(engine.CreatePrefabFromEntity(source->m_id, "Assets/Prefabs/Crate.prefab", &err));
+
+    const EntityId a = engine.InstantiatePrefab("Assets/Prefabs/Crate.prefab", 0);
+    const EntityId b = engine.InstantiatePrefab("Assets/Prefabs/Crate.prefab", 0);
+    GameObject* ga = engine.FindEntity(a);
+    GameObject* gb = engine.FindEntity(b);
+    CHECK(ga && gb && ga->GetChildren().size() == 1 && gb->GetChildren().size() == 1);
+
+    // A copy that matches the asset has nothing to record.
+    CHECK(engine.RefreshPrefabOverrides(a, &err) == 1);
+    CHECK(engine.PrefabOverrides(a).size() == 0);
+
+    // A tweak on one copy: a colour, a name, and a disabled component.
+    ga->GetComponent<MeshRenderer>()->albedoColor = Color(0, 1, 0, 1);
+    ga->name = "GreenCrate";
+    ga->GetComponent<MeshRenderer>()->enabled = false;
+    CHECK(engine.RefreshPrefabOverrides(a, &err) == 1);
+    const Json ovA = engine.PrefabOverrides(a);
+    const Json* entryA = ovA.find("");
+    CHECK(ovA.size() == 1 && entryA != nullptr);
+    CHECK(entryA && entryA->has("@name"));
+    CHECK(entryA && entryA->has("MeshRenderer.albedoColor"));
+    CHECK(entryA && entryA->has("MeshRenderer.@enabled"));
+
+    // Edit the asset: the root turns blue and the child moves up.
+    {
+        std::ifstream in(dir + "/Assets/Prefabs/Crate.prefab");
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        Json doc;
+        CHECK(Json::Parse(text, &doc, &err));
+        Json& root = doc["root"];
+        for (size_t i = 0; i < root["components"].size(); ++i) {
+            Json& c = root["components"][i];
+            if (c["type"].asString() == "MeshRenderer")
+                c["properties"].set("albedoColor", Json::MakeArray({0.1, 0.1, 0.9, 1.0}));
+        }
+        for (size_t i = 0; i < root["children"].size(); ++i) {
+            Json& child = root["children"][i];
+            if (child["name"].asString() != "Lid") continue;
+            for (size_t k = 0; k < child["components"].size(); ++k) {
+                Json& c = child["components"][k];
+                if (c["type"].asString() == "Transform")
+                    c["position"] = Json::MakeArray({0.0, 3.0, 0.0});
+            }
+        }
+        std::ofstream out(dir + "/Assets/Prefabs/Crate.prefab");
+        out << doc.Dump(2) << "\n";
+    }
+
+    // What a scene load does: pull the asset into every instance.
+    CHECK(engine.SyncPrefabs(0, &err) == 3);  // the source entity plus both copies
+    CHECK(NearlyEqual(ga->GetComponent<MeshRenderer>()->albedoColor.g, 1.0f, 1e-3f));  // kept
+    CHECK(!ga->GetComponent<MeshRenderer>()->enabled);                                  // kept
+    CHECK(ga->name == "GreenCrate");                                                    // kept
+    CHECK(NearlyEqual(gb->GetComponent<MeshRenderer>()->albedoColor.b, 0.9f, 1e-3f));   // followed
+    CHECK(gb->GetComponent<MeshRenderer>()->enabled);                                   // followed
+    CHECK(gb->name == "Crate");                                                         // followed
+    CHECK(ga->GetChildren().size() == 1 && gb->GetChildren().size() == 1);
+    CHECK(NearlyEqual(ga->GetChildren()[0]->transform().position.y, 3.0f, 1e-3f));
+    CHECK(NearlyEqual(gb->GetChildren()[0]->transform().position.y, 3.0f, 1e-3f));
+
+    // Deleting a component and a child on one copy is remembered: a later sync
+    // does not resurrect them.
+    engine.scene().DestroyEntityNow(gb->GetChildren()[0]);
+    CHECK(engine.RemoveComponent(b, "MeshRenderer"));
+    CHECK(engine.RefreshPrefabOverrides(b, &err) == 1);
+    const Json ovB = engine.PrefabOverrides(b);
+    const Json* entryB = ovB.find("");
+    CHECK(entryB && entryB->has("@removedChildren") && entryB->has("@removedComponents"));
+    CHECK(engine.SyncPrefabs(b, &err) == 1);
+    CHECK(gb->GetChildren().empty());
+    CHECK(gb->GetComponent<MeshRenderer>() == nullptr);
+
+    // A scene written before overrides were recorded carries none: the loader
+    // takes the instance's own state as the record rather than letting the
+    // asset overwrite it.
+    gb->AddComponent<MeshRenderer>()->albedoColor = Color(1, 0, 0, 1);
+    auto* piB = gb->GetComponent<PrefabInstance>();
+    CHECK(piB != nullptr);
+    if (piB) {
+        piB->overridesKnown = false;
+        piB->overrides = Json::MakeObject();
+    }
+    CHECK(engine.SyncPrefabs(b, &err) == 1);
+    CHECK(NearlyEqual(gb->GetComponent<MeshRenderer>()->albedoColor.r, 1.0f, 1e-3f));
+    CHECK(piB && piB->overridesKnown);
+
+    // A plain entity is not an instance: no record, and a targeted sync fails.
+    GameObject* plain = engine.scene().CreateEntity("Plain");
+    CHECK(engine.PrefabOverrides(plain->m_id).size() == 0);
+    CHECK(engine.RefreshPrefabOverrides(plain->m_id, &err) == -1);
+    CHECK(engine.SyncPrefabs(plain->m_id, &err) == -1);
+
+    std::filesystem::remove_all(dir);
+}
+
 // Physics queries: raycast / raycast-all / overlap against colliders.
 static void TestPhysicsQueries() {
     Engine engine;
@@ -2140,6 +2255,7 @@ int main() {
     TestAssetDatabase();
     TestEntityIdentity();
     TestPrefabs();
+    TestPrefabOverrides();
     TestPhysicsQueries();
     TestCollisionLayers();
     TestRigidbodyFrictionAngular();

@@ -12,7 +12,6 @@
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <string>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -249,6 +248,10 @@ bool Engine::LoadSceneFile(const std::string& path, std::string* error) {
     StopScripts();
     scene_ = loaded;
     PhysicsReset(scene_.get());
+    // Re-pull every prefab asset: an edited .prefab reaches the instances that
+    // did not override the property, and each instance's own differences are
+    // what the scene stored when it was last saved.
+    SyncPrefabs(0, nullptr);
     ApplyScriptPropDefaults();
     return true;
 }
@@ -277,6 +280,10 @@ void Engine::ApplyScriptPropDefaults() {
 
 bool Engine::SaveSceneFile(const std::string& path, std::string* error) {
     assets_.Scan();  // ensure newly imported assets have a GUID to serialize
+    // Record how each instance differs from its asset, so a later load can tell
+    // an intentional per-instance tweak from a value the asset has since moved
+    // on from.
+    RefreshPrefabOverrides(0, nullptr);
     return scene_->SaveToFile(path, error);
 }
 
@@ -332,142 +339,6 @@ EntityId Engine::DuplicateEntity(EntityId id) {
 }
 
 GameObject* Engine::FindEntity(EntityId id) { return scene_->FindEntity(id); }
-
-// ---------------------------------------------------------------------------
-// Prefabs.
-// ---------------------------------------------------------------------------
-namespace {
-bool ReadWholeFile(const std::string& path, std::string* out, std::string* error) {
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) {
-        if (error) *error = "cannot open file: " + path;
-        return false;
-    }
-    std::string text;
-    char buf[4096];
-    size_t n;
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, n);
-    std::fclose(f);
-    *out = std::move(text);
-    return true;
-}
-
-bool WriteWholeFile(const std::string& path, const std::string& text, std::string* error) {
-    std::error_code ec;
-    std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
-    FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) {
-        if (error) *error = "cannot write file: " + path;
-        return false;
-    }
-    bool ok = std::fwrite(text.data(), 1, text.size(), f) == text.size();
-    std::fclose(f);
-    if (!ok && error) *error = "write failed: " + path;
-    return ok;
-}
-
-// A prefab's own root must not carry a PrefabInstance component (it would refer
-// to itself); strip it before writing.
-void StripPrefabRootComponents(Json* rootEntity) {
-    Json comps = Json::MakeArray();
-    if ((*rootEntity)["components"].isArray()) {
-        for (const Json& c : (*rootEntity)["components"].arrayItems()) {
-            if (c["type"].asString() == "PrefabInstance") continue;
-            comps.push(c);
-        }
-    }
-    (*rootEntity).set("components", std::move(comps));
-}
-
-Json MakePrefabDoc(const std::string& name, Json root) {
-    Json doc = Json::MakeObject();
-    doc.set("format", "cairn-prefab");
-    doc.set("version", 1);
-    doc.set("name", name);
-    doc.set("root", std::move(root));
-    return doc;
-}
-}  // namespace
-
-EntityId Engine::InstantiatePrefab(const std::string& prefabProjectPath, EntityId parent) {
-    const std::string abs = EngineResolvePath(prefabProjectPath);
-    std::string text, err;
-    if (!ReadWholeFile(abs, &text, &err)) {
-        Log::Error("%s", err.c_str());
-        return kInvalidEntity;
-    }
-    Json doc;
-    if (!Json::Parse(text, &doc, &err) || !doc["root"].isObject()) {
-        Log::Error("invalid prefab: %s", prefabProjectPath.c_str());
-        return kInvalidEntity;
-    }
-    GameObject* p = parent ? FindEntity(parent) : nullptr;
-    GameObject* go = scene_->DeserializeEntitySubtree(doc["root"], p, &err);
-    if (!go) {
-        Log::Error("prefab instantiate failed: %s", err.c_str());
-        return kInvalidEntity;
-    }
-    if (auto* pi = go->AddComponent<PrefabInstance>()) pi->prefabPath = prefabProjectPath;
-    return go->m_id;
-}
-
-bool Engine::CreatePrefabFromEntity(EntityId id, const std::string& prefabProjectPath, std::string* error) {
-    GameObject* go = FindEntity(id);
-    if (!go) {
-        if (error) *error = "entity not found";
-        return false;
-    }
-    Json root = scene_->SerializeSubtree(go);
-    StripPrefabRootComponents(&root);
-    const std::string abs = EngineResolvePath(prefabProjectPath);
-    if (!WriteWholeFile(abs, MakePrefabDoc(go->name, std::move(root)).Dump(2) + "\n", error)) return false;
-    assets_.EnsureMeta(prefabProjectPath);
-    assets_.Scan();
-    if (auto* pi = go->GetComponent<PrefabInstance>()) pi->prefabPath = prefabProjectPath;
-    else if (auto* added = go->AddComponent<PrefabInstance>()) added->prefabPath = prefabProjectPath;
-    return true;
-}
-
-bool Engine::ApplyPrefab(EntityId id, std::string* error) {
-    GameObject* go = FindEntity(id);
-    if (!go) {
-        if (error) *error = "entity not found";
-        return false;
-    }
-    auto* pi = go->GetComponent<PrefabInstance>();
-    if (!pi || pi->prefabPath.empty()) {
-        if (error) *error = "entity is not a prefab instance";
-        return false;
-    }
-    Json root = scene_->SerializeSubtree(go);
-    StripPrefabRootComponents(&root);
-    const std::string abs = EngineResolvePath(pi->prefabPath);
-    return WriteWholeFile(abs, MakePrefabDoc(go->name, std::move(root)).Dump(2) + "\n", error);
-}
-
-EntityId Engine::RevertPrefab(EntityId id, std::string* error) {
-    GameObject* go = FindEntity(id);
-    if (!go) {
-        if (error) *error = "entity not found";
-        return kInvalidEntity;
-    }
-    auto* pi = go->GetComponent<PrefabInstance>();
-    if (!pi || pi->prefabPath.empty()) {
-        if (error) *error = "entity is not a prefab instance";
-        return kInvalidEntity;
-    }
-    const std::string path = pi->prefabPath;
-    const std::string name = go->name;
-    GameObject* parent = go->GetParent();
-    const EntityId parentId = parent ? parent->m_id : 0;
-    scene_->DestroyEntityNow(go);
-    EntityId newId = InstantiatePrefab(path, parentId);
-    if (newId) {
-        if (GameObject* ng = FindEntity(newId)) ng->name = name;
-    }
-    return newId;
-}
 
 bool Engine::AddComponent(EntityId id, const std::string& typeName) {
     GameObject* go = FindEntity(id);

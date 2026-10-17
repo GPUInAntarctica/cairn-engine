@@ -390,11 +390,13 @@ the sheet size followed by one `image.stamp` per cell.
 
 | Command | Arguments | Description |
 | --- | --- | --- |
-| `prefab.apply` | `--id` (int, required) | Push an instance's current state back into its .prefab file. |
+| `prefab.apply` | `--id` (int, required) | Push an instance's per-property overrides back into its .prefab file (its siblings follow). |
 | `prefab.create` | `--id` (int, required)<br>`--file` (string, required) | Save an entity (and its children) as a .prefab asset and link it. |
 | `prefab.info` | `--file` (string, required) | Inspect a .prefab asset: name, top-level entity count and asset GUID. |
 | `prefab.instantiate` | `--file` (string, required)<br>`--parent` (int, default 0) | Instantiate a .prefab asset into the current scene (rooted at an optional parent). |
+| `prefab.overrides` | `--id` (int, required) | List the properties an instance overrides relative to its .prefab asset. |
 | `prefab.revert` | `--id` (int, required) | Replace a prefab instance with a fresh copy from its .prefab file. |
+| `prefab.sync` | `--id` (int, default 0) | Pull the .prefab assets back into their instances, keeping each instance's overrides. |
 
 ### `project`
 

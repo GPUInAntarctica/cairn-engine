@@ -638,6 +638,19 @@ class PrefabInstance : public Component {
 public:
     std::string prefabPath;  // project-relative .prefab path
 
+    // The properties this instance has changed relative to its asset, keyed by
+    // node path ("" is the instance root, "Lid/Bolt" a child) and then by
+    // property key ("@name", "MeshRenderer.albedoColor", "Transform.position",
+    // "Script.speed", "HingeJoint.@enabled"). Everything *not* listed here is
+    // pulled from the .prefab file when the scene loads, so editing an asset
+    // reaches every instance that left the property alone.
+    Json overrides = Json::MakeObject();
+    // False until the differences have been computed. A scene written before
+    // 0.1.17 carries none, and there the instance's own state is the override
+    // set (the loader diffs it first) rather than being overwritten by the
+    // asset on first load.
+    bool overridesKnown = false;
+
     const char* TypeName() const override { return "PrefabInstance"; }
     ComponentTypeId TypeId() const override { return ComponentTypeId::PrefabInstance; }
 };

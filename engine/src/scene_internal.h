@@ -137,4 +137,9 @@ Json ComponentSerialize(const Component* c);
 bool ComponentDeserialize(Component* c, const Json& props);
 std::vector<std::string> AddableComponentNames();
 
+// Applies one serialized component entry ({"type", ...props, "enabled"}) to an
+// entity, updating the component in place or adding it when absent. Shared by
+// the scene loaders and the prefab sync. Implemented in scene.cpp.
+bool ApplyComponentEntry(GameObject* go, const Json& cj, std::string* error);
+
 }  // namespace Cairn

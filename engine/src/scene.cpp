@@ -354,6 +354,12 @@ Json Scene::SerializeEntity(const GameObject* go) const {
                 }
             }
             cj.set("properties", std::move(props));
+            // A prefab instance carries its per-property overrides so a reload
+            // can re-pull the asset without losing the local changes.
+            if (c->TypeId() == ComponentTypeId::PrefabInstance) {
+                const PrefabInstance* pi = static_cast<const PrefabInstance*>(c.get());
+                if (pi->overridesKnown) cj.set("overrides", pi->overrides);
+            }
         }
         cj.set("enabled", c->enabled);
         comps.push(std::move(cj));
@@ -377,6 +383,57 @@ GameObject* Scene::InstantiateCopy(const GameObject* go, GameObject* parent) {
     return DeserializeEntitySubtree(SerializeSubtree(go), parent, nullptr);
 }
 
+// Applies one serialized component entry ({"type", ...props, "enabled"}) to an
+// entity: the component is updated in place and added when the entity does not
+// have it yet. The scene loaders and the prefab sync both go through here so
+// they read one shape of the file.
+bool ApplyComponentEntry(GameObject* go, const Json& cj, std::string* error) {
+    const std::string type = cj["type"].asString();
+    if (type.empty()) return true;
+    if (type == "Transform") {
+        Transform& t = go->transform();
+        t.position = JsonToVec3(cj["position"]);
+        t.SetEulerDegrees(JsonToVec3(cj["rotation"]));
+        t.scale = JsonToVec3(cj["scale"], Vec3(1, 1, 1));
+        t.MarkWorldDirty();
+        return true;
+    }
+    if (type == "Script") {
+        ScriptComponent* sc = go->GetComponent<ScriptComponent>();
+        if (!sc && !go->AddComponentByName(type)) {
+            if (error) *error = "cannot add component: " + type;
+            return false;
+        }
+        sc = go->GetComponent<ScriptComponent>();
+        if (!sc) return false;
+        sc->scriptClass = cj["class"].asString();
+        sc->properties = cj["properties"];
+        if (!sc->properties.isObject()) sc->properties = Json::MakeObject();
+        sc->enabled = cj["enabled"].asBool(true);
+        return true;
+    }
+    Component* c = go->GetComponentByName(type);
+    if (!c) {
+        if (!go->AddComponentByName(type)) {
+            if (error) *error = "unknown component type: " + type;
+            return false;
+        }
+        c = go->GetComponentByName(type);
+    }
+    if (!c) return false;
+    ComponentDeserialize(c, cj["properties"]);
+    c->enabled = cj["enabled"].asBool(true);
+    if (c->TypeId() == ComponentTypeId::PrefabInstance) {
+        auto* pi = static_cast<PrefabInstance*>(c);
+        const Json& ov = cj["overrides"];
+        if (ov.isObject()) {
+            pi->overrides = ov;
+            pi->overridesKnown = true;
+        }
+    }
+    return true;
+}
+
 GameObject* Scene::DeserializeEntitySubtree(const Json& entityJson, GameObject* parent, std::string* error) {
     if (!entityJson.isObject()) {
         if (error) *error = "entity is not an object";
@@ -389,33 +446,7 @@ GameObject* Scene::DeserializeEntitySubtree(const Json& entityJson, GameObject* 
 
     const Json& comps = entityJson["components"];
     if (comps.isArray()) {
-        for (const Json& cj : comps.arrayItems()) {
-            std::string type = cj["type"].asString();
-            if (type == "Transform") {
-                Transform& t = go->transform();
-                t.position = JsonToVec3(cj["position"]);
-                t.SetEulerDegrees(JsonToVec3(cj["rotation"]));
-                t.scale = JsonToVec3(cj["scale"], Vec3(1, 1, 1));
-            } else if (type == "Script") {
-                ScriptComponent* sc = go->AddComponent<ScriptComponent>();
-                if (sc) {
-                    sc->scriptClass = cj["class"].asString();
-                    sc->properties = cj["properties"];
-                    if (!sc->properties.isObject()) sc->properties = Json::MakeObject();
-                    sc->enabled = cj["enabled"].asBool(true);
-                }
-            } else if (!type.empty()) {
-                if (go->AddComponentByName(type)) {
-                    Component* c = go->GetComponentByName(type);
-                    if (c) {
-                        ComponentDeserialize(c, cj["properties"]);
-                        c->enabled = cj["enabled"].asBool(true);
-                    }
-                } else if (error) {
-                    *error = "unknown component type: " + type;
-                }
-            }
-        }
+        for (const Json& cj : comps.arrayItems()) ApplyComponentEntry(go, cj, error);
     }
     // Children.
     // Serialized children appear as separate entities in the flat list; here we
@@ -530,33 +561,7 @@ std::shared_ptr<Scene> Scene::Deserialize(const Json& doc, std::string* error) {
             go->layer = (int)e["layer"].asNumber(0.0);
             const Json& comps = e["components"];
             if (comps.isArray()) {
-                for (const Json& cj : comps.arrayItems()) {
-                    std::string type = cj["type"].asString();
-                    if (type == "Transform") {
-                        Transform& t = go->transform();
-                        t.position = JsonToVec3(cj["position"]);
-                        t.SetEulerDegrees(JsonToVec3(cj["rotation"]));
-                        t.scale = JsonToVec3(cj["scale"], Vec3(1, 1, 1));
-                    } else if (type == "Script") {
-                        ScriptComponent* sc = go->AddComponent<ScriptComponent>();
-                        if (sc) {
-                            sc->scriptClass = cj["class"].asString();
-                            sc->properties = cj["properties"];
-                            if (!sc->properties.isObject()) sc->properties = Json::MakeObject();
-                            sc->enabled = cj["enabled"].asBool(true);
-                        }
-                    } else if (!type.empty()) {
-                        if (go->AddComponentByName(type)) {
-                            Component* c = go->GetComponentByName(type);
-                            if (c) {
-                                ComponentDeserialize(c, cj["properties"]);
-                                c->enabled = cj["enabled"].asBool(true);
-                            }
-                        } else if (error) {
-                            *error = "unknown component type: " + type;
-                        }
-                    }
-                }
+                for (const Json& cj : comps.arrayItems()) ApplyComponentEntry(go, cj, error);
             }
         }
     }

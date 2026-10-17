@@ -278,6 +278,119 @@ const afterStep = pfRunLines.find(l => l.id === 'after');
 check(afterStep && Math.abs(afterStep.result.value[0] - 0.8) < 1e-3,
     'prefab.revert restores the prefab value', afterStep && afterStep.result.value);
 
+// ---------------------------------------------------------------------------
+console.log('cli: prefab per-property overrides');
+// ---------------------------------------------------------------------------
+// Two instances: one tweaked, one left alone. The .prefab is then edited from
+// outside and the scene reloaded: the tweaked instance keeps its change and
+// picks up everything else, the untouched one follows the asset exactly.
+function runProjectBatch(file) {
+    const r = spawnSync(process.execPath, [cli, '--project', projectDir, 'exec.run', '--file', file],
+        { encoding: 'utf8', cwd: scratch, env: batchEnv() });
+    const lines = r.stdout.trim().split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    return { stdout: r.stdout, stderr: r.stderr, lines, step: name => lines.find(l => l.id === name) };
+}
+function writeBatch(name, steps) {
+    const file = path.join(scratch, name);
+    fs.writeFileSync(file, steps.map(s => JSON.stringify(s)).join('\n'));
+    return file;
+}
+
+const ov1 = runProjectBatch(writeBatch('ov1.jsonl', [
+    { command: 'scene.load', args: { file: 'Assets/Scenes/Pf.cscene' } },
+    { command: 'prefab.instantiate', args: { file: 'Assets/Prefabs/Crate.prefab' }, id: 'a' },
+    { command: 'prefab.instantiate', args: { file: 'Assets/Prefabs/Crate.prefab' }, id: 'b' },
+    { command: 'component.setProps', args: { id: '$ref:a', type: 'MeshRenderer', props: { albedoColor: [0, 1, 0, 1] } } },
+    { command: 'entity.set', args: { id: '$ref:a', name: 'GreenCrate', layer: 3 } },
+    { command: 'scene.save', args: { file: 'Assets/Scenes/Pf.cscene' } },
+    { command: 'prefab.overrides', args: { id: '$ref:a' }, id: 'ovA' },
+    { command: 'prefab.overrides', args: { id: '$ref:b' }, id: 'ovB' },
+]));
+check(ov1.lines.every(l => l.ok !== false), 'override batch is clean', ov1.stdout + ov1.stderr);
+const instA = ov1.lines.filter(l => l.command === 'prefab.instantiate')[0].result.id;
+const instB = ov1.lines.filter(l => l.command === 'prefab.instantiate')[1].result.id;
+const ovA1 = ov1.step('ovA');
+const ovB1 = ov1.step('ovB');
+const keysA = ovA1 ? ovA1.result.overrides.map(o => o.key) : [];
+check(ovA1 && ovA1.result.count === 3
+    && keysA.includes('MeshRenderer.albedoColor') && keysA.includes('@name') && keysA.includes('@layer'),
+    'prefab.overrides lists what the instance changed', ovA1 && ovA1.result);
+check(ovB1 && ovB1.result.count === 0, 'an untouched instance overrides nothing', ovB1 && ovB1.result);
+
+// Drop the tweaked instance's child, so the record also carries a removal.
+const tree1 = runProjectBatch(writeBatch('ov-tree.jsonl', [
+    { command: 'scene.load', args: { file: 'Assets/Scenes/Pf.cscene' } },
+    { command: 'scene.tree', args: {} , id: 'tree' },
+]));
+const lidA = tree1.step('tree').result.entities.find(e => e.parent === instA).id;
+const ov2 = runProjectBatch(writeBatch('ov2.jsonl', [
+    { command: 'scene.load', args: { file: 'Assets/Scenes/Pf.cscene' } },
+    { command: 'entity.destroy', args: { id: lidA } },
+    { command: 'scene.save', args: { file: 'Assets/Scenes/Pf.cscene' } },
+    { command: 'prefab.overrides', args: { id: instA }, id: 'ovA' },
+]));
+const ovA2 = ov2.step('ovA');
+check(ov2.lines.every(l => l.ok !== false) && ovA2
+    && JSON.stringify(ovA2.result.overrides.find(o => o.key === '@removedChildren') || {}).includes('Lid'),
+    'a child deleted on the instance is recorded as removed', ovA2 && ovA2.result);
+
+// Edit the asset itself: a new colour and a moved child.
+const prefabFile = path.join(projectDir, 'Assets', 'Prefabs', 'Crate.prefab');
+const prefabDoc = JSON.parse(fs.readFileSync(prefabFile, 'utf8'));
+for (const c of prefabDoc.root.components) {
+    if (c.type === 'MeshRenderer') c.properties.albedoColor = [0.1, 0.1, 0.9, 1];
+}
+prefabDoc.root.children.find(c => c.name === 'Lid').components
+    .find(c => c.type === 'Transform').position = [0, 3, 0];
+fs.writeFileSync(prefabFile, JSON.stringify(prefabDoc, null, 2) + '\n');
+
+const ov3 = runProjectBatch(writeBatch('ov3.jsonl', [
+    { command: 'scene.load', args: { file: 'Assets/Scenes/Pf.cscene' } },
+    { command: 'component.getProp', args: { id: instA, type: 'MeshRenderer', prop: 'albedoColor' }, id: 'aColor' },
+    { command: 'component.getProp', args: { id: instB, type: 'MeshRenderer', prop: 'albedoColor' }, id: 'bColor' },
+    { command: 'entity.get', args: { id: instA }, id: 'aEnt' },
+    { command: 'entity.get', args: { id: instB }, id: 'bEnt' },
+    { command: 'scene.tree', args: {}, id: 'tree' },
+]));
+check(ov3.lines.every(l => l.ok !== false), 'reload after editing the asset is clean', ov3.stdout + ov3.stderr);
+const aColor = ov3.step('aColor').result.value;
+const bColor = ov3.step('bColor').result.value;
+check(Math.abs(aColor[1] - 1) < 1e-3 && Math.abs(aColor[0]) < 1e-3,
+    'the overridden colour survives an asset edit', aColor);
+check(Math.abs(bColor[2] - 0.9) < 1e-3 && Math.abs(bColor[1] - 0.1) < 1e-3,
+    'the untouched instance follows the asset', bColor);
+check(ov3.step('aEnt').result.name === 'GreenCrate' && ov3.step('aEnt').result.layer === 3,
+    'the overridden name and layer survive', ov3.step('aEnt').result);
+check(ov3.step('bEnt').result.name === 'Crate', 'the untouched instance keeps the asset name',
+    ov3.step('bEnt').result.name);
+const ov3Tree = ov3.step('tree').result.entities;
+const bLid = ov3Tree.find(e => e.parent === instB && e.name === 'Lid');
+check(!ov3Tree.some(e => e.parent === instA) && bLid && Math.abs(bLid.transform.position[1] - 3) < 1e-3,
+    'a deleted child stays deleted while the asset child move reaches the rest',
+    { aChildren: ov3Tree.filter(e => e.parent === instA).map(e => e.name), bLid });
+
+// Apply: the instance's record becomes the asset, and its siblings follow.
+const ov4 = runProjectBatch(writeBatch('ov4.jsonl', [
+    { command: 'scene.load', args: { file: 'Assets/Scenes/Pf.cscene' } },
+    { command: 'prefab.apply', args: { id: instA } },
+    { command: 'component.getProp', args: { id: instB, type: 'MeshRenderer', prop: 'albedoColor' }, id: 'bColor' },
+    { command: 'entity.get', args: { id: instB }, id: 'bEnt' },
+    { command: 'prefab.revert', args: { id: instB }, id: 'revB' },
+    { command: 'scene.tree', args: {}, id: 'tree' },
+]));
+check(ov4.lines.every(l => l.ok !== false), 'prefab.apply batch is clean', ov4.stdout + ov4.stderr);
+const bColor2 = ov4.step('bColor').result.value;
+check(Math.abs(bColor2[1] - 1) < 1e-3, 'applying an instance pushes its override to the asset', bColor2);
+check(ov4.step('bEnt').result.name === 'GreenCrate', 'the applied name reaches the sibling',
+    ov4.step('bEnt').result.name);
+const applied = JSON.parse(fs.readFileSync(prefabFile, 'utf8'));
+check(!applied.root.children || !applied.root.children.some(c => c.name === 'Lid'),
+    'the applied removal reaches the asset file', applied.root.children);
+const revB = ov4.step('revB').result.id;
+const tree4 = ov4.step('tree').result.entities;
+check(!tree4.some(e => e.parent === revB), 'revert gives a fresh copy with the asset subtree',
+    tree4.filter(e => e.parent === revB).map(e => e.name));
+
 
 // ---------------------------------------------------------------------------
 console.log('cli: physics queries + layers');
