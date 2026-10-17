@@ -109,7 +109,7 @@ function createProject(options, prefs) {
             version: 1,
             name,
             template: templateId,
-            engineVersion: '0.1.9',
+            engineVersion: '0.1.10',
             createdAt: new Date().toISOString(),
         }, null, 2));
 

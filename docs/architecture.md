@@ -86,6 +86,10 @@ Cairn 由四个主要部分组成：**C++ 引擎运行时**、**N-API 插件**�
 
 后端选择的决策点在 `Renderer::RenderScene`：`Auto` 优先 GPU 并静默回退，`Vulkan` 强制 GPU（失败记日志后回退），`Software` 永远走 CPU。
 
+**GPU 侧把相邻的同款绘制合并成一次实例化调用。** 不透明网格的逐实例数据（模型矩阵 + 材质）放在一块 64 KiB 的 uniform 窗口里，步长固定 256 字节——这个数字必须同时满足 `minUniformBufferOffsetAlignment`（规范上限 256）和着色器里 `draws[]` 的 std140 数组步长，所以 CPU 端的 `DrawUbo` 用 24 个 float 补齐到 256，着色器端用 `vec4 pad[6]` 补齐（std140 里 `float arr[N]` 的步长是 16 字节，直接写 `float pad[24]` 会得到 384 字节，这是踩过的坑）。绘制时只把**相邻**且网格、贴图、剔除模式都相同的绘制并入一个 run，动态偏移指向 run 的首元素，顶点着色器读 `draws[gl_InstanceIndex]` 并用 `flat` varying 把下标传给片元着色器；run 不跨 64 KiB 窗口，超过就断开。只合并相邻 run 保证了不同网格之间的绘制顺序不变，因此画面与逐绘制路径**逐位相同**（用 `CAIRN_NO_INSTANCING=1` 可以关掉合并做 A/B 对比）。`RenderStats::drawCalls` 在 GPU 路径上按 API 提交计数，所以一次实例化 run 只算一次。
+
+**单级联阴影曾经会崩溃。** 阴影贴图用 `layers = 级联数` 创建，而 `CreateImage` 只在 `layers > 1` 时建立逐层视图；`shadows = 1` 时阴影通道却仍然去取 `layerViews[0]`，越界读导致 SIGSEGV（在 GPU 后端、且只在这个级联数下复现，软件路径不受影响）。现在单层贴图直接复用整图视图。
+
 ## 任务系统与性能分析
 
 **一个进程级的工作池支撑所有并行。** `Cairn::Jobs::ParallelFor(count, f)` 把下标 `0..count-1` 动态分发给工作线程，调用线程自己也参与，因此负载天然均衡。池在首次使用时惰性创建（`hardware_concurrency` 上限 16），进程内只此一份；`CAIRN_JOBS_WORKERS=1` 会让它退化为串行执行，方便对照测量。

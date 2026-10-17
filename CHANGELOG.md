@@ -2,6 +2,17 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.10] - 2026-10-17
+
+### Performance: Vulkan instanced batching (+ single-cascade shadow crash fix)
+- **Instanced opaque draws.** Consecutive opaque draws that share mesh, albedo/normal textures and cull mode now collapse into one `vkCmdDrawIndexed` with `instanceCount = N` instead of one draw each. A 300-cube scene goes from 300 draws to 2 (plus the sky pass); 600 cubes give 4.
+- **Per-instance data in a 256-byte-stride uniform window.** `DrawUbo` is padded to exactly 256 bytes (the spec's upper bound for `minUniformBufferOffsetAlignment`) so the std140 `draws[]` array stride in the shader matches the CPU stride; the shader reads `draws[gl_InstanceIndex]` and forwards the index to the fragment stage with a `flat` varying. The shader struct pads with `vec4 pad[6]` — `float pad[24]` would be 384 bytes in std140.
+- **Order-preserving.** Only *adjacent* draws merge, so the relative order of different meshes/materials is unchanged; the instanced path is bit-identical to the old per-draw path (verified by A/B diffing, and re-checkable with `CAIRN_NO_INSTANCING=1`). Runs never cross a 64 KiB window, so a batch is at most 256 instances.
+- **`RenderStats::drawCalls`** on the GPU path now counts API submissions, so an instanced run counts once (matching what a draw-call budget means).
+- **Fix: single-cascade shadows crashed the Vulkan backend.** `CreateImage` only builds per-layer views when `layers > 1`, but the shadow pass indexed `layerViews[c]` unconditionally, so `shadows = 1` segfaulted in `RenderFrame`. A single-layer map now reuses the whole-image view. (Pre-existing; software path unaffected.)
+- **Docs:** instancing stride/layout rules and the cascade bug written up in `docs/architecture.md`.
+- **Verified** per rule 7 on both paths: `VK_LAYER_KHRONOS_validation` reports clean for the instanced scenes, and the GPU frame tracks the software reference (mean channel difference ~1/255 for the non-overlapping cases, unchanged from the pre-instancing build). Software suites stay green.
+
 ## [0.1.9] - 2026-10-17
 
 ### Performance: job system + parallel CPU passes

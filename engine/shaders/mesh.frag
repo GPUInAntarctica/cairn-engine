@@ -7,6 +7,7 @@ layout(location = 0) in vec3 vWorld;
 layout(location = 1) in vec3 vNormal;
 layout(location = 2) in vec4 vTangent;
 layout(location = 3) in vec2 vUv;
+layout(location = 4) flat in uint vInstance;
 layout(location = 0) out vec4 outColor;
 
 layout(std140, set = 0, binding = 0) uniform FrameUBO {
@@ -45,7 +46,7 @@ layout(std140, set = 0, binding = 2) uniform ShadowUBO {
 
 layout(set = 0, binding = 3) uniform sampler2DArray shadowMaps;
 
-layout(std140, set = 0, binding = 4) uniform DrawUBO {
+struct DrawUbo {
     mat4 model;
     vec4 color;        // sRGB albedo + alpha
     vec4 emissive;     // linear rgb (decoded on the CPU at fill time)
@@ -53,7 +54,13 @@ layout(std140, set = 0, binding = 4) uniform DrawUBO {
     vec4 surf;         // x metallic, y roughness, z normalStrength, w unused
     vec4 flags;        // x unlit, y receiveShadows, z albedoSRGB, w hasNormalMap
     vec4 misc;
-} draw;
+    // Padding so the std140 array stride is 256 bytes, matching the CPU
+    // DrawUbo stride (and the 256-byte dynamic-offset window).
+    vec4 pad[6];
+};
+layout(std140, set = 0, binding = 4) uniform DrawUBO {
+    DrawUbo draws[256];   // one 64 KiB window: 256 x 256-byte stride
+};
 
 layout(set = 1, binding = 0) uniform sampler2D albedoMap;
 layout(set = 1, binding = 1) uniform sampler2D normalMap;
@@ -152,6 +159,7 @@ float sampleShadow(vec3 P, float viewDepth, float ndotl) {
 }
 
 void main() {
+    DrawUbo draw = draws[vInstance];
     vec3 P = vWorld;
     vec3 V = frame.camPosOrtho.xyz - P;
     float viewDist = length(V);

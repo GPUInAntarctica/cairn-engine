@@ -74,8 +74,14 @@ struct DrawUbo {
     float surf[4];
     float flags[4];
     float misc[4];
+    // Padded so the std140 array stride in the shader (roundUp(alignof, sizeof))
+    // equals the CPU stride (256 = minUniformBufferOffsetAlignment's upper bound).
+    // That lets one instanced draw read draws[gl_InstanceIndex] and collapse a run
+    // of identical draws into a single vkCmdDrawIndexed. Keep this a multiple of
+    // 16 and >= 256.
+    float pad[24];
 };
-static_assert(sizeof(DrawUbo) == 64 + 6 * 16, "DrawUBO layout must match mesh.vert");
+static_assert(sizeof(DrawUbo) == 256, "DrawUBO stride must be 256 to match the shader's draws[]");
 
 struct LineVert {
     float p[3];
@@ -1547,6 +1553,18 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         fn.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, I.scenePipeLayout, 0, 2, sets, 1,
                                  &offset);
     };
+    // Same, but the texture set is chosen independently of the draw index: the
+    // dynamic offset points at draw `base` while the shader reads
+    // draws[gl_InstanceIndex] for the rest of the run.
+    auto bindBatch = [&](VkCommandBuffer cb, uint32_t base, uint32_t texSlot) {
+        const uint32_t window = base / I.drawUboChunk;
+        const VkDescriptorSet target = I.frameSets[window < I.frameSets.size() ? window : 0];
+        const uint32_t offset = (base % I.drawUboChunk) * (uint32_t)stride;
+        const VkDescriptorSet sets[2] = {target,
+                                         I.texSets[texSlot < I.texSets.size() ? texSlot : 0]};
+        fn.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, I.scenePipeLayout, 0, 2, sets, 1,
+                                 &offset);
+    };
 
     auto bindTexSet = [&](uint32_t slot, VkImageView albedo, VkSampler albedoSampler,
                           VkImageView normal, VkSampler normalSampler) {
@@ -1579,7 +1597,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
 
     VkViewport viewport{0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f};
     VkRect2D scissor{{0, 0}, {static_cast<uint32_t>(w), static_cast<uint32_t>(h)}};
-    uint32_t drawSlot = 0;
+    int opaqueBatches = 0;
 
     // ---- shadow cascades ---------------------------------------------------
     if (shadows) {
@@ -1597,7 +1615,9 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
                          VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
                          VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
             VkRenderingAttachmentInfo depth{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-            depth.imageView = I.shadowMap.layerViews[c];
+            // A single-cascade map is not "layered", so CreateImage leaves
+            // layerViews empty and the whole-image view is the layer view.
+            depth.imageView = I.shadowMap.layers > 1 ? I.shadowMap.layerViews[c] : I.shadowMap.view;
             depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
             depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
             depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -1717,28 +1737,54 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         }
         fn.CmdDraw(cmd, 3, 1, 0, 0);
 
-        // Opaque meshes. Culling is dynamic state so one pipeline serves every
-        // material; the GL->VK y flip makes front faces clockwise.
+        // Opaque meshes, instanced. Culling is dynamic state so one pipeline
+        // serves every material; the GL->VK y flip makes front faces clockwise.
+        // A run of consecutive draws sharing mesh, textures and cull mode
+        // collapses into one vkCmdDrawIndexed: the dynamic offset points at the
+        // run's first draw and the vertex shader reads draws[gl_InstanceIndex].
         fn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines->second.mesh);
-        for (size_t i = 0; i < list.opaque.size() && i < opaqueCount; ++i) {
-            const auto& draw = list.opaque[i];
-            auto meshIt = I.meshes.find(draw.mesh.get());
-            if (meshIt == I.meshes.end()) continue;
+        uint32_t batchSlot = 0;
+        for (size_t i = 0; i < list.opaque.size() && i < opaqueCount;) {
+            const FrameDrawList::OpaqueDraw& first = list.opaque[i];
+            auto meshIt = I.meshes.find(first.mesh.get());
+            if (meshIt == I.meshes.end()) { ++i; continue; }
             VkSampler sampler = I.linearRepeat;
-            const VkImageView albedo = textureView(draw.mat.albedo, &sampler);
+            const VkImageView albedo = textureView(first.mat.albedo, &sampler);
             VkSampler normalSampler = I.linearRepeat;
-            const VkImageView normal = draw.mat.normalMap
-                                           ? textureView(draw.mat.normalMap, &normalSampler)
-                                           : I.whiteTex.view;
-            bindTexSet(static_cast<uint32_t>(drawSlot), albedo, sampler, normal, normalSampler);
-            bindFrameSet(cmd, static_cast<uint32_t>(drawSlot));
+            const VkImageView normal = first.mat.normalMap ? textureView(first.mat.normalMap, &normalSampler)
+                                                           : I.whiteTex.view;
+            const VkCullModeFlags cull = CullModeFor(first.mat.cullMode);
+            // Extend the run: same mesh, same textures, same cull mode. Never
+            // cross a draw-UBO window — the shader cannot index past its 64 KiB.
+            const size_t windowEnd = ((i / I.drawUboChunk) + 1) * (size_t)I.drawUboChunk;
+            size_t j = i + 1;
+            // CAIRN_NO_INSTANCING=1 suppresses run merging so the per-draw path
+            // can be diffed against the instanced one; they must be identical.
+            static const bool noInstancing = std::getenv("CAIRN_NO_INSTANCING") != nullptr;
+            if (!noInstancing) {
+                for (; j < list.opaque.size() && j < opaqueCount && j < windowEnd; ++j) {
+                    const FrameDrawList::OpaqueDraw& d = list.opaque[j];
+                    if (d.mesh.get() != first.mesh.get()) break;
+                    VkSampler s2 = I.linearRepeat;
+                    if (textureView(d.mat.albedo, &s2) != albedo || s2 != sampler) break;
+                    VkSampler ns2 = I.linearRepeat;
+                    const VkImageView n2 = d.mat.normalMap ? textureView(d.mat.normalMap, &ns2)
+                                                           : I.whiteTex.view;
+                    if (n2 != normal || ns2 != normalSampler) break;
+                    if (CullModeFor(d.mat.cullMode) != cull) break;
+                }
+            }
+            bindTexSet(batchSlot, albedo, sampler, normal, normalSampler);
+            bindBatch(cmd, static_cast<uint32_t>(i), batchSlot);
             const VkDeviceSize vOffset = meshIt->second.vertexOffset;
             fn.CmdBindVertexBuffers(cmd, 0, 1, &I.sceneVerts.handle, &vOffset);
             fn.CmdBindIndexBuffer(cmd, I.sceneIndices.handle,
                                    (VkDeviceSize)meshIt->second.indexOffset * 4, VK_INDEX_TYPE_UINT32);
-            fn.CmdSetCullMode(cmd, CullModeFor(draw.mat.cullMode));
-            fn.CmdDrawIndexed(cmd, meshIt->second.indexCount, 1, 0, 0, 0);
-            ++drawSlot;
+            fn.CmdSetCullMode(cmd, cull);
+            fn.CmdDrawIndexed(cmd, meshIt->second.indexCount, (uint32_t)(j - i), 0, 0, 0);
+            ++batchSlot;
+            ++opaqueBatches;
+            i = j;
         }
 
         // Sprites and text: already depth-sorted, alpha blended in display space.
@@ -1940,7 +1986,8 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
     target->height = h;
 
     if (stats) {
-        stats->drawCalls = (int)list.opaque.size() + (int)list.items2D.size() + 1;
+        // Draw calls are API submissions, so instanced runs count once.
+        stats->drawCalls = opaqueBatches + (int)list.items2D.size() + 1;
         stats->triangles = 0;
         for (const auto& d : list.opaque)
             if (d.mesh) stats->triangles += (int)(d.mesh->indices.size() / 3);
