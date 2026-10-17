@@ -1663,6 +1663,173 @@ static void TestSleeping() {
     CHECK(!rb->sleeping);
 }
 
+// Continuous collision detection: a body whose single-step displacement is
+// larger than an obstacle is thick must stop on it instead of passing through,
+// and must behave exactly like the discrete path when it is merely resting.
+static void TestContinuousCollision() {
+    // A thin slab across Z, and a small fast sphere aimed at it from -Z.
+    auto build = [](Scene& scene, RigidBody::CollisionDetection mode, GameObject** bulletOut) {
+        GameObject* wall = scene.CreateEntity("Wall");
+        wall->AddComponent<BoxCollider>()->size = Vec3(12, 12, 0.2f);  // spans z = -0.1..0.1
+        GameObject* bullet = scene.CreateEntity("Bullet");
+        bullet->transform().position = Vec3(0, 0, -8);
+        auto* rb = bullet->AddComponent<RigidBody>();
+        rb->useGravity = false;
+        rb->collisionDetection = mode;
+        bullet->AddComponent<SphereCollider>()->radius = 0.2f;
+        rb->velocity = Vec3(0, 0, 600);        // 10 units per step at 1/60
+        *bulletOut = bullet;
+    };
+
+    // Discrete: 10 units per step against a 0.2-thick wall tunnels straight
+    // through. This is the bug CCD exists to fix, so it must reproduce here.
+    Scene discrete;
+    GameObject* d = nullptr;
+    build(discrete, RigidBody::CollisionDetection::Discrete, &d);
+    for (int i = 0; i < 4; ++i) PhysicsStep(discrete, 1.0f / 60.0f);
+    CHECK(d->transform().position.z > 1.0f);
+
+    // Continuous: the sphere stops with its surface on the near face (z = -0.3).
+    Scene continuous;
+    GameObject* c = nullptr;
+    build(continuous, RigidBody::CollisionDetection::Continuous, &c);
+    for (int i = 0; i < 4; ++i) PhysicsStep(continuous, 1.0f / 60.0f);
+    CHECK(c->transform().position.z < -0.15f);
+    CHECK(c->transform().position.z > -0.45f);
+    // The impact consumed the inward velocity rather than letting it rebuild.
+    CHECK(c->GetComponent<RigidBody>()->velocity.z <= 1.0f);
+
+    // A fast box aimed at the same wall is caught too (box-vs-box is an AABB
+    // test, and the AABB sweep is exact for it).
+    Scene boxed;
+    GameObject* wall = boxed.CreateEntity("Wall");
+    wall->AddComponent<BoxCollider>()->size = Vec3(12, 12, 0.2f);
+    GameObject* box = boxed.CreateEntity("Box");
+    box->transform().position = Vec3(0, 0, -6);
+    auto* brb = box->AddComponent<RigidBody>();
+    brb->useGravity = false;
+    brb->collisionDetection = RigidBody::CollisionDetection::Continuous;
+    box->AddComponent<BoxCollider>()->size = Vec3(0.4f, 0.4f, 0.4f);
+    brb->velocity = Vec3(0, 0, 400);
+    for (int i = 0; i < 4; ++i) PhysicsStep(boxed, 1.0f / 60.0f);
+    CHECK(box->transform().position.z < -0.25f && box->transform().position.z > -0.5f);
+
+    // A body already resting on a floor is not treated as an approaching
+    // obstacle: CCD must not freeze it or change how it slides. Run the same
+    // scene with and without CCD and require identical motion.
+    auto slide = [](RigidBody::CollisionDetection mode) {
+        Scene scene;
+        GameObject* floor = scene.CreateEntity("Floor");
+        floor->transform().position = Vec3(0, -0.5f, 0);  // top at y = 0
+        floor->AddComponent<BoxCollider>()->size = Vec3(40, 1, 40);
+        GameObject* slider = scene.CreateEntity("Slider");
+        slider->transform().position = Vec3(0, 0.5f, 0);
+        auto* rb = slider->AddComponent<RigidBody>();
+        rb->collisionDetection = mode;
+        rb->friction = 0.0f;  // keep sliding, so a CCD stall cannot hide in damping
+        slider->AddComponent<BoxCollider>()->size = Vec3(1, 1, 1);
+        for (int i = 0; i < 30; ++i) PhysicsStep(scene, 1.0f / 60.0f);  // settle
+        rb->velocity = Vec3(6, 0, 0);
+        for (int i = 0; i < 30; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+        return slider->transform().position;
+    };
+    Vec3 slow = slide(RigidBody::CollisionDetection::Discrete);
+    Vec3 swept = slide(RigidBody::CollisionDetection::Continuous);
+    CHECK(NearlyEqual(slow.x, swept.x, 1e-3f));
+    CHECK(NearlyEqual(slow.y, swept.y, 1e-3f));
+    CHECK(slow.x > 0.5f);  // the slide actually happened
+
+    // 2D collision-detection setting is honoured through the 2D shape path.
+    Scene two;
+    GameObject* wall2 = two.CreateEntity("Wall2");
+    wall2->AddComponent<Collider2D>()->size = Vec2(0.2f, 12.0f);  // spans x = -0.1..0.1
+    GameObject* shot = two.CreateEntity("Shot");
+    shot->transform().position = Vec3(-6, 0, 0);
+    auto* srb = shot->AddComponent<RigidBody>();
+    srb->useGravity = false;
+    srb->freezeZ = true;
+    srb->collisionDetection = RigidBody::CollisionDetection::Continuous;
+    shot->AddComponent<Collider2D>()->size = Vec2(0.2f, 0.2f);
+    srb->velocity = Vec3(500, 0, 0);  // 8.3 units per step
+    for (int i = 0; i < 3; ++i) PhysicsStep(two, 1.0f / 60.0f);
+    CHECK(shot->transform().position.x < -0.05f);
+    CHECK(shot->transform().position.x > -0.35f);
+
+    // Conservative advancement measures the real separation, so a wall far
+    // thinner than the step still stops the body (sampling-based CCD would
+    // step right over a 0.02 slab at 10 units per step).
+    {
+        Scene s;
+        GameObject* thin = s.CreateEntity("Thin");
+        thin->AddComponent<BoxCollider>()->size = Vec3(4, 4, 0.02f);  // z = -0.01..0.01
+        GameObject* p = s.CreateEntity("P");
+        p->transform().position = Vec3(0, 0, -8);
+        auto* rb = p->AddComponent<RigidBody>();
+        rb->useGravity = false;
+        rb->collisionDetection = RigidBody::CollisionDetection::Continuous;
+        p->AddComponent<SphereCollider>()->radius = 0.2f;
+        rb->velocity = Vec3(0, 0, 600);
+        for (int i = 0; i < 3; ++i) PhysicsStep(s, 1.0f / 60.0f);
+        CHECK(p->transform().position.z < -0.15f);   // stopped on the near face
+        CHECK(p->transform().position.z > -0.25f);
+    }
+
+    // A near miss past a wall's edge must not be clipped into a hit: the sweep
+    // only stops for an obstacle the body is actually approaching.
+    {
+        Scene s;
+        GameObject* wall = s.CreateEntity("Wall");
+        wall->AddComponent<BoxCollider>()->size = Vec3(12, 12, 0.2f);
+        GameObject* grazer = s.CreateEntity("Grazer");
+        grazer->transform().position = Vec3(6.5f, 6.5f, -8);  // past the corner
+        auto* rb = grazer->AddComponent<RigidBody>();
+        rb->useGravity = false;
+        rb->collisionDetection = RigidBody::CollisionDetection::Continuous;
+        grazer->AddComponent<SphereCollider>()->radius = 0.2f;
+        rb->velocity = Vec3(0, 0, 600);
+        for (int i = 0; i < 3; ++i) PhysicsStep(s, 1.0f / 60.0f);
+        CHECK(grazer->transform().position.z > 1.0f);  // sailed straight past
+    }
+
+    // A diagonal approach stops on the face plane, not somewhere along the
+    // motion: the sweep is a real time-of-impact, not a fixed-sampling guess.
+    {
+        Scene s;
+        GameObject* wall = s.CreateEntity("Wall");
+        wall->AddComponent<BoxCollider>()->size = Vec3(20, 20, 0.2f);
+        GameObject* p = s.CreateEntity("P");
+        p->transform().position = Vec3(-5, 0, -5);
+        auto* rb = p->AddComponent<RigidBody>();
+        rb->useGravity = false;
+        rb->collisionDetection = RigidBody::CollisionDetection::Continuous;
+        p->AddComponent<SphereCollider>()->radius = 0.2f;
+        rb->velocity = Vec3(420, 0, 420);  // 45 degrees, 9.9 units per step
+        for (int i = 0; i < 2; ++i) PhysicsStep(s, 1.0f / 60.0f);
+        CHECK(p->transform().position.z < -0.2f);   // sphere surface on z = -0.1
+        CHECK(p->transform().position.z > -0.35f);
+        CHECK(p->transform().position.x > -1.0f);   // travelled while sweeping
+    }
+
+    // The layer matrix still decides what a sweep can see: a bullet on a layer
+    // that ignores the wall flies straight through it with CCD on.
+    {
+        Scene s;
+        GameObject* wall = s.CreateEntity("Wall");
+        wall->layer = 1;
+        wall->AddComponent<BoxCollider>()->size = Vec3(12, 12, 0.2f);
+        GameObject* p = s.CreateEntity("P");
+        p->transform().position = Vec3(0, 0, -8);
+        auto* rb = p->AddComponent<RigidBody>();
+        rb->useGravity = false;
+        rb->collisionDetection = RigidBody::CollisionDetection::Continuous;
+        p->AddComponent<SphereCollider>()->radius = 0.2f;
+        rb->velocity = Vec3(0, 0, 600);
+        s.SetLayerCollision(0, 1, false);
+        for (int i = 0; i < 3; ++i) PhysicsStep(s, 1.0f / 60.0f);
+        CHECK(p->transform().position.z > 1.0f);
+    }
+}
+
 // The frame profiler aggregates named samples and reports them heaviest-first.
 static void TestProfiler() {
     Profiler::Reset();
@@ -1796,6 +1963,7 @@ int main() {
     TestCharacterController();
     TestJoints();
     TestSleeping();
+    TestContinuousCollision();
     TestProfiler();
     TestJobs();
 

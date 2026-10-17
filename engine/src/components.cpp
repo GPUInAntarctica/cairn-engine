@@ -91,6 +91,7 @@ constexpr PropertyDef ObjectField(const char* name, const char* label) {
 const char* const kMeshSources[] = {"Cube", "Sphere", "Plane", "Quad", "Cylinder", "Cone", "Torus", "Custom (OBJ)"};
 const char* const kLightTypes[] = {"Directional", "Point", "Spot"};
 const char* const kAlignments[] = {"Left", "Center", "Right"};
+const char* const kCollisionDetections[] = {"Discrete", "Continuous"};
 
 // ---------------------------------------------------------------------------
 // Per-component property tables.
@@ -186,6 +187,9 @@ const std::vector<PropertyDef>& RigidBodyDefs() {
         Field<RigidBody, &RigidBody::restitution>("restitution", "Bounciness", EditorPropKind::Float),
         Field<RigidBody, &RigidBody::friction>("friction", "Friction", EditorPropKind::Float),
         Field<RigidBody, &RigidBody::freezeZ>("freezeZ", "Freeze Z", EditorPropKind::Bool),
+        EnumField<RigidBody, &RigidBody::collisionDetection>("collisionDetection",
+                                                             "Collision Detection",
+                                                             kCollisionDetections, 2),
         Field<RigidBody, &RigidBody::allowSleep>("allowSleep", "Allow Sleep", EditorPropKind::Bool),
         Field<RigidBody, &RigidBody::sleepThreshold>("sleepThreshold", "Sleep Threshold", EditorPropKind::Float),
         Field<RigidBody, &RigidBody::sleepDelay>("sleepDelay", "Sleep Delay", EditorPropKind::Float),

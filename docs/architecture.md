@@ -50,7 +50,7 @@ Cairn 由四个主要部分组成：**C++ 引擎运行时**、**N-API 插件**�
 | `engine/src/renderer.cpp` | 渲染前端 + 多线程软件光栅化：场景收集（`GatherScene`）、阴影视锥拟合（`FitCascadeSet`）、后端分发、裁剪（六面体）、透视校正插值、GGX、天空、雾、2D 精灵/文本、调试线 |
 | `engine/src/backend_vulkan.cpp` | Vulkan 1.3 GPU 后端（dynamic rendering + synchronization2，运行时 `dlopen`）：网格/精灵/线/天空管线、MSAA 解析、级联阴影数组、纹理与 mipmap 上传、后处理链、颜色与深度回读。`engine/src/vk_loader.h` 负责符号解析（设备级命令必须走 `vkGetDeviceProcAddr`） |
 | `engine/shaders/*.vert,frag` | GLSL 源，构建时由 `glslc` 编译为 SPIR-V 并嵌入库（`engine/cmake/embed_spirv.cmake`）；缺少 Vulkan 头文件或编译器时整个后端被裁掉 |
-| `engine/src/physics.cpp` | 半隐式欧拉积分，AABB/球碰撞（3D）与 XY 平面盒（2D），触发器事件回调脚本 |
+| `engine/src/physics.cpp` | 半隐式欧拉积分，AABB/球/胶囊碰撞（3D）与 XY 平面盒（2D），层矩阵、射线/重叠查询、角色控制器、距离/弹簧关节、休眠、碰撞与触发回调，以及可选的连续碰撞检测 |
 | `engine/src/script_host.cpp` | `dlopen` 玩法库、注册表查询、热重载（复制到唯一文件名避免加载器缓存） |
 | `engine/src/engine.cpp` | 门面：场景/资产/输入/播放状态机/拾取/投影，编辑器与 Player 共用；预制体（`.prefab` 读写、实例化、apply/revert）也在此层 |
 | `addon/cairn_addon.cc` | N-API 绑定，暴露引擎门面并共享帧缓冲 |
@@ -68,6 +68,14 @@ Cairn 由四个主要部分组成：**C++ 引擎运行时**、**N-API 插件**�
 2. **模拟** — Play 模式下 `Engine::Update(dt)` 累积固定步长（1/60）：先跑脚本 `FixedUpdate`，再走物理，随后可变步长 `OnUpdate`
 3. **渲染** — 编辑器相机或场景主相机 → `GatherScene()` 产出 `FrameDrawList` → `FitCascadeSet()` 拟合级联 → 分派到后端。软件后端按三角形原子分发给工作线程；Vulkan 后端录制一条命令缓冲（阴影级联 → 主 pass → 后处理链），`vkQueueSubmit` 后阻塞等 fence
 4. **呈现** — 两条路径都把结果写进同一块 `FrameTarget`，帧缓冲通过插件共享给 JS（零拷贝），`putImageData` 到 canvas；引擎日志与音频事件随后被轮询
+
+## 物理
+
+一步 `PhysicsStep(scene, dt)` 的顺序：**积分**（半隐式欧拉，重力/力/阻力 → 位置与角速度）→ **收集形状**（积分之后按世界矩阵收集，形状数据因此不会与物体脱节）→ **broadphase**（X 轴 sweep-and-prune，候选对再排回下标序以保证回调顺序稳定）→ **窄相**（`Collide()` 求接触与触发重叠，实体对走冲量 + 恢复系数 + 摩擦，位置修正按逆质量分配）→ **关节求解** → **休眠**。3D 与 2D 形状永不混对。
+
+**连续碰撞检测（CCD）是逐刚体可选的。** 默认（`collisionDetection = Discrete`）完全走上面的离散流程：先把物体按 `velocity * dt` 移过去，再测重叠。因此单步位移大于障碍厚度时（子弹、长距离下落）会直接穿过去。选了 `Continuous` 的刚体在积分前多一趟**保守推进（conservative advancement）**：从当前位置出发，沿运动方向只推进「到最近正在接近的障碍的距离」，所以构造上**不可能越过接触点**；反复迭代逼近真实碰撞时刻，几何上受限的迭代次数只会影响掠过式逼近的精度，不会让它穿过去。位移被截断到碰撞时刻之后一点点（与物体尺度成比例的 skin），于是剩下的响应完全交给原有的窄相——冲量、恢复系数、摩擦、`OnCollisionEnter/Stay/Exit` 都不需要第二套代码。用保守推进而不是固定采样，是为了让**薄墙**（比一步位移薄得多）也能挡住，而且斜向命中停在真实表面上，而不是被放大的包围盒提前截停。
+
+距离函数按窄相建模的每一对形状各写一份（球/胶囊精确，盒子与胶囊-盒用窄相同款的 AABB 间隙），所以 CCD 与窄相对「接触」的定义一致。扫描目标只有实体静态/运动学碰撞体（对应 Unity 的 `CollisionDetectionMode.Continuous`，不是 `ContinuousDynamic`），并且**步首就已经在接触的障碍会被排除**——否则一个安静躺在地板上的物体会读到零碰撞时刻，连滑动都会被冻住。没有刚体开启 CCD 时，这一整块（收集 + 扫描 + 新代码路径）都不会执行，场景行为与之前逐位相同。
 
 ## 脚本热重载
 

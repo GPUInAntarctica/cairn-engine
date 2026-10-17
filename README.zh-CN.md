@@ -229,7 +229,7 @@ docs/           文档
 
 ## 状态
 
-Cairn 当前版本 **0.1.12**——是个能用但仍早的起点。GPU 后端是默认路径但还年轻；软件光栅化器是参考实现，测试套件也固定跑它，因此**两条路径之间任何渲染差异都算 GPU 后端的 bug，而不是有意为之**。里程碑历史见 [CHANGELOG](CHANGELOG.md)，提 PR 前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+Cairn 当前版本 **0.1.13**——是个能用但仍早的起点。GPU 后端是默认路径但还年轻；软件光栅化器是参考实现，测试套件也固定跑它，因此**两条路径之间任何渲染差异都算 GPU 后端的 bug，而不是有意为之**。里程碑历史见 [CHANGELOG](CHANGELOG.md)，提 PR 前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 

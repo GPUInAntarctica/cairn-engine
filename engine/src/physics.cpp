@@ -220,6 +220,66 @@ bool Collide(const Shape& a, const Shape& b, Contact* out) {
     return true;
 }
 
+// Signed separation between two shapes together with the unit normal pointing
+// from `b` toward `a` (the convention Contact::normal uses). Mirrors the pairs
+// Collide() resolves: exact for spheres and capsules, AABB gaps for boxes and
+// for the capsule-vs-box approximation.
+float ShapeSeparation(const Shape& a, const Shape& b, Vec3* nOut) {
+    *nOut = Vec3(0, 1, 0);
+    if (a.Is2D() != b.Is2D()) return 1e30f;  // 2D and 3D shapes never interact
+
+    const bool aCap = a.kind == Shape::Capsule3;
+    const bool bCap = b.kind == Shape::Capsule3;
+    Vec3 d;  // from b toward a
+    float sep;
+    if (aCap && bCap) {
+        Vec3 c1, c2;
+        ClosestSegments(a.p0, a.p1, b.p0, b.p1, &c1, &c2);
+        d = c1 - c2;
+        sep = d.Length() - (a.radius + b.radius);
+    } else if (aCap && b.kind == Shape::Sphere3) {
+        d = b.center - ClosestOnSegment(b.center, a.p0, a.p1);
+        sep = d.Length() - (a.radius + b.radius);
+    } else if (bCap && a.kind == Shape::Sphere3) {
+        d = a.center - ClosestOnSegment(a.center, b.p0, b.p1);
+        sep = d.Length() - (a.radius + b.radius);
+    } else if (a.kind == Shape::Sphere3 && b.kind == Shape::Sphere3) {
+        d = a.center - b.center;
+        sep = d.Length() - (a.radius + b.radius);
+    } else if (a.kind == Shape::Sphere3 || b.kind == Shape::Sphere3) {
+        const Shape& sph = a.kind == Shape::Sphere3 ? a : b;
+        const Shape& box = a.kind == Shape::Sphere3 ? b : a;
+        Vec3 closest(std::clamp(sph.center.x, box.min.x, box.max.x),
+                     std::clamp(sph.center.y, box.min.y, box.max.y),
+                     std::clamp(sph.center.z, box.min.z, box.max.z));
+        d = sph.center - closest;              // from box toward sphere
+        if (a.kind != Shape::Sphere3) d = -d;  // a is the box: reorient to b -> a
+        sep = d.Length() - sph.radius;
+    } else {
+        // AABB vs AABB, the model Collide() uses for boxes (2D ignores Z).
+        float gx = std::max(a.min.x - b.max.x, b.min.x - a.max.x);
+        float gy = std::max(a.min.y - b.max.y, b.min.y - a.max.y);
+        float gz = a.Is2D() ? -1e30f : std::max(a.min.z - b.max.z, b.min.z - a.max.z);
+        float g = std::max({gx, gy, gz});
+        if (g == gx) *nOut = Vec3(a.min.x > b.max.x ? 1.0f : -1.0f, 0, 0);
+        else if (g == gy) *nOut = Vec3(0, a.min.y > b.max.y ? 1.0f : -1.0f, 0);
+        else *nOut = Vec3(0, 0, a.min.z > b.max.z ? 1.0f : -1.0f);
+        return g;
+    }
+    float len = d.Length();
+    if (len > 1e-9f) *nOut = d / len;
+    return sep;
+}
+
+// Translates a shape in world space (rotation is not swept by CCD).
+void TranslateShape(Shape* s, const Vec3& off) {
+    s->min += off;
+    s->max += off;
+    s->center += off;
+    s->p0 += off;
+    s->p1 += off;
+}
+
 // Nearest ray hit against one shape. `d` must be normalized; returns the
 // distance and outward normal at the entry point.
 bool RayShape(const Shape& s, const Vec3& o, const Vec3& d, float maxT, float* tOut, Vec3* nOut) {
@@ -350,64 +410,68 @@ void MoveWorld(Transform& t, const Vec3& worldDelta) {
     t.MarkWorldDirty();
 }
 
-// Gather every enabled collider in world space. Called once per step, after
-// integration, so shape data can never drift out of sync with the objects.
-void GatherShapes(Scene& scene, std::vector<Shape>* out) {
-    for (const auto& go : scene.objects) {
-        if (!go->ActiveInHierarchy()) continue;
-        Transform& t = go->transform();
-        Mat4 world = t.WorldMatrix();
-        RigidBody* rb = go->GetComponent<RigidBody>();
-        bool dynamic = rb && rb->enabled && !rb->isKinematic;
-        auto add = [&](Shape s) {
-            s.go = go.get();
-            s.isStatic = !dynamic;
-            s.rb = dynamic ? rb : nullptr;
-            s.layer = go->layer;
-            out->push_back(s);
-        };
-        if (auto* c = go->GetComponent<BoxCollider>(); c && c->enabled) {
-            AABB box = WorldBox(*c, world);
-            Shape s;
-            s.kind = Shape::Box3;
-            s.comp = c;
-            s.isTrigger = c->isTrigger;
-            s.min = box.min; s.max = box.max; s.center = box.Center();
-            add(s);
-        }
-        if (auto* c = go->GetComponent<SphereCollider>(); c && c->enabled) {
-            Shape s;
-            s.kind = Shape::Sphere3;
-            s.comp = c;
-            s.isTrigger = c->isTrigger;
-            s.center = TransformPoint(world, c->center);
-            s.radius = c->radius * WorldMaxScale(t);
-            s.min = s.center - Vec3(s.radius);
-            s.max = s.center + Vec3(s.radius);
-            add(s);
-        }
-        if (auto* c = go->GetComponent<CapsuleCollider>(); c && c->enabled) {
-            Shape s;
-            s.kind = Shape::Capsule3;
-            s.comp = c;
-            s.isTrigger = c->isTrigger;
-            WorldCapsule(c->radius, c->height, c->direction, c->center, world, &s.p0, &s.p1,
-                         &s.radius);
-            s.min = Vec3::Min(s.p0, s.p1) - Vec3(s.radius);
-            s.max = Vec3::Max(s.p0, s.p1) + Vec3(s.radius);
-            s.center = (s.p0 + s.p1) * 0.5f;
-            add(s);
-        }
-        if (auto* c = go->GetComponent<Collider2D>(); c && c->enabled) {
-            AABB box = WorldBox2D(*c, world);
-            Shape s;
-            s.kind = Shape::Box2;
-            s.comp = c;
-            s.isTrigger = c->isTrigger;
-            s.min = box.min; s.max = box.max; s.center = box.Center();
-            add(s);
-        }
+// Gather every enabled collider of one object in world space.
+void GatherObjectShapes(GameObject& go, std::vector<Shape>* out) {
+    if (!go.ActiveInHierarchy()) return;
+    Transform& t = go.transform();
+    Mat4 world = t.WorldMatrix();
+    RigidBody* rb = go.GetComponent<RigidBody>();
+    bool dynamic = rb && rb->enabled && !rb->isKinematic;
+    auto add = [&](Shape s) {
+        s.go = &go;
+        s.isStatic = !dynamic;
+        s.rb = dynamic ? rb : nullptr;
+        s.layer = go.layer;
+        out->push_back(s);
+    };
+    if (auto* c = go.GetComponent<BoxCollider>(); c && c->enabled) {
+        AABB box = WorldBox(*c, world);
+        Shape s;
+        s.kind = Shape::Box3;
+        s.comp = c;
+        s.isTrigger = c->isTrigger;
+        s.min = box.min; s.max = box.max; s.center = box.Center();
+        add(s);
     }
+    if (auto* c = go.GetComponent<SphereCollider>(); c && c->enabled) {
+        Shape s;
+        s.kind = Shape::Sphere3;
+        s.comp = c;
+        s.isTrigger = c->isTrigger;
+        s.center = TransformPoint(world, c->center);
+        s.radius = c->radius * WorldMaxScale(t);
+        s.min = s.center - Vec3(s.radius);
+        s.max = s.center + Vec3(s.radius);
+        add(s);
+    }
+    if (auto* c = go.GetComponent<CapsuleCollider>(); c && c->enabled) {
+        Shape s;
+        s.kind = Shape::Capsule3;
+        s.comp = c;
+        s.isTrigger = c->isTrigger;
+        WorldCapsule(c->radius, c->height, c->direction, c->center, world, &s.p0, &s.p1,
+                     &s.radius);
+        s.min = Vec3::Min(s.p0, s.p1) - Vec3(s.radius);
+        s.max = Vec3::Max(s.p0, s.p1) + Vec3(s.radius);
+        s.center = (s.p0 + s.p1) * 0.5f;
+        add(s);
+    }
+    if (auto* c = go.GetComponent<Collider2D>(); c && c->enabled) {
+        AABB box = WorldBox2D(*c, world);
+        Shape s;
+        s.kind = Shape::Box2;
+        s.comp = c;
+        s.isTrigger = c->isTrigger;
+        s.min = box.min; s.max = box.max; s.center = box.Center();
+        add(s);
+    }
+}
+
+// Gather every enabled collider in world space. Called once per step for the
+// narrow phase (after integration, so shape data can never drift out of sync
+// with the objects) and lazily during integration for the CCD obstacle list.
+void GatherShapes(Scene& scene, std::vector<Shape>* out) {
+    for (const auto& go : scene.objects) GatherObjectShapes(*go, out);
 }
 
 bool HasEnabledCollider(const GameObject& go) {
@@ -424,6 +488,96 @@ bool HasEnabledCollider(const GameObject& go) {
         }
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Continuous collision detection (CCD).
+//
+// The discrete step moves a body by `velocity * dt` and only then runs the
+// narrow phase, so a body whose single-step displacement is larger than an
+// obstacle is thick (a bullet, a long fall) passes straight through it. A body
+// that opts in with RigidBody::collisionDetection = Continuous is swept first:
+// conservative advancement walks along the motion, advancing only by the
+// current separation from the nearest approaching obstacle, which by
+// construction can never step past a contact. The displacement is clamped to
+// just past the time of impact so the ordinary narrow phase still produces the
+// contact impulse, restitution and OnCollisionEnter events.
+//
+// Only translation is swept and only solid static/kinematic colliders are
+// targets - the same scope as Unity's CollisionDetectionMode.Continuous.
+// ---------------------------------------------------------------------------
+
+// Obstacles this close at the start of the step are treated as existing
+// contacts and left to the discrete narrow phase. Sweeping them would read a
+// zero time of impact for a body merely resting on them - which would stop a
+// body sliding along a floor dead, and a body co-tangent to a wall dead, both
+// of which are ordinary states. The trade is that a body already touching an
+// obstacle and *then* given a large velocity into it (a script write or an
+// impulse, since the solver zeroes the approach on contact) is not caught by
+// the sweep that step. Resting contacts stay cheap and correct; the escape
+// hatch is the same one Unity's CCD leaves.
+constexpr float kCcdContactSlop = 1e-3f;
+
+// First time in [0,1] at which `mover` translating by `delta` reaches one of
+// `obstacles`, or false when the motion ends clear. Each iteration advances by
+// the separation from the nearest approaching obstacle, so the sweep can never
+// overshoot a contact; the iteration budget only bounds grazing approaches.
+bool CcdTimeOfImpact(const Shape& mover, const Vec3& delta, const std::vector<Shape>& obstacles,
+                     const Scene& scene, float* tOut) {
+    float t = 0.0f;
+    for (int iter = 0; iter < 32; ++iter) {
+        Shape cur = mover;
+        TranslateShape(&cur, delta * t);
+        float advance = 1e30f;
+        for (const Shape& o : obstacles) {
+            if (!scene.LayerCollides(cur.layer, o.layer)) continue;
+            Vec3 n;
+            float sep = ShapeSeparation(cur, o, &n);
+            if (sep > 1e29f) continue;             // mismatched dimensionality
+            if (sep <= 0.0f) { *tOut = t; return true; }
+            float closing = -Vec3::Dot(delta, n);  // > 0 while approaching
+            if (closing <= 1e-9f) continue;        // parallel or receding
+            advance = std::min(advance, sep / closing);
+        }
+        if (advance > 1e29f) return false;         // nothing ahead
+        t += advance;
+        if (t >= 1.0f) return false;               // motion ends short of it
+    }
+    *tOut = t;  // budget spent: `t` is still a safe lower bound on the impact
+    return true;
+}
+
+// Clamps a body's step displacement so it stops at the first solid
+// static/kinematic collider it would otherwise tunnel through.
+Vec3 CcdDisplacement(GameObject& go, const Vec3& delta, const std::vector<Shape>& obstacles,
+                     const Scene& scene) {
+    const float dist = delta.Length();
+    if (dist < 1e-6f) return delta;
+    std::vector<Shape> movers;
+    GatherObjectShapes(go, &movers);
+    if (movers.empty()) return delta;
+
+    float travel = dist;
+    for (const Shape& m : movers) {
+        // Drop obstacles already in contact before sweeping (see the slop note
+        // above); everything else that can interact is a candidate target.
+        std::vector<Shape> ahead;
+        ahead.reserve(obstacles.size());
+        for (const Shape& o : obstacles) {
+            if (!scene.LayerCollides(m.layer, o.layer)) continue;
+            Vec3 n;
+            if (ShapeSeparation(m, o, &n) < kCcdContactSlop) continue;
+            ahead.push_back(o);
+        }
+        float t;
+        if (!CcdTimeOfImpact(m, delta, ahead, scene, &t)) continue;
+        // Stop just past the impact so a contact exists for the narrow phase,
+        // scaled to the body so the nudge stays meaningful at any scene scale.
+        float extent = std::max({m.max.x - m.min.x, m.max.y - m.min.y, m.max.z - m.min.z});
+        float skin = std::max(1e-4f, 1e-3f * extent);
+        travel = std::min(travel, t * dist + skin);
+    }
+    return delta / dist * std::min(travel, dist);
 }
 
 void ResolveContact(Shape& a, Shape& b, const Contact& ct) {
@@ -472,6 +626,12 @@ void PhysicsReset(Scene* scene) {
 void PhysicsStep(Scene& scene, float dt) {
     if (dt <= 0) return;
 
+    // Obstacles for continuous collision detection. Statics never move during
+    // a step, so this can be gathered lazily the first time a CCD body is
+    // integrated - a scene where nobody opts in pays nothing at all.
+    std::vector<Shape> ccdObstacles;
+    bool ccdObstaclesReady = false;
+
     // Integrate dynamic rigidbodies (semi-implicit Euler, world space).
     for (const auto& go : scene.objects) {
         if (!go->ActiveInHierarchy()) continue;
@@ -493,7 +653,19 @@ void PhysicsStep(Scene& scene, float dt) {
         rb->m_accumForce = Vec3();
         if (rb->drag > 0) rb->velocity *= std::max(0.0f, 1.0f - rb->drag * dt);
         if (rb->freezeZ) rb->velocity.z = 0.0f;
-        MoveWorld(go->transform(), rb->velocity * dt);
+        Vec3 delta = rb->velocity * dt;
+        if (rb->collisionDetection == RigidBody::CollisionDetection::Continuous) {
+            if (!ccdObstaclesReady) {
+                std::vector<Shape> all;
+                GatherShapes(scene, &all);
+                for (const Shape& s : all) {
+                    if (s.isStatic && s.IsSolid()) ccdObstacles.push_back(s);
+                }
+                ccdObstaclesReady = true;
+            }
+            delta = CcdDisplacement(*go, delta, ccdObstacles, scene);
+        }
+        MoveWorld(go->transform(), delta);
 
         // Angular motion: torque feeds angular velocity, which spins the
         // transform. A simple isotropic inertia keeps it stable.

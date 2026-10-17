@@ -404,6 +404,16 @@ public:
     Vec3 angularVelocity{0, 0, 0};  // radians/second (integrated each step)
     bool freezeZ = false;           // lock motion along Z (2D games)
 
+    // How the step finds collisions for this body. `Discrete` moves the body by
+    // `velocity * dt` and only then tests for overlap, so a body whose
+    // single-step displacement is larger than an obstacle is thick (a bullet, a
+    // long fall) passes straight through it. `Continuous` sweeps the body
+    // against solid static/kinematic colliders before moving it and stops it at
+    // the first contact, at the cost of a few extra shape tests per step
+    // (Unity's CollisionDetectionMode.Continuous).
+    enum class CollisionDetection : int { Discrete = 0, Continuous = 1 };
+    CollisionDetection collisionDetection = CollisionDetection::Discrete;
+
     // Sleeping: a body at rest for `sleepDelay` seconds stops integrating and
     // is treated as static by the solver until something disturbs it. AddForce/
     // AddImpulse/AddTorque wake it, and so does writing a non-zero velocity.

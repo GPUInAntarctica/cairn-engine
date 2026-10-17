@@ -2,6 +2,17 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.13] - 2026-10-17
+
+### Physics: continuous collision detection (CCD)
+- **Fast bodies no longer tunnel through thin geometry.** The step was purely discrete: it moved a body by `velocity * dt` and only then ran the narrow phase, so anything whose single-step displacement exceeded an obstacle's thickness (a bullet, a long fall, a launched crate) ended up on the far side of it. `RigidBody` now has a `collisionDetection` field (`Discrete` | `Continuous`, Unity's `CollisionDetectionMode`); a body that opts into `Continuous` is swept before it moves and stops at the first solid static/kinematic collider in its path.
+- **The sweep is a real time-of-impact, not fixed sampling.** `Continuous` bodies use conservative advancement: starting at the current position it repeatedly advances by the *current separation* from the nearest approaching obstacle, which by construction can never step past a contact. One distance function per shape pair (exact for spheres and capsules, the same AABB gap the narrow phase uses for boxes) makes it accurate as well as safe — a 0.02-thick slab stops a body moving 10 units per step, and a diagonal approach stops on the surface instead of on an inflated bounding box. Sampling-based CCD would need one sample per 0.02 units to do the same.
+- **The existing solver does the response.** The displacement is clamped to just past the impact (by a small, body-relative skin), so the ordinary narrow phase still produces the contact impulse, restitution, friction and `OnCollisionEnter`/`Stay`/`Exit` events. No response code was duplicated.
+- **Zero cost and zero change when unused.** The obstacle gather, the sweep and the new code path are all skipped unless a body opts in, so every existing scene runs the identical discrete step. Obstacles already in contact at the start of the step are filtered out, so a resting or sliding body is never mistaken for one about to impact.
+- **Scope.** Translation only (rotation is not swept) and solid static/kinematic targets only — the same scope as Unity's `CollisionDetectionMode.Continuous`, not `ContinuousDynamic`.
+- **Surfaces:** the `RigidBody::collisionDetection` enum in `engine/include/cairn/scripting.h`, the reflection table (so the inspector shows a dropdown and `cairn component.schema --type RigidBody` lists it), and scene/CLI round-trips (enum props take integers, per the existing CLI contract).
+- **Tests:** `TestContinuousCollision` pins the discrete tunnel, the continuous stop (sphere, box and 2D), a wall thinner than the step, a near miss past an edge that must *not* be clipped, the diagonal stop plane, and an A/B check that a resting body slides identically with and without CCD. Confirmed non-vacuous: disabling the sweep fails 4 of the checks.
+
 ## [0.1.12] - 2026-10-17
 
 ### Performance: bindless texture arrays (batching no longer needs a shared texture)

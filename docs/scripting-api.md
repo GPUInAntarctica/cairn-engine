@@ -81,9 +81,12 @@ rb->angularVelocity = Vec3(0, 3.14f, 0);  // radians/second
 rb->AddForce(Vec3(0, 10, 0));   // accumulated, applied next step
 rb->AddImpulse(Vec3(0, 5, 0));  // immediate velocity change
 rb->AddTorque(Vec3(0, 1, 0));   // accumulated angular acceleration
+rb->collisionDetection = RigidBody::CollisionDetection::Continuous;  // sweep fast movers
 ```
 
 Colliders: `BoxCollider` (3D AABB), `SphereCollider`, `CapsuleCollider` (swept sphere along a Y/X/Z axis), `Collider2D` (XY plane). A collider without a `RigidBody` is static. `isTrigger` colliders fire the trigger callbacks instead of resolving.
+
+Collision detection: `Discrete` (default) moves the body by `velocity * dt` and then tests for overlap, so a body whose single-step displacement exceeds an obstacle's thickness passes through it. `Continuous` sweeps the body against solid static/kinematic colliders before moving it (translation only) and stops it at the first contact. Use it for bullets, launched projectiles and long falls; leave it off for bodies that never move fast, since it costs a few extra shape tests per step.
 
 For player/agent movement use a `CharacterController`, a kinematic capsule that is moved by code rather than the solver:
 
