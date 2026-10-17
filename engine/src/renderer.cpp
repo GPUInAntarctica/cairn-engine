@@ -355,22 +355,23 @@ struct Renderer::Impl {
 
     std::vector<ClipVert> xformScratch, polyScratch, clipScratch;
 
-    // Emits one quad (two triangles) from a shared 2D vertex range. The GPU
-    // backend uploads the same vertices verbatim, so the software path only has
-    // to project and clip them.
-    void EmitQuadVerts(const Vertex2D* q, const MaterialGpu& mat) {
+    // Emits a shared 2D vertex range. The GPU backend uploads the same vertices
+    // verbatim as a triangle list, so the software path splits the range into
+    // triples and projects/clips each one. `count` is always a multiple of 3
+    // (AppendQuad stores two triangles per quad; text stores one item per run).
+    void EmitQuadVerts(const Vertex2D* verts, uint32_t count, const MaterialGpu& mat) {
         pendingMat = mat;
-        ClipVert cv[4];
-        for (int i = 0; i < 4; ++i) {
-            cv[i].world = q[i].pos;
-            cv[i].clip = viewProj * Vec4(q[i].pos, 1.0f);
-            cv[i].normal = q[i].normal;
-            cv[i].uv = q[i].uv;
-        }
-        static const int quads[2][3] = {{0, 1, 2}, {0, 2, 3}};
         std::vector<ClipVert> clipped;
-        for (int t = 0; t < 2; ++t) {
-            ClipVert tri[3] = {cv[quads[t][0]], cv[quads[t][1]], cv[quads[t][2]]};
+        for (uint32_t v = 0; v + 3 <= count; v += 3) {
+            ClipVert tri[3];
+            for (int k = 0; k < 3; ++k) {
+                const Vertex2D& s = verts[v + k];
+                tri[k].world = s.pos;
+                tri[k].clip = viewProj * Vec4(s.pos, 1.0f);
+                tri[k].normal = s.normal;
+                tri[k].uv = s.uv;
+                tri[k].tangent = Vec4(0, 0, 0, 0);  // 2D verts carry no tangent
+            }
             clipped.clear();
             if (!ClipPolygon(tri, 3, clipped)) continue;
             EmitPolygon(clipped);
@@ -1815,11 +1816,7 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
     // emitted so the depth sort stays exact (clipped quads can fan out).
     for (const auto& item : list.items2D) {
         size_t startIndex = R.triVerts.size();
-        for (uint32_t v = 0; v < item.vertCount; v += 6) {
-            const Vertex2D* quad = list.verts2D.data() + item.firstVert + v;
-            if (v + 6 > item.vertCount) break;
-            R.EmitQuadVerts(quad, item.mat);
-        }
+        R.EmitQuadVerts(list.verts2D.data() + item.firstVert, item.vertCount, item.mat);
         int from = (int)(startIndex / 3);
         int to = (int)(R.triVerts.size() / 3);
         // Sorted per item and drawn on this thread so blend order is exact.

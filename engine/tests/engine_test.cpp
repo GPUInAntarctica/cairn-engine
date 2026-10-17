@@ -16,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <set>
 
 using namespace Cairn;
 
@@ -1093,6 +1094,29 @@ static void WriteTestBmp(const std::string& path, int w, int h, uint8_t r, uint8
         }
 }
 
+// Minimal 24-bit BMP of a 1-texel checkerboard (stb_image reads it).
+static void WriteTestBmpChecker(const std::string& path, int w, int h,
+                                uint8_t r0, uint8_t g0, uint8_t b0,
+                                uint8_t r1, uint8_t g1, uint8_t b1) {
+    const int row = w * 3;
+    const uint32_t dataSize = (uint32_t)(row * h);
+    const uint32_t fileSize = 54 + dataSize;
+    std::ofstream out(path, std::ios::binary);
+    auto u16 = [&](uint16_t v) { out.put((char)(v & 0xff)); out.put((char)(v >> 8)); };
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) out.put((char)((v >> (8 * i)) & 0xff)); };
+    out.put('B'); out.put('M');
+    u32(fileSize); u16(0); u16(0); u32(54);
+    u32(40); u32((uint32_t)w); u32((uint32_t)h); u16(1); u16(24);
+    u32(0); u32(dataSize); u32(2835); u32(2835); u32(0); u32(0);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const bool odd = ((x + y) & 1) != 0;
+            out.put((char)(odd ? b1 : b0));
+            out.put((char)(odd ? g1 : g0));
+            out.put((char)(odd ? r1 : r0));
+        }
+}
+
 // Bindless texture arrays: a batched run shares one mesh and cull mode, so the
 // only thing keeping two draws' textures apart is the per-instance slot index
 // in the draw uniform. Three cubes with three albedo textures must render as
@@ -1186,6 +1210,83 @@ static void TestBindlessTextureSlots() {
     for (int i = 0; i < 3; ++i)
         for (int c = 0; c < 3; ++c)
             CHECK(std::abs(channelPeak(gpu, i, c) - channelPeak(cpu, i, c)) < 70);
+}
+
+// 2D rendering quality. A pixel-perfect sprite has to cover its whole quad
+// (both triangles) and sample texels without blending them. Two real bugs are
+// pinned here: the software path dropped the second triangle of every 2D quad
+// (so half of every sprite and glyph was missing), and the GPU sampled
+// pixel-perfect sprites through a linear, mipmapped sampler (so AI-drawn pixel
+// art came out blurred and the two backends disagreed).
+static void TestSpriteQuality() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-sprite").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    // 16x16 alternating pure red / pure blue every texel. Nearest sampling
+    // yields exactly two lit colours; filtering across texels shows up as an
+    // in-between colour (a red/blue blend is neither red nor blue).
+    const std::string tex = "Assets/Textures/checker.bmp";
+    WriteTestBmpChecker(dir + "/" + tex, 16, 16, 255, 0, 0, 0, 0, 255);
+
+    auto build = [&](Engine& engine, int backend) {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(128, 128);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;       // no multisample resolve to soften the texel edges
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 2.0f;   // 4x4 world units on screen
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        GameObject* sprite = scene.CreateEntity("Sprite");
+        auto* sr = sprite->AddComponent<SpriteRenderer>();
+        sr->texturePath = tex;
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = 3.0f;      // 16 texels -> 5.33 units: overfills the view
+        (void)sprite;
+    };
+    auto rgb = [](Engine& engine, int x, int y) {
+        const FrameTarget& t = engine.frame();
+        const uint8_t* p = &t.color[((size_t)y * (size_t)t.width + (size_t)x) * 4];
+        return std::array<int, 3>{(int)p[0], (int)p[1], (int)p[2]};
+    };
+    auto checkSprite = [&](Engine& engine) {
+        // Both triangles of the quad must be covered. With the second one
+        // dropped the upper-left quadrant of the sprite is left as background.
+        for (const auto& q : {std::pair<int, int>{32, 32}, {96, 32}, {32, 96}, {96, 96}}) {
+            auto c = rgb(engine, q.first, q.second);
+            CHECK(c[0] + c[1] + c[2] > 24);
+        }
+        // Pixel-perfect sampling must not blend texels: the sprite interior
+        // only ever shows the two source colours, lit by the ambient term.
+        std::set<int> colours;
+        for (int y = 24; y < 104; ++y)
+            for (int x = 24; x < 104; ++x) {
+                auto c = rgb(engine, x, y);
+                colours.insert((c[0] << 16) | (c[1] << 8) | c[2]);
+            }
+        CHECK(colours.size() <= 4);
+    };
+
+    Engine cpu;
+    build(cpu, 2);  // software
+    cpu.Play();
+    const RenderStats cpuStats = cpu.RenderGameFrame();
+    CHECK(std::string(cpuStats.backend) == "software");
+    checkSprite(cpu);
+
+    if (!VulkanBackendAvailable()) return;
+    Engine gpu;
+    build(gpu, 1);  // forced Vulkan; skips gracefully without a device
+    gpu.Play();
+    const RenderStats gpuStats = gpu.RenderGameFrame();
+    CHECK(std::string(gpuStats.backend) == "vulkan");
+    checkSprite(gpu);
 }
 
 // Texture cache: per-slot color space, byte-budgeted LRU eviction, and mtime
@@ -2546,6 +2647,7 @@ int main() {
     TestTonemapping();
     TestCullingAndAA();
     TestSortingOrder();
+    TestSpriteQuality();
     TestTextureMips();
     TestParentedPhysics();
     TestTriggerAndEnabled();

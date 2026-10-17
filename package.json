@@ -1,7 +1,7 @@
 {
   "name": "cairn-engine",
   "productName": "Cairn Engine",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "description": "A compact C++ game engine with a focused editor for 2D and 3D projects.",
   "license": "MIT",
   "author": "Cairn Engine Contributors",

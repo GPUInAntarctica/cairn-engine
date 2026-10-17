@@ -194,6 +194,36 @@ Debug::DrawLine(from, to, color);        // one-frame viewport line
 
 `Vec2/Vec3/Vec4` (`Dot`, `Cross`, `Normalized`, `Lerp`, `Min/Max`), `Quat` (`FromAxisAngle`, `FromEulerDegrees`, `Slerp`, `LookRotation`), `Mat4` (`TRS`, `Perspective`, `Ortho`, `LookAt`, `Inverted`, `TransformPoint/Direction`), `Color` (`FromHex`, `FromHSV`, `Lerp`), `AABB` (`RayIntersect`, `Transformed`).
 
+## 2D sprites and text
+
+A 2D game is an orthographic `Camera` plus `SpriteRenderer` / `TextRenderer` components — there is no separate 2D scene type, and the same scene can hold 3D meshes and 2D sprites.
+
+```cpp
+GameObject* cam = scene.CreateEntity("Main");
+cam->tag = "MainCamera";                    // the play-mode camera
+auto* cc = cam->AddComponent<CameraComponent>();
+cc->orthographic = true;
+cc->orthographicSize = 5.0f;                // half height of the view, in world units
+cc->clearColor = Color::FromHex(0x101018);
+cc->skyEnabled = false;                     // flat background instead of the gradient
+
+GameObject* hero = scene.CreateEntity("Hero");
+auto* sr = hero->AddComponent<SpriteRenderer>();
+sr->texturePath = "Assets/Sprites/hero.png"; // project-relative png/jpg/bmp
+sr->pixelsPerUnit = 16.0f;                   // a 32-texel sprite is 2 world units tall
+sr->pixelPerfect = true;                     // nearest sampling for pixel art
+sr->sortingLayer = 1;                        // coarse group, drawn low to high
+sr->orderInLayer = -5;                       // fine order within the layer
+```
+
+- **Size.** A sprite's world size is `texturePixels / pixelsPerUnit`; place the camera back (for example `z = 10`, looking down `-Z`) so the sprites are in front of it.
+- **`pixelPerfect`** disables anti-aliasing in the software reference and selects a nearest-neighbour, mip-less sampler on the GPU, which is what keeps AI-drawn pixel art crisp. Both backends are held to the same picture (0.1.22).
+- **Sorting** is `sortingLayer` first, then `orderInLayer`, then distance along the view direction; text shares the same ordering.
+- **`normalMapPath`** adds tangent-space 2D lighting, and `flipX` / `flipY` mirror the geometry about the sprite's centre.
+- `TextRenderer` takes `text`, `fontSize` (glyph height in the same world units), `color` and `alignment` (`Left` / `Center` / `Right`).
+
+> **Known limitation (0.1.22).** Texture `v = 0` is the image's **top** row, but the 2D quad maps that row to the **bottom** of the sprite, so sprites and text render vertically mirrored relative to what `image.*` draws (`flipY` flips geometry, not the texture-`v` relationship). The fix is scheduled in the 0.2 layer of the roadmap.
+
 ## Inspector fields
 
 `DescribeProps` declares what the inspector shows; values are stored on the component and survive reloads:

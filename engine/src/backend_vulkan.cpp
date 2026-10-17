@@ -169,7 +169,8 @@ struct VulkanBackend::Impl {
     Image shadowMap;
 
     VkSampler linearRepeat = VK_NULL_HANDLE;  // mipmapped, trilinear
-    VkSampler linearClamp = VK_NULL_HANDLE;   // mipmapped, clamp, pixel perfect 2D
+    VkSampler linearClamp = VK_NULL_HANDLE;   // mipmapped, clamp, filtered 2D
+    VkSampler pixelClamp = VK_NULL_HANDLE;    // nearest, clamp, no mips: pixel-perfect 2D
     VkSampler nearestClamp = VK_NULL_HANDLE;  // shadow map taps
     Image whiteTex;                            // 1x1 stand-in for "no texture"
     // The shadow binding is a sampler2DArray, so its placeholder has to be a
@@ -430,7 +431,7 @@ struct VulkanBackend::Impl {
         pipelineCache.clear();
         if (scenePipeLayout) fn.DestroyPipelineLayout(device, scenePipeLayout, nullptr);
         if (postPipeLayout) fn.DestroyPipelineLayout(device, postPipeLayout, nullptr);
-        for (VkSampler s : {linearRepeat, linearClamp, nearestClamp})
+        for (VkSampler s : {linearRepeat, linearClamp, pixelClamp, nearestClamp})
             if (s) fn.DestroySampler(device, s, nullptr);
         if (whiteArrayView) fn.DestroyImageView(device, whiteArrayView, nullptr);
         DestroyImage(&whiteTex);
@@ -660,10 +661,10 @@ bool VulkanBackend::Initialize(std::string* error) {
         if (!I.CreateBuffer(s.bytes, s.usage, s.b)) return fail("host buffer allocation failed");
     }
 
-    // Samplers: mipmapped repeat (world meshes), mipmapped clamp (pixel-perfect
-    // 2D), and a point sampler for the shadow cascades (the shader does its own
-    // 3x3 PCF over individual texels).
-    auto makeSampler = [&](VkFilter filter, VkSamplerAddressMode mode) {
+    // Samplers: mipmapped repeat (world meshes), mipmapped clamp (filtered 2D),
+    // a mip-less nearest/clamp for pixel-perfect 2D, and a point sampler for the
+    // shadow cascades (the shader does its own 3x3 PCF over individual texels).
+    auto makeSampler = [&](VkFilter filter, VkSamplerAddressMode mode, float maxLod) {
         VkSamplerCreateInfo ci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
         ci.magFilter = filter;
         ci.minFilter = filter;
@@ -672,15 +673,19 @@ bool VulkanBackend::Initialize(std::string* error) {
         ci.addressModeU = mode;
         ci.addressModeV = mode;
         ci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        ci.maxLod = 16.0f;
+        ci.maxLod = maxLod;
         VkSampler s = VK_NULL_HANDLE;
         I.fn.CreateSampler(I.device, &ci, nullptr, &s);
         return s;
     };
-    I.linearRepeat = makeSampler(VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT);
-    I.linearClamp = makeSampler(VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-    I.nearestClamp = makeSampler(VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-    if (!I.linearRepeat || !I.linearClamp || !I.nearestClamp) return fail("sampler creation failed");
+    I.linearRepeat = makeSampler(VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, 16.0f);
+    I.linearClamp = makeSampler(VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 16.0f);
+    // maxLod 0 pins pixel-perfect sprites to the base level so a mip chain can
+    // never blur AI-drawn pixel art; the software rasterizer does the same.
+    I.pixelClamp = makeSampler(VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 0.0f);
+    I.nearestClamp = makeSampler(VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 16.0f);
+    if (!I.linearRepeat || !I.linearClamp || !I.pixelClamp || !I.nearestClamp)
+        return fail("sampler creation failed");
 
     // 1x1 white stand-in for materials with no albedo / normal map bound.
     {
@@ -1395,8 +1400,8 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
     std::vector<uint32_t> item2DNormalSlot(list.items2D.size(), 0);
     for (size_t i = 0; i < list.items2D.size(); ++i) {
         const MaterialGpu& m = list.items2D[i].mat;
-        item2DAlbedoSlot[i] = bindlessSlot(0, m.albedo, m.pixelPerfect ? I.linearClamp : I.linearRepeat);
-        item2DNormalSlot[i] = bindlessSlot(1, m.normalMap, I.linearClamp);
+        item2DAlbedoSlot[i] = bindlessSlot(0, m.albedo, m.pixelPerfect ? I.pixelClamp : I.linearRepeat);
+        item2DNormalSlot[i] = bindlessSlot(1, m.normalMap, m.pixelPerfect ? I.pixelClamp : I.linearClamp);
     }
 
     // ---- uniform blocks ----------------------------------------------------

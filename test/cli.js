@@ -1512,6 +1512,58 @@ check(fs.existsSync(grassPng) && fs.readFileSync(grassPng).slice(0, 8)
     'image.save writes the tile', grassPng);
 
 // ---------------------------------------------------------------------------
+console.log('cli: sprite 2D rendering quality');
+// ---------------------------------------------------------------------------
+// The loop the project is built around: the agent draws an asset and then sees
+// it rendered. A four-quadrant sprite goes through a pixel-perfect 2D camera,
+// which pins two shipped bugs end to end — the software rasteriser dropped one
+// triangle of every 2D quad (half of every sprite and glyph was missing), and
+// pixel-perfect sprites were sampled through a filtering, mipmapped sampler.
+const spriteShot = path.join(scratch, 'sprite2d.png');
+const spriteRun = runProjectBatch(writeBatch('sprite2d.jsonl', [
+    { command: 'image.new', args: { width: 8, height: 8, background: 'transparent' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 4, height: 4, filled: true, color: '#ff0000' } },
+    { command: 'image.draw.rect', args: { x: 4, y: 0, width: 4, height: 4, filled: true, color: '#0000ff' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 4, width: 4, height: 4, filled: true, color: '#ffffff' } },
+    { command: 'image.draw.rect', args: { x: 4, y: 4, width: 4, height: 4, filled: true, color: '#00ff00' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/quad.png' }, id: 'tex' },
+    { command: 'scene.new', args: { name: 'Sprite2D' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    { command: 'entity.create', args: { name: 'Main', position: [0, 0, 10] }, id: 'cam' },
+    { command: 'component.add', args: { id: '$ref:cam', type: 'Camera', props: { orthographic: true, orthoSize: 0.5, clearColor: [0, 0, 0, 1], skyEnabled: false } } },
+    { command: 'entity.create', args: { name: 'Sprite' }, id: 'sp' },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteRenderer', props: { texturePath: 'Assets/Sprites/quad.png', pixelsPerUnit: 6, pixelPerfect: true } } },
+    { command: 'runtime.play' },
+    { command: 'render.screenshot', args: { out: spriteShot, mode: 'game', width: 64, height: 64 }, id: 'shot' },
+]));
+check(spriteRun.lines.every(l => l.ok !== false), 'the sprite render batch runs clean', spriteRun.stdout + spriteRun.stderr);
+const spriteShotStep = spriteRun.step('shot');
+check(spriteShotStep && spriteShotStep.result.stats.drawCalls2D === 1,
+    'the sprite reaches the 2D pass', spriteShotStep && spriteShotStep.result);
+
+// The sprite overfills the 1x1-unit view, so every pixel is one of the four
+// quadrant colours (lit by the ambient term). A missing triangle would leave
+// background showing; a filtering sampler would blend neighbouring texels into
+// in-between colours. `--list` reports exactly how many distinct colours the
+// frame holds, so four is the whole contract in one number.
+const spritePx = (x, y) => expectOk(['--image', spriteShot, 'image.pixel', '--x', String(x), '--y', String(y)]);
+const spriteQuad = [spritePx(16, 16), spritePx(48, 16), spritePx(16, 48), spritePx(48, 48)];
+const dominant = (p, ch) => {
+    const v = [p.r, p.g, p.b];
+    return v[ch] > v[(ch + 1) % 3] + 10 && v[ch] > v[(ch + 2) % 3] + 10;
+};
+check([0, 1, 2].every(ch => spriteQuad.some(p => dominant(p, ch))),
+    'the sprite shows red, green and blue quadrants', spriteQuad);
+check(new Set(spriteQuad.map(p => p.hex)).size === 4
+    && spriteQuad.some(p => Math.abs(p.r - p.g) <= 8 && Math.abs(p.g - p.b) <= 14 && p.r > 60),
+    'the fourth quadrant is the lit white corner', spriteQuad);
+const spritePalette = expectOk(['--image', spriteShot, 'image.palette', '--list']);
+check(spritePalette && spritePalette.colors === 4,
+    'pixel-perfect sampling keeps the sprite to four flat colours', spritePalette);
+check(spritePalette && !spritePalette.palette.some(e => e.hex === '#000000'),
+    'the sprite covers its whole quad, both triangles', spritePalette);
+
+// ---------------------------------------------------------------------------
 console.log('cli: export + preferences');
 // ---------------------------------------------------------------------------
 const prefs = expectOk(['project.preferences', '--set', '{"language":"en"}']);
