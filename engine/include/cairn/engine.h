@@ -160,6 +160,8 @@ public:
     Json QueryRaycast(const Vec3& origin, const Vec3& direction, float maxDistance);
     Json QueryRaycastAll(const Vec3& origin, const Vec3& direction, float maxDistance);
     Json QueryOverlapSphere(const Vec3& center, float radius);
+    // Moves an entity's CharacterController and reports the resulting pose.
+    Json QueryCharacterMove(EntityId id, const Vec3& displacement);
 
     // --- Console & telemetry.
     std::vector<LogEntry> PollLogs(uint64_t afterId) { return Log::Poll(afterId); }

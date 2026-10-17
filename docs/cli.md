@@ -212,7 +212,7 @@ the document with `--image FILE`). `image.open`, `image.layer.*`,
 
 | Command | Arguments | Description |
 | --- | --- | --- |
-| `component.add` | `--id` (int, required)<br>`--type` (enum, required, one of Camera \| Light \| MeshRenderer \| SpriteRenderer \| TextRenderer \| RigidBody \| BoxCollider \| SphereCollider \| Collider2D \| Script)<br>`--props` (json) | Add a component to an entity (properties get their defaults). |
+| `component.add` | `--id` (int, required)<br>`--type` (enum, required, one of Camera \| Light \| MeshRenderer \| SpriteRenderer \| TextRenderer \| RigidBody \| BoxCollider \| SphereCollider \| Collider2D \| CapsuleCollider \| CharacterController \| Script)<br>`--props` (json) | Add a component to an entity (properties get their defaults). |
 | `component.enable` | `--id` (int, required)<br>`--type` (string, required)<br>`--enabled` (bool, default true) | Enable or disable a component. |
 | `component.get` | `--id` (int, required)<br>`--type` (string, required) | Read one component with all its property values and editor metadata. |
 | `component.getProp` | `--id` (int, required)<br>`--type` (string, required)<br>`--prop` (string, required) | Read a single component property value. |
@@ -297,6 +297,7 @@ the document with `--image FILE`). `image.open`, `image.layer.*`,
 
 | Command | Arguments | Description |
 | --- | --- | --- |
+| `physics.moveCharacter` | `--id` (int, required)<br>`--displacement` (json, required) | Move an entity's CharacterController capsule and report the resolved pose. |
 | `physics.overlapSphere` | `--center` (json, required)<br>`--radius` (number, required) | Return the entities whose collider overlaps a sphere. |
 | `physics.raycast` | `--origin` (json, required)<br>`--direction` (json, required)<br>`--maxDistance` (number, default 1000)<br>`--all` (bool, default false) | Cast a ray against colliders and return the nearest hit (or every hit with --all). |
 

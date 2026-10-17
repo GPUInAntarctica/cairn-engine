@@ -159,6 +159,7 @@ public:
             InstanceMethod("setLayerCollision", &EngineWrap::SetLayerCollision),
             InstanceMethod("physicsRaycast", &EngineWrap::PhysicsRaycast),
             InstanceMethod("physicsOverlapSphere", &EngineWrap::PhysicsOverlapSphere),
+            InstanceMethod("characterMove", &EngineWrap::CharacterMove),
             InstanceMethod("loadScriptLibrary", &EngineWrap::LoadScriptLibrary),
             InstanceMethod("play", &EngineWrap::Play),
             InstanceMethod("pause", &EngineWrap::Pause),
@@ -684,6 +685,13 @@ private:
         float radius = (float)GetNumber(info, 1, 1.0);
         return JsonToValue(env, engine_->QueryOverlapSphere(center, radius));
     }
+    Napi::Value CharacterMove(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        EntityId id = (EntityId)GetNumber(info, 0, 0);
+        Vec3 disp;
+        if (!ReadVec3(info[1], &disp)) return env.Null();
+        return JsonToValue(env, engine_->QueryCharacterMove(id, disp));
+    }
     Napi::Value GetLayerMatrix(const Napi::CallbackInfo& info) {
         Napi::Env env = info.Env();
         Napi::Array arr = Napi::Array::New(env, 32);
@@ -841,7 +849,7 @@ Napi::FunctionReference EngineWrap::constructor;
 
 Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
     EngineWrap::Init(env, exports);
-    exports.Set("engineVersion", Napi::String::New(env, "0.1.5"));
+    exports.Set("engineVersion", Napi::String::New(env, "0.1.6"));
     return exports;
 }
 

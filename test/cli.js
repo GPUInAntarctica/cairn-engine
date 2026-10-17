@@ -292,6 +292,12 @@ fs.writeFileSync(physBatch, [
     { command: 'entity.set', args: { id: '$ref:box', layer: 2 } },
     { command: 'physics.raycast', args: { origin: [0, 10, 0], direction: [0, -1, 0], maxDistance: 100 }, id: 'hit' },
     { command: 'physics.overlapSphere', args: { center: [0, 3, 0], radius: 1 }, id: 'overlap' },
+    { command: 'entity.create', args: { name: 'Cap', position: [3, 0, 0] }, id: 'cap' },
+    { command: 'component.add', args: { id: '$ref:cap', type: 'CapsuleCollider', props: { radius: 0.5, height: 2 } } },
+    { command: 'physics.overlapSphere', args: { center: [3, 0, 0], radius: 0.4 }, id: 'capOverlap' },
+    { command: 'entity.create', args: { name: 'Hero', position: [-4, 1.5, 0] }, id: 'hero' },
+    { command: 'component.add', args: { id: '$ref:hero', type: 'CharacterController' } },
+    { command: 'physics.moveCharacter', args: { id: '$ref:hero', displacement: [0, -0.02, 0] }, id: 'heroStep' },
     { command: 'scene.layerMatrix.set', args: { a: 2, b: 2, collide: false } },
     { command: 'scene.layerMatrix.get', args: {}, id: 'lm' },
 ].map(s => JSON.stringify(s)).join('\n'));
@@ -307,6 +313,12 @@ check(overlapStep && overlapStep.result.some(e => e.name === 'Box'),
     'physics.overlapSphere returns overlapping entities', overlapStep && overlapStep.result);
 const lmStep = physLines.find(l => l.id === 'lm');
 check(lmStep && lmStep.result[2] === 4294967291, 'scene.layerMatrix.set clears the layer bit', lmStep && lmStep.result[2]);
+const capOverlapStep = physLines.find(l => l.id === 'capOverlap');
+check(capOverlapStep && capOverlapStep.result.some(e => e.name === 'Cap'),
+    'physics.overlapSphere matches a capsule volume', capOverlapStep && capOverlapStep.result);
+const heroStep = physLines.find(l => l.id === 'heroStep');
+check(heroStep && heroStep.result.grounded === true && Math.abs(heroStep.result.position[1] - 1.5) < 0.06,
+    'physics.moveCharacter grounds a controller on the floor', heroStep && heroStep.result);
 
 
 const build = expectOk(['--project', projectDir, 'script.build']);

@@ -1365,6 +1365,110 @@ static void TestRigidbodyFrictionAngular() {
     CHECK(rb->velocity.x < 3.0f);
 }
 
+// Capsule collider: ray and overlap use the true capsule volume, not its AABB.
+static void TestCapsuleCollider() {
+    Engine engine;
+    Scene& scene = engine.scene();
+    GameObject* cap = scene.CreateEntity("Cap");
+    auto* cc = cap->AddComponent<CapsuleCollider>();
+    cc->radius = 0.5f;
+    cc->height = 2.0f;  // local segment spans y in [-0.5, 0.5]
+
+    Physics::RaycastHit hit;
+    CHECK(Physics::Raycast(Vec3(3, 0, 0), Vec3(-1, 0, 0), 100.0f, &hit));
+    CHECK(NearlyEqual(hit.distance, 2.5f, 1e-2f));  // side surface at x = 0.5
+    CHECK(NearlyEqual(hit.normal.x, 1.0f, 1e-2f));
+    CHECK(hit.entity == cap->m_id);
+
+    // Straight down hits the top cap at y = 1.0 (the AABB corner would be earlier).
+    CHECK(Physics::Raycast(Vec3(0, 5, 0), Vec3(0, -1, 0), 100.0f, &hit));
+    CHECK(NearlyEqual(hit.distance, 4.0f, 1e-2f));
+
+    auto inside = Physics::OverlapSphere(Vec3(0, 0.9f, 0), 0.3f);
+    CHECK(std::find(inside.begin(), inside.end(), cap->m_id) != inside.end());
+    auto far = Physics::OverlapSphere(Vec3(2, 0, 0), 0.9f);
+    CHECK(std::find(far.begin(), far.end(), cap->m_id) == far.end());
+}
+
+// A dynamic capsule settles on a box floor; a sphere rests on a capsule's cap
+// (the exact segment/sphere contact).
+static void TestCapsulePhysics() {
+    Scene scene;
+    GameObject* floor = scene.CreateEntity("Floor");
+    floor->transform().position = Vec3(0, -0.5f, 0);
+    floor->AddComponent<BoxCollider>()->size = Vec3(10, 1, 10);  // top at y = 0
+    GameObject* cap = scene.CreateEntity("Cap");
+    cap->transform().position = Vec3(0, 3, 0);
+    auto* c = cap->AddComponent<CapsuleCollider>();
+    c->radius = 0.5f;
+    c->height = 2.0f;
+    auto* rb = cap->AddComponent<RigidBody>();
+    rb->restitution = 0.0f;
+    for (int i = 0; i < 300; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(NearlyEqual(cap->transform().position.y, 1.0f, 0.08f));
+    CHECK(std::fabs(rb->velocity.y) < 0.1f);
+
+    // Ball resting on a fixed capsule's top cap: centers 1.0 apart vertically.
+    cap->transform().position = Vec3(0, 3, 0);
+    rb->isKinematic = true;
+    rb->velocity = Vec3();
+    GameObject* ball = scene.CreateEntity("Ball");
+    ball->transform().position = Vec3(0, 6, 0);
+    ball->AddComponent<SphereCollider>()->radius = 0.5f;
+    ball->AddComponent<RigidBody>()->restitution = 0.0f;
+    for (int i = 0; i < 300; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+    CHECK(NearlyEqual(ball->transform().position.y, 4.5f, 0.1f));
+}
+
+// The character controller grounds on floors, stops at walls and climbs steps.
+static void TestCharacterController() {
+    Scene scene;
+    GameObject* ground = scene.CreateEntity("Ground");
+    ground->transform().position = Vec3(0, -0.5f, 0);
+    ground->AddComponent<BoxCollider>()->size = Vec3(24, 1, 24);  // top at y = 0
+
+    GameObject* hero = scene.CreateEntity("Hero");
+    hero->transform().position = Vec3(-6.0f, 1.0f, 0);  // feet on the ground
+    auto* cc = hero->AddComponent<CharacterController>();
+    cc->radius = 0.5f;
+    cc->height = 2.0f;
+
+    // A tiny downward probe grounds the controller without sinking it.
+    PhysicsCharacterMove(scene, *hero, *cc, Vec3(0, -0.02f, 0));
+    CHECK(cc->isGrounded);
+    CHECK(NearlyEqual(hero->transform().position.y, 1.0f, 0.05f));
+
+    // Free fall in small steps resolves back onto the floor (no tunnelling).
+    hero->transform().position = Vec3(-6.0f, 3.0f, 0);
+    cc->isGrounded = false;
+    float vy = 0.0f;
+    for (int i = 0; i < 240; ++i) {
+        if (!cc->isGrounded) vy -= 9.81f / 60.0f;
+        PhysicsCharacterMove(scene, *hero, *cc, Vec3(0, vy / 60.0f, 0));
+    }
+    CHECK(cc->isGrounded);
+    CHECK(NearlyEqual(hero->transform().position.y, 1.0f, 0.06f));
+
+    // A wall stops horizontal movement at radius + wall half-extent.
+    GameObject* wall = scene.CreateEntity("Wall");
+    wall->transform().position = Vec3(0, 1.5f, 0);
+    wall->AddComponent<BoxCollider>()->size = Vec3(1, 3, 4);  // spans x 0.5.. -0.5
+    hero->transform().position = Vec3(-3.0f, 1.0f, 0);
+    cc->isGrounded = true;
+    for (int i = 0; i < 240; ++i) PhysicsCharacterMove(scene, *hero, *cc, Vec3(0.05f, 0, 0));
+    CHECK(hero->transform().position.x < -0.95f);  // stopped short of the wall face
+    CHECK(hero->transform().position.x > -1.05f);
+
+    // A low step (0.2) within stepOffset is climbed rather than blocked.
+    GameObject* step = scene.CreateEntity("Step");
+    step->transform().position = Vec3(4.0f, 0.1f, 0);
+    step->AddComponent<BoxCollider>()->size = Vec3(1, 0.2f, 4);  // top at y = 0.2
+    hero->transform().position = Vec3(2.5f, 1.0f, 0);
+    cc->isGrounded = true;
+    PhysicsCharacterMove(scene, *hero, *cc, Vec3(1.0f, 0, 0));
+    CHECK(hero->transform().position.y > 1.15f);  // feet now on the step top
+}
+
 int main() {
     Log::SetEchoStdout(false);
     TestMath();
@@ -1396,6 +1500,9 @@ int main() {
     TestPhysicsQueries();
     TestCollisionLayers();
     TestRigidbodyFrictionAngular();
+    TestCapsuleCollider();
+    TestCapsulePhysics();
+    TestCharacterController();
     if (g_failures == 0) {
         std::printf("engine tests passed\n");
         return 0;

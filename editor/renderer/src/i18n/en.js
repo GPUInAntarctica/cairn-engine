@@ -81,6 +81,8 @@ export const dict = {
     'comp.boxCollider': 'Box Collider',
     'comp.sphereCollider': 'Sphere Collider',
     'comp.collider2d': 'Collider 2D',
+    'comp.capsuleCollider': 'Capsule Collider',
+    'comp.characterController': 'Character Controller',
     'comp.script': 'Script',
     'comp.none': 'No entity selected.',
     'comp.script.noClass': 'Build scripts (Ctrl+B) to load gameplay classes.',

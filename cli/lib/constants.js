@@ -5,7 +5,8 @@ const PRIMITIVES = ['Cube', 'Sphere', 'Plane', 'Quad', 'Cylinder', 'Cone', 'Toru
 
 const COMPONENTS = [
     'Camera', 'Light', 'MeshRenderer', 'SpriteRenderer', 'TextRenderer',
-    'RigidBody', 'BoxCollider', 'SphereCollider', 'Collider2D', 'Script',
+    'RigidBody', 'BoxCollider', 'SphereCollider', 'Collider2D',
+    'CapsuleCollider', 'CharacterController', 'Script',
 ];
 
 // Mirror of engine/include/cairn/scripting.h (enum class KeyCode).

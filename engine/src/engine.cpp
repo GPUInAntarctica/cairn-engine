@@ -986,6 +986,28 @@ Json Engine::QueryOverlapSphere(const Vec3& center, float radius) {
     return arr;
 }
 
+Json Engine::QueryCharacterMove(EntityId id, const Vec3& displacement) {
+    Json o = Json::MakeObject();
+    GameObject* go = scene_->FindEntity(id);
+    if (!go) {
+        o.set("error", "entity not found");
+        return o;
+    }
+    CharacterController* cc = go->GetComponent<CharacterController>();
+    if (!cc) {
+        o.set("error", "entity has no CharacterController");
+        return o;
+    }
+    bool grounded = PhysicsCharacterMove(*scene_, *go, *cc, displacement);
+    Vec3 world = go->transform().WorldPosition();
+    o.set("id", (double)go->m_id);
+    o.set("grounded", grounded);
+    o.set("position", Json::MakeArray({world.x, world.y, world.z}));
+    o.set("localPosition", Json::MakeArray({go->transform().position.x, go->transform().position.y,
+                                            go->transform().position.z}));
+    return o;
+}
+
 bool Engine::SaveFramePNG(const std::string& path) const {    const FrameTarget& t = renderer_.target();
     if (t.width <= 0 || t.height <= 0) return false;
     // stb expects top-down rows; our buffer already is.

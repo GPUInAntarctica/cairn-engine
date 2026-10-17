@@ -217,6 +217,33 @@ const std::vector<PropertyDef>& Collider2DDefs() {
     return defs;
 }
 
+static const char* const kCapsuleDirections[] = {"Y", "X", "Z"};
+
+const std::vector<PropertyDef>& CapsuleColliderDefs() {
+    static const std::vector<PropertyDef> defs = {
+        Field<CapsuleCollider, &CapsuleCollider::center>("center", "Center", EditorPropKind::Vec3),
+        Field<CapsuleCollider, &CapsuleCollider::radius>("radius", "Radius", EditorPropKind::Float),
+        Field<CapsuleCollider, &CapsuleCollider::height>("height", "Height", EditorPropKind::Float),
+        EnumField<CapsuleCollider, &CapsuleCollider::direction>("direction", "Direction", kCapsuleDirections, 3),
+        Field<CapsuleCollider, &CapsuleCollider::isTrigger>("isTrigger", "Is Trigger", EditorPropKind::Bool),
+    };
+    return defs;
+}
+
+const std::vector<PropertyDef>& CharacterControllerDefs() {
+    static const std::vector<PropertyDef> defs = {
+        Field<CharacterController, &CharacterController::center>("center", "Center", EditorPropKind::Vec3),
+        Field<CharacterController, &CharacterController::radius>("radius", "Radius", EditorPropKind::Float),
+        Field<CharacterController, &CharacterController::height>("height", "Height", EditorPropKind::Float),
+        Field<CharacterController, &CharacterController::slopeLimit>("slopeLimit", "Slope Limit", EditorPropKind::Float),
+        Field<CharacterController, &CharacterController::stepOffset>("stepOffset", "Step Offset", EditorPropKind::Float),
+        Field<CharacterController, &CharacterController::skinWidth>("skinWidth", "Skin Width", EditorPropKind::Float),
+        Field<CharacterController, &CharacterController::useGravity>("useGravity", "Use Gravity", EditorPropKind::Bool),
+        Field<CharacterController, &CharacterController::gravityScale>("gravityScale", "Gravity Scale", EditorPropKind::Float),
+    };
+    return defs;
+}
+
 const std::vector<PropertyDef>& ScriptDefs() {
     static const std::vector<PropertyDef> defs = {
         PropertyDef{"class", "Script", EditorPropKind::String,
@@ -243,6 +270,8 @@ const std::vector<PropertyDef>* DefsForTypeName(const std::string& typeName) {
     if (typeName == "BoxCollider") return &BoxColliderDefs();
     if (typeName == "SphereCollider") return &SphereColliderDefs();
     if (typeName == "Collider2D") return &Collider2DDefs();
+    if (typeName == "CapsuleCollider") return &CapsuleColliderDefs();
+    if (typeName == "CharacterController") return &CharacterControllerDefs();
     if (typeName == "PrefabInstance") return &PrefabInstanceDefs();
     if (typeName == "Script") return &ScriptDefs();
     return nullptr;
@@ -307,7 +336,8 @@ bool ComponentDeserialize(Component* c, const Json& props) {
 
 std::vector<std::string> AddableComponentNames() {
     return {"Camera", "Light", "MeshRenderer", "SpriteRenderer", "TextRenderer",
-            "RigidBody", "BoxCollider", "SphereCollider", "Collider2D", "Script"};
+            "RigidBody", "BoxCollider", "SphereCollider", "Collider2D",
+            "CapsuleCollider", "CharacterController", "Script"};
 }
 
 }  // namespace Cairn

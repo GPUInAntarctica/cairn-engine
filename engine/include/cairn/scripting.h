@@ -59,6 +59,8 @@ class RigidBody;
 class BoxCollider;
 class SphereCollider;
 class Collider2D;
+class CapsuleCollider;
+class CharacterController;
 class ScriptComponent;
 class PrefabInstance;
 struct ScriptMeta;
@@ -109,7 +111,9 @@ inline bool RegisterScriptRecord(const char* name, Component* (*create)()) {
 // ---------------------------------------------------------------------------
 enum class ComponentTypeId : int {
     Transform = 1, Camera, Light, MeshRenderer, SpriteRenderer, TextRenderer,
-    RigidBody, BoxCollider, SphereCollider, Collider2D, Script, PrefabInstance, Other = 99,
+    RigidBody, BoxCollider, SphereCollider, Collider2D, Script, PrefabInstance,
+    // Added in 0.1.6. Appended so existing numeric values stay stable.
+    CapsuleCollider, CharacterController, Other = 99,
 };
 
 template <typename T>
@@ -132,6 +136,8 @@ CAIRN_COMPONENT_TYPE(SphereCollider, SphereCollider)
 CAIRN_COMPONENT_TYPE(Collider2D, Collider2D)
 CAIRN_COMPONENT_TYPE(ScriptComponent, Script)
 CAIRN_COMPONENT_TYPE(PrefabInstance, PrefabInstance)
+CAIRN_COMPONENT_TYPE(CapsuleCollider, CapsuleCollider)
+CAIRN_COMPONENT_TYPE(CharacterController, CharacterController)
 
 // ---------------------------------------------------------------------------
 // Component - base class for all behaviour. Gameplay scripts subclass this.
@@ -437,6 +443,53 @@ public:
 
     const char* TypeName() const override { return "Collider2D"; }
     ComponentTypeId TypeId() const override { return ComponentTypeId::Collider2D; }
+};
+
+// Capsule collider: a swept sphere between two points on the local `direction`
+// axis. Radius and height are scaled by the transform (the perpendicular axes
+// scale the radius, the chosen axis scales the height). Height is the total
+// length including the two hemispherical caps; below 2*radius it degenerates to
+// a sphere.
+class CapsuleCollider : public Component {
+public:
+    Vec3 center{0, 0, 0};
+    float radius = 0.5f;            // scaled by the two axes perpendicular to direction
+    float height = 2.0f;            // total height along direction (>= 2*radius to be a capsule)
+    int direction = 0;              // 0 = Y, 1 = X, 2 = Z (Unity convention)
+    bool isTrigger = false;
+
+    const char* TypeName() const override { return "CapsuleCollider"; }
+    ComponentTypeId TypeId() const override { return ComponentTypeId::CapsuleCollider; }
+};
+
+// ---------------------------------------------------------------------------
+// CharacterController - a kinematic capsule moved by gameplay code (not by the
+// rigidbody solver). Move() sweeps the capsule through the scene, resolves it
+// against solid colliders, climbs steps up to stepOffset and reports whether it
+// is standing on ground. The capsule is always aligned with the local Y axis.
+// ---------------------------------------------------------------------------
+class CharacterController : public Component {
+public:
+    Vec3 center{0, 0, 0};
+    float radius = 0.5f;
+    float height = 2.0f;
+    float slopeLimit = 45.0f;       // degrees; steeper contacts are treated as walls
+    float stepOffset = 0.3f;        // max step height climbed while grounded
+    float skinWidth = 0.08f;        // ground-probe tolerance
+    bool useGravity = true;
+    float gravityScale = 1.0f;
+
+    // Runtime state (refreshed by Move/SimpleMove; not serialized).
+    bool isGrounded = false;
+    Vec3 velocity{0, 0, 0};         // last applied velocity (informational)
+
+    // Moves the controller by `displacement` world units and resolves collisions.
+    void Move(const Vec3& displacement);
+    // Applies `velocity * Time::DeltaTime` (ignoring velocity.y) plus gravity.
+    void SimpleMove(const Vec3& velocity);
+
+    const char* TypeName() const override { return "CharacterController"; }
+    ComponentTypeId TypeId() const override { return ComponentTypeId::CharacterController; }
 };
 
 // ---------------------------------------------------------------------------

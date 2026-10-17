@@ -43,3 +43,18 @@ def('physics.overlapSphere', {
         return ctx.session.engine().physicsOverlapSphere(center, args.radius);
     },
 });
+
+def('physics.moveCharacter', {
+    summary: 'Move an entity\'s CharacterController capsule and report the resolved pose.',
+    args: {
+        id: { type: 'int', required: true, desc: 'Entity id of a CharacterController.' },
+        displacement: { type: 'json', required: true, desc: '[x,y,z] world-space movement for this call.' },
+    },
+    returns: '{id, grounded, position, localPosition}',
+    needsEngine: true,
+    examples: ['cairn --project ./game physics.moveCharacter --id 4 --displacement \'[0.1,-0.2,0]\''],
+    run(ctx, args) {
+        const displacement = requireVec3(args.displacement, 'displacement');
+        return ctx.session.engine().characterMove(args.id, displacement);
+    },
+});

@@ -19,16 +19,17 @@ namespace Cairn {
 namespace {
 
 struct Shape {
-    enum Kind { Box3, Sphere3, Box2 } kind;
+    enum Kind { Box3, Sphere3, Box2, Capsule3 } kind;
     GameObject* go = nullptr;
     Component* comp = nullptr;
     RigidBody* rb = nullptr;
     bool isTrigger = false;
     bool isStatic = true;
     int layer = 0;
-    Vec3 min, max;      // world AABB (boxes exact; spheres bounding box)
-    Vec3 center;        // boxes: center; spheres: center
-    float radius = 0;   // spheres
+    Vec3 min, max;      // world AABB (boxes exact; spheres/capsules bounding box)
+    Vec3 center;        // boxes: center; spheres: center; capsules: segment midpoint
+    float radius = 0;   // spheres; capsules (cap radius)
+    Vec3 p0, p1;        // capsules: world-space segment endpoints
 
     bool Is2D() const { return kind == Box2; }
     bool IsSolid() const { return !isTrigger; }
@@ -64,8 +65,100 @@ float WorldMaxScale(Transform& t) {
     return std::max({std::fabs(s.x), std::fabs(s.y), std::fabs(s.z)});
 }
 
+// World-space segment + radius of a capsule whose local axis is `dir`
+// (0 = Y, 1 = X, 2 = Z). The perpendicular axes scale the radius, the chosen
+// axis scales the height. Height below 2*radius collapses the segment to a
+// point (a sphere of the scaled radius).
+void WorldCapsule(float radius, float height, int dir, const Vec3& localCenter, const Mat4& world,
+                  Vec3* a, Vec3* b, float* rOut) {
+    Vec3 col0(world.m[0], world.m[1], world.m[2]);
+    Vec3 col1(world.m[4], world.m[5], world.m[6]);
+    Vec3 col2(world.m[8], world.m[9], world.m[10]);
+    int ax = (dir == 1) ? 0 : (dir == 2) ? 2 : 1;
+    float axisScale, rScale;
+    if (ax == 0) { axisScale = col0.Length(); rScale = 0.5f * (col1.Length() + col2.Length()); }
+    else if (ax == 2) { axisScale = col2.Length(); rScale = 0.5f * (col0.Length() + col1.Length()); }
+    else { axisScale = col1.Length(); rScale = 0.5f * (col0.Length() + col2.Length()); }
+    Vec3 axisLocal = ax == 0 ? Vec3(1, 0, 0) : ax == 2 ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
+    Vec3 axisW = world.TransformDirection(axisLocal);
+    float al = axisW.Length();
+    Vec3 axisN = al > 1e-8f ? axisW / al : Vec3(0, 1, 0);
+    float r = radius * rScale;
+    float half = std::max(0.0f, height * axisScale * 0.5f - r);
+    Vec3 c = world.TransformPoint(localCenter);
+    *a = c + axisN * half;
+    *b = c - axisN * half;
+    *rOut = r;
+}
+
+Vec3 ClosestOnSegment(const Vec3& p, const Vec3& a, const Vec3& b) {
+    Vec3 ab = b - a;
+    float l2 = ab.LengthSq();
+    if (l2 < 1e-12f) return a;
+    float t = std::clamp(Vec3::Dot(p - a, ab) / l2, 0.0f, 1.0f);
+    return a + ab * t;
+}
+
+// Closest points between segments p1q1 and p2q2 (Ericson, Real-Time Collision
+// Detection). Degenerate segments fall back to a point test.
+void ClosestSegments(const Vec3& p1, const Vec3& q1, const Vec3& p2, const Vec3& q2, Vec3* c1,
+                     Vec3* c2) {
+    Vec3 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
+    float a = Vec3::Dot(d1, d1), e = Vec3::Dot(d2, d2), f = Vec3::Dot(d2, r);
+    if (a <= 1e-12f && e <= 1e-12f) { *c1 = p1; *c2 = p2; return; }
+    if (a <= 1e-12f) {
+        *c1 = p1;
+        *c2 = p2 + d2 * std::clamp(f / e, 0.0f, 1.0f);
+        return;
+    }
+    float c = Vec3::Dot(d1, r);
+    if (e <= 1e-12f) {
+        float t = std::clamp(-c / a, 0.0f, 1.0f);
+        *c1 = p1 + d1 * t;
+        *c2 = p2;
+        return;
+    }
+    float b = Vec3::Dot(d1, d2);
+    float denom = a * e - b * b;
+    float s = denom > 1e-12f ? std::clamp((b * f - c * e) / denom, 0.0f, 1.0f) : 0.0f;
+    float t = (b * s + f) / e;
+    if (t < 0.0f) { t = 0.0f; s = std::clamp(-c / a, 0.0f, 1.0f); }
+    else if (t > 1.0f) { t = 1.0f; s = std::clamp((b - c) / a, 0.0f, 1.0f); }
+    *c1 = p1 + d1 * s;
+    *c2 = p2 + d2 * t;
+}
+
 bool Collide(const Shape& a, const Shape& b, Contact* out) {
     if (a.Is2D() != b.Is2D()) return false;  // never mix 2D and 3D shapes
+
+    // Capsule pairs are resolved exactly (segment/segment and segment/sphere);
+    // capsule vs box falls through to the AABB approximation below.
+    const bool aCap = a.kind == Shape::Capsule3;
+    const bool bCap = b.kind == Shape::Capsule3;
+    if (aCap && bCap) {
+        Vec3 c1, c2;
+        ClosestSegments(a.p0, a.p1, b.p0, b.p1, &c1, &c2);
+        Vec3 d = c1 - c2;  // from B toward A
+        float dist = d.Length();
+        float sum = a.radius + b.radius;
+        if (dist >= sum) return false;
+        out->penetration = sum - dist;
+        out->normal = dist > 1e-6f ? d / dist : Vec3(0, 1, 0);
+        return true;
+    }
+    if ((aCap && b.kind == Shape::Sphere3) || (bCap && a.kind == Shape::Sphere3)) {
+        const Shape& cap = aCap ? a : b;
+        const Shape& sph = aCap ? b : a;
+        Vec3 cp = ClosestOnSegment(sph.center, cap.p0, cap.p1);
+        Vec3 d = sph.center - cp;  // from capsule toward sphere
+        float dist = d.Length();
+        float sum = sph.radius + cap.radius;
+        if (dist >= sum) return false;
+        out->penetration = sum - dist;
+        Vec3 n = dist > 1e-6f ? d / dist : Vec3(0, 1, 0);
+        out->normal = aCap ? -n : n;  // must point from B toward A
+        return true;
+    }
 
     if (a.kind != Shape::Sphere3 && b.kind != Shape::Sphere3) {
         // AABB vs AABB.
@@ -116,6 +209,52 @@ bool Collide(const Shape& a, const Shape& b, Contact* out) {
 // Nearest ray hit against one shape. `d` must be normalized; returns the
 // distance and outward normal at the entry point.
 bool RayShape(const Shape& s, const Vec3& o, const Vec3& d, float maxT, float* tOut, Vec3* nOut) {
+    if (s.kind == Shape::Capsule3) {
+        // Ray vs capsule: the entry on the infinite cylinder (clamped to the
+        // segment) plus both cap spheres, nearest wins.
+        Vec3 ba = s.p1 - s.p0, oa = o - s.p0;
+        float baba = Vec3::Dot(ba, ba);
+        float bard = Vec3::Dot(ba, d);
+        float baoa = Vec3::Dot(ba, oa);
+        float rdoa = Vec3::Dot(d, oa);
+        float oaoa = Vec3::Dot(oa, oa);
+        float rr = s.radius * s.radius;
+        float A = baba - bard * bard;
+        float B = baba * rdoa - baoa * bard;
+        float C = baba * oaoa - baoa * baoa - rr * baba;
+        float h = B * B - A * C;
+        float best = maxT;
+        bool found = false;
+        if (h >= 0.0f && std::fabs(A) > 1e-9f) {
+            float t = (-B - std::sqrt(h)) / A;
+            float y = baoa + t * bard;
+            if (y > 0.0f && y < baba && t >= 0.0f && t <= best) {
+                best = t;
+                found = true;
+                Vec3 p = o + d * t;
+                Vec3 cp = s.p0 + ba * (y / baba);
+                *nOut = (p - cp).Normalized();
+            }
+        }
+        for (int i = 0; i < 2; ++i) {
+            Vec3 c = i == 0 ? s.p0 : s.p1;
+            Vec3 oc = o - c;
+            float b = Vec3::Dot(oc, d);
+            float cc = Vec3::Dot(oc, oc) - rr;
+            float disc = b * b - cc;
+            if (disc < 0) continue;
+            float sq = std::sqrt(disc);
+            float t = -b - sq;
+            if (t < 0) t = -b + sq;
+            if (t < 0 || t > best) continue;
+            best = t;
+            found = true;
+            *nOut = (o + d * t - c).Normalized();
+        }
+        if (!found) return false;
+        *tOut = best;
+        return true;
+    }
     if (s.kind == Shape::Sphere3) {
         Vec3 oc = o - s.center;
         float b = Vec3::Dot(oc, d);
@@ -233,6 +372,18 @@ void GatherShapes(Scene& scene, std::vector<Shape>* out) {
             s.max = s.center + Vec3(s.radius);
             add(s);
         }
+        if (auto* c = go->GetComponent<CapsuleCollider>(); c && c->enabled) {
+            Shape s;
+            s.kind = Shape::Capsule3;
+            s.comp = c;
+            s.isTrigger = c->isTrigger;
+            WorldCapsule(c->radius, c->height, c->direction, c->center, world, &s.p0, &s.p1,
+                         &s.radius);
+            s.min = Vec3::Min(s.p0, s.p1) - Vec3(s.radius);
+            s.max = Vec3::Max(s.p0, s.p1) + Vec3(s.radius);
+            s.center = (s.p0 + s.p1) * 0.5f;
+            add(s);
+        }
         if (auto* c = go->GetComponent<Collider2D>(); c && c->enabled) {
             AABB box = WorldBox2D(*c, world);
             Shape s;
@@ -251,6 +402,7 @@ bool HasEnabledCollider(const GameObject& go) {
             case ComponentTypeId::BoxCollider:
             case ComponentTypeId::SphereCollider:
             case ComponentTypeId::Collider2D:
+            case ComponentTypeId::CapsuleCollider:
                 if (c->enabled) return true;
                 break;
             default:
@@ -477,6 +629,9 @@ std::vector<GameObject*> PhysicsOverlapSphere(Scene& scene, const Vec3& center, 
         bool overlap = false;
         if (s.kind == Shape::Sphere3) {
             overlap = (center - s.center).Length() <= radius + s.radius;
+        } else if (s.kind == Shape::Capsule3) {
+            Vec3 cp = ClosestOnSegment(center, s.p0, s.p1);
+            overlap = (center - cp).Length() <= radius + s.radius;
         } else {
             Vec3 closest(std::clamp(center.x, s.min.x, s.max.x),
                          std::clamp(center.y, s.min.y, s.max.y),
@@ -487,6 +642,124 @@ std::vector<GameObject*> PhysicsOverlapSphere(Scene& scene, const Vec3& center, 
         if (std::find(out.begin(), out.end(), s.go) == out.end()) out.push_back(s.go);
     }
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Character controller: a swept/penetration-resolved kinematic capsule.
+// ---------------------------------------------------------------------------
+bool PhysicsCharacterMove(Scene& scene, GameObject& go, CharacterController& cc,
+                          const Vec3& displacement) {
+    Transform& t = go.transform();
+    const float slopeCos = std::cos(cc.slopeLimit * kDegToRad);
+
+    // Colliders to resolve against. The controller is not itself a collider, so
+    // it never shows up in this list.
+    std::vector<Shape> others;
+    GatherShapes(scene, &others);
+
+    auto buildShape = [&](Shape* s) {
+        Vec3 a, b;
+        float r;
+        WorldCapsule(cc.radius, cc.height, 0, cc.center, t.WorldMatrix(), &a, &b, &r);
+        s->kind = Shape::Capsule3;
+        s->go = &go;
+        s->comp = &cc;
+        s->rb = nullptr;
+        s->isTrigger = false;
+        s->isStatic = false;
+        s->layer = go.layer;
+        s->p0 = a;
+        s->p1 = b;
+        s->radius = r;
+        s->center = (a + b) * 0.5f;
+        s->min = Vec3::Min(a, b) - Vec3(r);
+        s->max = Vec3::Max(a, b) + Vec3(r);
+    };
+    auto translate = [](Shape* s, const Vec3& off) {
+        s->p0 += off;
+        s->p1 += off;
+        s->center += off;
+        s->min += off;
+        s->max += off;
+    };
+
+    bool grounded = false;
+
+    // Pushes the controller out of every overlapping solid collider, up to a
+    // few iterations so multi-contact corners settle. Contacts with an upward
+    // normal mark the controller as grounded.
+    auto resolve = [&]() {
+        for (int it = 0; it < 6; ++it) {
+            Shape ctrl;
+            buildShape(&ctrl);
+            bool moved = false;
+            for (const Shape& o : others) {
+                if (!o.comp || !o.IsSolid() || o.go == &go) continue;
+                if (!scene.LayerCollides(ctrl.layer, o.layer)) continue;
+                if (!AABB(ctrl.min, ctrl.max).Intersects(AABB(o.min, o.max))) continue;
+                Contact ct;
+                if (!Collide(ctrl, o, &ct) || ct.penetration <= 1e-6f) continue;
+                MoveWorld(t, ct.normal * ct.penetration);
+                moved = true;
+                if (ct.normal.y > slopeCos) grounded = true;
+            }
+            if (!moved) break;
+        }
+    };
+    // A capsule pushed down by the skin width detects a walkable surface when
+    // the controller is resting on one (also used to seed step climbing).
+    auto probeGrounded = [&]() -> bool {
+        Shape ctrl;
+        buildShape(&ctrl);
+        translate(&ctrl, Vec3(0, -(cc.skinWidth + 0.02f), 0));
+        for (const Shape& o : others) {
+            if (!o.comp || !o.IsSolid() || o.go == &go) continue;
+            if (!scene.LayerCollides(ctrl.layer, o.layer)) continue;
+            if (!AABB(ctrl.min, ctrl.max).Intersects(AABB(o.min, o.max))) continue;
+            Contact ct;
+            if (Collide(ctrl, o, &ct) && ct.normal.y > slopeCos) return true;
+        }
+        return false;
+    };
+
+    const Vec3 horizontal(displacement.x, 0, displacement.z);
+    const Vec3 vertical(0, displacement.y, 0);
+    const bool wasGrounded = cc.isGrounded || probeGrounded();
+
+    // Horizontal movement. While grounded we lift by stepOffset first so a low
+    // step is climbed rather than treated as a wall, then settle back down.
+    if (wasGrounded && cc.stepOffset > 0.0f && horizontal.LengthSq() > 1e-12f) {
+        MoveWorld(t, Vec3(0, cc.stepOffset, 0));
+        resolve();
+        MoveWorld(t, horizontal);
+        resolve();
+        MoveWorld(t, Vec3(0, -cc.stepOffset, 0));
+        resolve();
+    } else if (horizontal.LengthSq() > 0.0f) {
+        MoveWorld(t, horizontal);
+        resolve();
+    }
+
+    if (vertical.LengthSq() > 0.0f) {
+        MoveWorld(t, vertical);
+        resolve();
+    }
+
+    grounded = grounded || probeGrounded();
+    cc.isGrounded = grounded;
+    return grounded;
+}
+
+void CharacterController::Move(const Vec3& displacement) {
+    PhysicsCharacterMove(gameObject().scene(), gameObject(), *this, displacement);
+}
+
+void CharacterController::SimpleMove(const Vec3& v) {
+    float dt = Time::DeltaTime();
+    float vy = isGrounded ? 0.0f : velocity.y;
+    if (useGravity) vy -= 9.81f * gravityScale * dt;
+    velocity = Vec3(v.x, vy, v.z);
+    Move(Vec3(v.x * dt, vy * dt, v.z * dt));
 }
 
 }  // namespace Cairn

@@ -2,6 +2,17 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.6] - 2026-10-17
+
+### Physics: capsule colliders and a character controller
+- **`CapsuleCollider`.** A swept-sphere collider with `center`, `radius`, `height` (total length including the caps) and a `direction` axis (Y/X/Z, Unity convention). Radius scales by the two axes perpendicular to `direction`, height by the chosen axis; below `2*radius` it degenerates to a sphere. Capsule/capsule and capsule/sphere contacts are solved exactly (segment/segment and segment/sphere); capsule/box falls back to the shared AABB path so a capsule still stands solidly on box floors and walls.
+- **True capsule queries.** `Physics::Raycast`/`RaycastAll` test the real capsule (cylinder entry plus both cap spheres) instead of its bounding box, and `Physics::OverlapSphere` measures against the capsule's segment.
+- **`CharacterController`.** A kinematic capsule moved by gameplay code. `Move(displacement)` sweeps and resolves the capsule against solid colliders (up to a few depenetration iterations), climbs steps up to `stepOffset` while grounded, respects `slopeLimit`, and reports `isGrounded`; `SimpleMove(velocity)` applies gravity and a per-second velocity. Tunables: `center`, `radius`, `height`, `slopeLimit`, `stepOffset`, `skinWidth`, `useGravity`, `gravityScale`. `PhysicsCharacterMove` is the underlying free function.
+- **New CLI command.** `physics.moveCharacter --id <id> --displacement [x,y,z]` moves a controller and returns `{id, grounded, position, localPosition}`.
+- **Editor.** Both components appear in the Add Component menu with localized titles (`i18n/en.js`, `i18n/zh-CN.js`) and full inspector schemas.
+- **Tests.** `TestCapsuleCollider`, `TestCapsulePhysics` and `TestCharacterController` (grounding, free fall without tunnelling, wall blocking, step climbing) plus a CLI physics section covering capsule overlap and `physics.moveCharacter`.
+- **Still to come** (next increment): joints (distance/spring), rigidbody sleeping, per-property prefab overrides.
+
 ## [0.1.5] - 2026-10-16
 
 ### Windows one-click build (MSVC)

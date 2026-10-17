@@ -27,4 +27,9 @@ std::vector<PhysicsHit> PhysicsRaycastAll(Scene& scene, const Vec3& origin, cons
                                           float maxDistance);
 std::vector<GameObject*> PhysicsOverlapSphere(Scene& scene, const Vec3& center, float radius);
 
+// Moves a CharacterController capsule by `displacement`, resolving it against
+// solid colliders. Returns true when the controller is grounded afterwards.
+bool PhysicsCharacterMove(Scene& scene, GameObject& go, CharacterController& cc,
+                          const Vec3& displacement);
+
 }  // namespace Cairn

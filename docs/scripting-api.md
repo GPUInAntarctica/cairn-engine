@@ -83,7 +83,16 @@ rb->AddImpulse(Vec3(0, 5, 0));  // immediate velocity change
 rb->AddTorque(Vec3(0, 1, 0));   // accumulated angular acceleration
 ```
 
-Colliders: `BoxCollider` (3D AABB), `SphereCollider`, `Collider2D` (XY plane). A collider without a `RigidBody` is static. `isTrigger` colliders fire the trigger callbacks instead of resolving.
+Colliders: `BoxCollider` (3D AABB), `SphereCollider`, `CapsuleCollider` (swept sphere along a Y/X/Z axis), `Collider2D` (XY plane). A collider without a `RigidBody` is static. `isTrigger` colliders fire the trigger callbacks instead of resolving.
+
+For player/agent movement use a `CharacterController`, a kinematic capsule that is moved by code rather than the solver:
+
+```cpp
+auto* cc = gameObject().GetComponent<CharacterController>();
+cc->Move(Vec3(0.1f, 0, 0));   // sweep + resolve, climbs steps up to stepOffset
+cc->isGrounded;               // true after a move that settled on ground
+cc->SimpleMove(Vec3(x, 0, z));// per-second velocity + gravity (ignores input y)
+```
 
 Queries run against colliders in the active scene:
 
