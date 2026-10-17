@@ -2,6 +2,15 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.11] - 2026-10-17
+
+### Performance: instanced shadow cascades
+- **Shadow casters are now instanced too.** Each cascade pushes its light-view-proj matrix **once** (it is shared by every caster in the pass) and then draws runs of adjacent visible casters that share mesh and cull mode as a single `vkCmdDrawIndexed(instanceCount = N)`, reading `draws[gl_InstanceIndex]` for the model matrix. A 40-cube, 2-cascade scene goes from 80 shadow draws to 2.
+- **`RenderStats::drawCalls` includes shadow submissions** on the GPU path, so the number reflects the real API budget (a 40-cube 2-cascade scene now reports 4: one opaque run, one shadow run per cascade, one sky pass).
+- **Fix: shadow-caster descriptor windows.** The shadow pass always bound frame-set window 0 with a dynamic offset of `slot * stride`, so once a frame had more than `drawUboChunk` (256) draws the caster offset ran past the 64 KiB descriptor range. It now uses the same window/offset math as the opaque pass; verified clean under `VK_LAYER_KHRONOS_validation` with a 300-object scene (casters land in windows 1 and 2).
+- **Bit-identical.** The instanced shadow path produces exactly the same frame as the per-draw path (A/B diffed with `CAIRN_NO_INSTANCING=1`), and it keeps tracking the software reference as closely as before. Cascade counts 1-4 all render and validate cleanly.
+- **Docs:** shadow instancing and the window fix in `docs/architecture.md`.
+
 ## [0.1.10] - 2026-10-17
 
 ### Performance: Vulkan instanced batching (+ single-cascade shadow crash fix)

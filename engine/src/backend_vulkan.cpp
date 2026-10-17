@@ -15,6 +15,7 @@
 #ifdef CAIRN_HAS_VULKAN
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 
@@ -1565,6 +1566,18 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         fn.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, I.scenePipeLayout, 0, 2, sets, 1,
                                  &offset);
     };
+    // Shadow casters read no textures, but the layout still declares set 1, so a
+    // real (stale-content) set has to be bound. The window/offset math is the
+    // same as bindBatch; the old code always used window 0, which overran the
+    // 64 KiB descriptor range once a frame had more than drawUboChunk draws.
+    auto bindShadowCaster = [&](VkCommandBuffer cb, uint32_t base) {
+        const uint32_t window = base / I.drawUboChunk;
+        const VkDescriptorSet target = I.frameSets[window < I.frameSets.size() ? window : 0];
+        const uint32_t offset = (base % I.drawUboChunk) * (uint32_t)stride;
+        const VkDescriptorSet sets[2] = {target, I.placeholderSet};
+        fn.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, I.scenePipeLayout, 0, 2, sets, 1,
+                                 &offset);
+    };
 
     auto bindTexSet = [&](uint32_t slot, VkImageView albedo, VkSampler albedoSampler,
                           VkImageView normal, VkSampler normalSampler) {
@@ -1598,6 +1611,10 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
     VkViewport viewport{0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f};
     VkRect2D scissor{{0, 0}, {static_cast<uint32_t>(w), static_cast<uint32_t>(h)}};
     int opaqueBatches = 0;
+    int shadowBatches = 0;
+    // CAIRN_NO_INSTANCING=1 suppresses run merging so the per-draw path can be
+    // diffed against the instanced one; they must be identical.
+    static const bool noInstancing = std::getenv("CAIRN_NO_INSTANCING") != nullptr;
 
     // ---- shadow cascades ---------------------------------------------------
     if (shadows) {
@@ -1632,18 +1649,40 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             fn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines->second.shadow);
             fn.CmdSetViewport(cmd, 0, 1, &cascadeViewport);
             fn.CmdSetScissor(cmd, 0, 1, &cascadeScissor);
-            for (size_t i = 0; i < list.casters.size(); ++i) {
+            // The cascade matrix is the same for every caster in this pass, so it
+            // is pushed once; the per-caster model comes from draws[].
+            fn.CmdPushConstants(cmd, I.scenePipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64,
+                                list.cascadeMatrix[c].m);
+            for (size_t i = 0; i < list.casters.size();) {
                 const uint32_t slot = (uint32_t)(firstCaster + i);
                 if (slot >= drawData.size()) break;
-                if (!IntersectsShadowVolume(list.cascadeMatrix[c], list.casters[i].bounds)) continue;
+                if (!IntersectsShadowVolume(list.cascadeMatrix[c], list.casters[i].bounds)) {
+                    ++i;
+                    continue;
+                }
                 auto meshIt = I.meshes.find(list.casters[i].mesh.get());
-                if (meshIt == I.meshes.end()) continue;
-                // Set 1 is unused by the shadow stage but the layout declares
-                // it, so a real (stale-content) set has to be bound.
-                const VkDescriptorSet both[2] = {I.frameSet, I.placeholderSet};
-                const uint32_t offset = slot * (uint32_t)stride;
-                fn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, I.scenePipeLayout, 0,
-                                         2, both, 1, &offset);
+                if (meshIt == I.meshes.end()) {
+                    ++i;
+                    continue;
+                }
+                const VkCullModeFlags cull = CullModeFor(list.casters[i].cullMode);
+                // Extend the run: same mesh and cull mode, still inside the
+                // cascade volume, and inside one draw-UBO window (the shader
+                // cannot index past its 64 KiB).
+                const size_t windowEnd =
+                    ((slot / I.drawUboChunk) + 1) * (size_t)I.drawUboChunk - firstCaster;
+                size_t j = i + 1;
+                if (!noInstancing) {
+                    for (; j < list.casters.size() && j < windowEnd; ++j) {
+                        const uint32_t s2 = (uint32_t)(firstCaster + j);
+                        if (s2 >= drawData.size()) break;
+                        if (!IntersectsShadowVolume(list.cascadeMatrix[c], list.casters[j].bounds))
+                            break;
+                        if (list.casters[j].mesh.get() != list.casters[i].mesh.get()) break;
+                        if (CullModeFor(list.casters[j].cullMode) != cull) break;
+                    }
+                }
+                bindShadowCaster(cmd, slot);
                 const VkDeviceSize vOffset = meshIt->second.vertexOffset;
                 fn.CmdBindVertexBuffers(cmd, 0, 1, &I.sceneVerts.handle, &vOffset);
                 fn.CmdBindIndexBuffer(cmd, I.sceneIndices.handle,
@@ -1651,10 +1690,10 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
                                        VK_INDEX_TYPE_UINT32);
                 // The shadow pipeline declares CULL_MODE dynamic, so it has to
                 // be set before the first draw or the draw is invalid.
-                fn.CmdSetCullMode(cmd, CullModeFor(list.casters[i].cullMode));
-                const float* matrix = list.cascadeMatrix[c].m;
-                fn.CmdPushConstants(cmd, I.scenePipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64, matrix);
-                fn.CmdDrawIndexed(cmd, meshIt->second.indexCount, 1, 0, 0, 0);
+                fn.CmdSetCullMode(cmd, cull);
+                fn.CmdDrawIndexed(cmd, meshIt->second.indexCount, (uint32_t)(j - i), 0, 0, 0);
+                ++shadowBatches;
+                i = j;
             }
             fn.CmdEndRendering(cmd);
             I.Transition(cmd, I.shadowMap, VK_IMAGE_ASPECT_DEPTH_BIT,
@@ -1758,9 +1797,6 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             // cross a draw-UBO window — the shader cannot index past its 64 KiB.
             const size_t windowEnd = ((i / I.drawUboChunk) + 1) * (size_t)I.drawUboChunk;
             size_t j = i + 1;
-            // CAIRN_NO_INSTANCING=1 suppresses run merging so the per-draw path
-            // can be diffed against the instanced one; they must be identical.
-            static const bool noInstancing = std::getenv("CAIRN_NO_INSTANCING") != nullptr;
             if (!noInstancing) {
                 for (; j < list.opaque.size() && j < opaqueCount && j < windowEnd; ++j) {
                     const FrameDrawList::OpaqueDraw& d = list.opaque[j];
@@ -1986,8 +2022,9 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
     target->height = h;
 
     if (stats) {
-        // Draw calls are API submissions, so instanced runs count once.
-        stats->drawCalls = opaqueBatches + (int)list.items2D.size() + 1;
+        // Draw calls are API submissions, so instanced runs count once and the
+        // shadow cascades are included.
+        stats->drawCalls = opaqueBatches + shadowBatches + (int)list.items2D.size() + 1;
         stats->triangles = 0;
         for (const auto& d : list.opaque)
             if (d.mesh) stats->triangles += (int)(d.mesh->indices.size() / 3);
