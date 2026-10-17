@@ -1,6 +1,7 @@
 #include "cairn/renderer.h"
 
 #include "cairn/engine.h"
+#include "cairn/jobs.h"
 #include "cairn/log.h"
 #include "cairn/profiler.h"
 #include "backend_vulkan.h"
@@ -14,111 +15,6 @@
 #include <functional>
 
 namespace Cairn {
-
-// ---------------------------------------------------------------------------
-// Small persistent worker pool for band-parallel rasterization.
-// ---------------------------------------------------------------------------
-class JobPool {
-public:
-    void Start(int n) {
-        std::lock_guard<std::mutex> lock(m_);
-        for (int i = 0; i < std::max(1, n); ++i)
-            threads_.emplace_back([this] { WorkerLoop(); });
-    }
-    void Stop() {
-        {
-            std::lock_guard<std::mutex> lock(m_);
-            stop_ = true;
-        }
-        wake_.notify_all();
-        for (auto& t : threads_) if (t.joinable()) t.join();
-        threads_.clear();
-    }
-    // Runs f(0..count-1) across the pool and blocks until done. The calling
-    // thread participates in the work.
-    void ParallelFor(int count, const std::function<void(int)>& f) {
-        if (count <= 0) return;
-        if (threads_.empty()) {
-            for (int i = 0; i < count; ++i) f(i);
-            return;
-        }
-        // task_ points at the caller's stack frame, so no worker may still be
-        // inside Work() when this returns: the next dispatch would overwrite
-        // it, and a straggler still looping would call into a destroyed
-        // std::function. Waiting for pending_ == 0 is not enough -- a worker
-        // that has already claimed its last index decrements pending_ and is
-        // still one fetch_add away from leaving the loop. So the wait also
-        // requires every worker to have left the dispatch loop (retired_).
-        const int workers = (int)threads_.size();
-        task_.store(&f, std::memory_order_relaxed);
-        jobCount_.store(count, std::memory_order_relaxed);
-        next_.store(0, std::memory_order_relaxed);
-        pending_.store(count, std::memory_order_relaxed);
-        retired_.store(0, std::memory_order_relaxed);
-        workerTotal_ = workers;
-        {
-            std::lock_guard<std::mutex> lock(m_);
-            epoch_++;
-        }
-        wake_.notify_all();
-        Work(false);   // the caller participates but is not one of the workers
-        std::unique_lock<std::mutex> lock(m_);
-        done_.wait(lock, [this] {
-            return pending_.load(std::memory_order_acquire) == 0 &&
-                   retired_.load(std::memory_order_acquire) == workerTotal_;
-        });
-    }
-
-    int workerCount() const { return (int)threads_.size() + 1; }
-
-private:
-    // `countsRetirement` is false for the calling thread, which is not one of
-    // the `workerTotal_` workers ParallelFor waits on.
-    void Work(bool countsRetirement) {
-        const auto* task = task_.load(std::memory_order_acquire);
-        const int count = jobCount_.load(std::memory_order_acquire);
-        while (true) {
-            int i = next_.fetch_add(1, std::memory_order_relaxed);
-            if (i >= count) break;
-            (*task)(i);
-            if (pending_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                std::lock_guard<std::mutex> lock(m_);
-                done_.notify_all();
-            }
-        }
-        if (countsRetirement && retired_.fetch_add(1, std::memory_order_acq_rel) + 1 == workerTotal_) {
-            std::lock_guard<std::mutex> lock(m_);
-            done_.notify_all();
-        }
-    }
-    void WorkerLoop() {
-        uint64_t seen = 0;
-        while (true) {
-            {
-                std::unique_lock<std::mutex> lock(m_);
-                wake_.wait(lock, [this, &seen] { return stop_ || epoch_ != seen; });
-                if (stop_) return;
-                seen = epoch_;
-            }
-            Work(true);
-        }
-    }
-
-    std::vector<std::thread> threads_;
-    std::mutex m_;
-    std::condition_variable wake_, done_;
-    std::atomic<const std::function<void(int)>*> task_{nullptr};
-    std::atomic<int> jobCount_{0};
-    std::atomic<int> next_{0};
-    std::atomic<int> pending_{0};
-    // Workers that have left the dispatch loop for the current epoch.
-    std::atomic<int> retired_{0};
-    // Size of the pool for the in-flight dispatch; read by workers only after
-    // they observe the epoch bump, and never changes mid-epoch.
-    int workerTotal_ = 0;
-    uint64_t epoch_ = 0;
-    bool stop_ = false;
-};
 
 // ---------------------------------------------------------------------------
 // View frustum extraction (Gribb/Hartmann). Rows of the column-major
@@ -195,7 +91,6 @@ struct ShadowSampler {
     };
 
 struct Renderer::Impl {
-    JobPool pool;
     std::vector<RasterVert> triVerts;     // 3 per triangle job
     std::vector<MaterialGpu> triMats;     // 1 per triangle job
     std::vector<GpuLight> lights;
@@ -250,11 +145,8 @@ struct Renderer::Impl {
     // the cascade fits can extend toward geometry outside the view slice.
     std::vector<AABB> casterBounds;
 
-    Impl() {
-        int hw = (int)std::thread::hardware_concurrency();
-        pool.Start(std::clamp(hw <= 0 ? 4 : hw, 1, 16));
-    }
-    ~Impl() { pool.Stop(); }
+    Impl() = default;
+    ~Impl() = default;
 
     // ------------------------------------------------------------------
     void ClearAndSky(const CameraView& cam) {
@@ -262,38 +154,46 @@ struct Renderer::Impl {
         float* d = depth->data();
         std::fill(d, d + n, 1.0f);
         uint8_t* px = color->data();
+        const int w = W;
         if (!cam.skyEnabled) {
             uint8_t r = (uint8_t)std::clamp(cam.clearColor.r * 255.0f, 0.0f, 255.0f);
             uint8_t g = (uint8_t)std::clamp(cam.clearColor.g * 255.0f, 0.0f, 255.0f);
             uint8_t b = (uint8_t)std::clamp(cam.clearColor.b * 255.0f, 0.0f, 255.0f);
-            for (int i = 0; i < n; ++i) {
-                px[i * 4] = r; px[i * 4 + 1] = g; px[i * 4 + 2] = b; px[i * 4 + 3] = 255;
-            }
+            // Rows are independent: the pool clears them in parallel.
+            Jobs::ParallelFor(H, [px, w, r, g, b](int y) {
+                uint8_t* row = px + (size_t)y * w * 4;
+                for (int x = 0; x < w; ++x) {
+                    row[x * 4] = r; row[x * 4 + 1] = g; row[x * 4 + 2] = b; row[x * 4 + 3] = 255;
+                }
+            });
             return;
         }
-        // Vertical gradient by view ray elevation.
-        for (int y = 0; y < H; ++y) {
+        // Vertical gradient by view ray elevation. Each row's colour depends
+        // only on its own y, so rows are independent under the pool.
+        const bool isOrtho = ortho;
+        const Vec3 cUp = camUp, cFwd = camForward;
+        const float thf = tanHalfFov;
+        const Color skyBottom = cam.skyBottom, skyTop = cam.skyTop;
+        Jobs::ParallelFor(H, [px, w, this, isOrtho, cUp, cFwd, thf, skyBottom, skyTop](int y) {
             float ndcY = 1.0f - 2.0f * ((y + 0.5f) / H);  // up positive
             float tY;
-            if (ortho) {
-                float worldY = camPos.y + camUp.y * ndcY * orthoSize + camRight.y * 0.0f;
+            if (isOrtho) {
                 // For ortho, elevation varies across rows only via camUp.
-                float rayY = (camUp.y * ndcY) + camForward.y;
-                (void)worldY;
-                tY = rayY;
+                tY = (cUp.y * ndcY) + cFwd.y;
             } else {
-                Vec3 ray = camForward + camUp * (ndcY * tanHalfFov);
+                Vec3 ray = cFwd + cUp * (ndcY * thf);
                 tY = ray.y;
             }
             float t = std::clamp((tY + 0.35f) * 1.5f, 0.0f, 1.0f);
             t = std::pow(t, 0.85f);
-            Color c = Color::Lerp(cam.skyBottom, cam.skyTop, t);
+            Color c = Color::Lerp(skyBottom, skyTop, t);
             uint8_t r = (uint8_t)(c.r * 255.0f), g = (uint8_t)(c.g * 255.0f), b = (uint8_t)(c.b * 255.0f);
-            for (int x = 0; x < W; ++x) {
-                size_t i = ((size_t)y * W + x) * 4;
-                px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = 255;
+            uint8_t* row = px + (size_t)y * w * 4;
+            for (int x = 0; x < w; ++x) {
+                size_t i = (size_t)x * 4;
+                row[i] = r; row[i + 1] = g; row[i + 2] = b; row[i + 3] = 255;
             }
-        }
+        });
     }
 
     // ------------------------------------------------------------------
@@ -864,10 +764,14 @@ struct Renderer::Impl {
 
     void FullscreenPass(const std::function<void(int x, int y, uint8_t* px)>& fn) {
         uint8_t* base = color->data();
-        for (int y = 0; y < H; ++y) {
-            uint8_t* row = base + (size_t)y * W * 4;
-            for (int x = 0; x < W; ++x) fn(x, y, row + (size_t)x * 4);
-        }
+        const int w = W;
+        // Rows are independent, so the pool parallelizes them: each row writes
+        // only its own pixels and reads only shared inputs. Bit-identical to the
+        // serial loop.
+        Jobs::ParallelFor(H, [&fn, base, w](int y) {
+            uint8_t* row = base + (size_t)y * w * 4;
+            for (int x = 0; x < w; ++x) fn(x, y, row + (size_t)x * 4);
+        });
     }
 
     static float DisplayLuma(const uint8_t* px) {
@@ -908,7 +812,8 @@ struct Renderer::Impl {
         static const float kWeights[5] = {0.227027f, 0.194594f, 0.121621f, 0.054054f, 0.016216f};
         // 1) Bright pass: 2x2 box downsample; keep pixels above the display
         //    luma threshold with a smooth knee so the cutoff doesn't alias.
-        for (int hy = 0; hy < hh; ++hy) {
+        //    Half-res rows are independent; the pool runs them in parallel.
+        Jobs::ParallelFor(hh, [this, hw, hh, threshold](int hy) {
             for (int hx = 0; hx < hw; ++hx) {
                 int r = 0, g = 0, b = 0;
                 for (int dy = 0; dy < 2; ++dy) {
@@ -930,10 +835,12 @@ struct Renderer::Impl {
                 o[2] = (uint8_t)std::clamp(cb * k * 255.0f + 0.5f, 0.0f, 255.0f);
                 o[3] = 255;
             }
-        }
+        });
         // 2) Separable blur: horizontal into scratchB, vertical back into A.
-        auto blur = [&](const std::vector<uint8_t>& src, std::vector<uint8_t>& dst, bool vertical) {
-            for (int y = 0; y < hh; ++y) {
+        //    Each pass is row-independent and blocks before the next runs, so
+        //    src/dst never alias within a pass.
+        auto blur = [this, hw, hh](const std::vector<uint8_t>& src, std::vector<uint8_t>& dst, bool vertical) {
+            Jobs::ParallelFor(hh, [&src, &dst, hw, hh, vertical](int y) {
                 for (int x = 0; x < hw; ++x) {
                     float acc[3] = {0.0f, 0.0f, 0.0f};
                     for (int t = -4; t <= 4; ++t) {
@@ -949,7 +856,7 @@ struct Renderer::Impl {
                     o[2] = (uint8_t)std::clamp(acc[2] + 0.5f, 0.0f, 255.0f);
                     o[3] = 255;
                 }
-            }
+            });
         };
         blur(scratchA, scratchB, false);
         blur(scratchB, scratchA, true);
@@ -1378,7 +1285,7 @@ struct Renderer::Impl {
     // worker owns a contiguous row range, so no two threads ever write the same
     // pixel: the previous implementation raced on the colour and depth buffers.
     void RasterizeParallel(int firstJob, int jobCount) {
-        const int bands = std::clamp(pool.workerCount(), 1, std::max(1, H / 8));
+        const int bands = std::clamp(Jobs::WorkerCount(), 1, std::max(1, H / 8));
         if (bands <= 1 || jobCount == 0) {
             for (int i = firstJob; i < firstJob + jobCount; ++i) RasterTriangle(i, 0, H);
             return;
@@ -1397,7 +1304,7 @@ struct Renderer::Impl {
             int b1 = std::clamp((int)std::floor(maxY) / rowsPerBand, 0, bands - 1);
             for (int b = b0; b <= b1; ++b) bandJobs[b].push_back(job);
         }
-        pool.ParallelFor(bands, [this, rowsPerBand](int b) {
+        Jobs::ParallelFor(bands, [this, rowsPerBand](int b) {
             const int begin = b * rowsPerBand;
             const int end = begin + bandRows[b];
             for (int job : bandJobs[b]) RasterTriangle(job, begin, end);

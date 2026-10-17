@@ -159,7 +159,7 @@ def('engine.capabilities', {
 def('engine.profile', {
     summary: 'Frame profiler snapshot: per-phase timings plus this frame\'s render counters.',
     args: {},
-    returns: '{frame, fps, frameMs, lastFrameMs, entities, scopes:[{name, ms, avgMs, maxMs, calls}], render:{...}}',
+    returns: '{frame, fps, frameMs, lastFrameMs, entities, scopes:[{name, ms, avgMs, maxMs, calls}], render:{...}, jobs:{workers, dispatches, indices}}',
     needsEngine: true,
     notes: 'Scopes cover simulation (update, scripts, physics) and rendering (render, gather, ' +
         'raster, shadows, post, gpu). Drive frames with runtime.update / runtime.simulate so the ' +

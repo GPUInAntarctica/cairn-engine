@@ -1614,6 +1614,56 @@ static void TestProfiler() {
     CHECK(live["render"]["backend"].asString() == "software");
 }
 
+// The job system runs every index exactly once, in any order, and turns a
+// nested dispatch into a serial loop rather than clobbering the in-flight task.
+static void TestJobs() {
+    CHECK(Jobs::WorkerCount() >= 1);
+
+    // Every index executes exactly once, whatever the pool size or order.
+    const int n = 4096;
+    std::vector<int> hits((size_t)n, 0);
+    Jobs::ParallelFor(n, [&hits](int i) { hits[(size_t)i]++; });
+    int total = 0, distinct = 0;
+    for (int h : hits) { total += h; if (h == 1) distinct++; }
+    CHECK(total == n);
+    CHECK(distinct == n);
+
+    // count <= 0 is a no-op.
+    int calls = 0;
+    Jobs::ParallelFor(0, [&](int) { calls++; });
+    Jobs::ParallelFor(-7, [&](int) { calls++; });
+    CHECK(calls == 0);
+
+    // Index-independent work reproduces exactly across dispatches.
+    auto compute = [](int i) { return std::sqrt((float)i) * 1.5f - 0.25f; };
+    std::vector<float> a((size_t)n), b((size_t)n);
+    Jobs::ParallelFor(n, [&a, &compute](int i) { a[(size_t)i] = compute(i); });
+    Jobs::ParallelFor(n, [&b, &compute](int i) { b[(size_t)i] = compute(i); });
+    bool same = true;
+    for (int i = 0; i < n; ++i)
+        if (a[(size_t)i] != b[(size_t)i]) same = false;
+    CHECK(same);
+
+    // A nested dispatch runs serially on the calling thread instead of
+    // clobbering the outer task. Per-outer storage keeps the test race-free.
+    std::vector<std::vector<int>> inner(8, std::vector<int>(64, 0));
+    std::vector<int> outer(8, 0);
+    Jobs::ParallelFor(8, [&inner, &outer](int i) {
+        outer[(size_t)i]++;
+        Jobs::ParallelFor(64, [&inner, i](int j) { inner[(size_t)i][(size_t)j]++; });
+    });
+    for (int i = 0; i < 8; ++i) {
+        CHECK(outer[(size_t)i] == 1);
+        for (int j = 0; j < 64; ++j) CHECK(inner[(size_t)i][(size_t)j] == 1);
+    }
+
+    // Telemetry advances with use.
+    const Jobs::Stats s = Jobs::Snapshot();
+    CHECK(s.workers == Jobs::WorkerCount());
+    CHECK(s.dispatches >= 5);
+    CHECK(s.indices >= (uint64_t)n);
+}
+
 int main() {
     Log::SetEchoStdout(false);
     TestMath();
@@ -1651,6 +1701,7 @@ int main() {
     TestJoints();
     TestSleeping();
     TestProfiler();
+    TestJobs();
 
     if (g_failures == 0) {
         std::printf("engine tests passed\n");

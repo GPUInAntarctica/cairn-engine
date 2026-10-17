@@ -198,6 +198,7 @@ CAIRN_SCRIPT(Collector)
 - **Primitive names are capitalized**: `Cube`, `Sphere`, `Plane`, `Quad`, `Cylinder`, `Cone`, `Torus`.
 - **`component.setProps` needs the component to exist.** Add it first with `component.add`.
 - **Pin the backend for bulk work.** Hundreds of GPU frames each block on a readback fence; `CAIRN_RENDER_BACKEND=software` keeps a batch off the GPU.
+- **Find the bottleneck before guessing.** `cairn engine.profile` returns per-phase timings (`update`/`scripts`/`physics`, `render`/`gather`/`raster`/`post`/`gpu`) sorted heaviest-first, plus render counters and worker-pool telemetry. `CAIRN_JOBS_WORKERS=1` forces the CPU passes to run serially so a parallel speedup can be measured.
 - **Check the exit code, not just stdout.** A failed command still prints JSON, with `"ok": false` and a `code` such as `invalid_arg` or `prop_rejected`.
 
 ## Documentation
@@ -227,7 +228,7 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.1.8** — an early but usable foundation. The GPU backend is the default but young; the software rasterizer remains the reference implementation and is what the test suite pins, so any rendering difference between the two is a bug in the GPU path rather than an intentional difference. See the [CHANGELOG](CHANGELOG.md) for the milestone history, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+Cairn is at version **0.1.9** — an early but usable foundation. The GPU backend is the default but young; the software rasterizer remains the reference implementation and is what the test suite pins, so any rendering difference between the two is a bug in the GPU path rather than an intentional difference. See the [CHANGELOG](CHANGELOG.md) for the milestone history, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 

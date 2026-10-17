@@ -1,6 +1,7 @@
 #include "cairn/engine.h"
 
 #include "cairn/physics.h"
+#include "cairn/jobs.h"
 #include "cairn/profiler.h"
 #include "scene_internal.h"
 #include "script_host.h"
@@ -1057,6 +1058,12 @@ Json Engine::ProfileSnapshot() const {
     render.set("postPasses", (double)s.postPasses);
     out.set("render", render);
     out.set("entities", (double)scene_->objects.size());
+    const Jobs::Stats jobs = Jobs::Snapshot();
+    Json j = Json::MakeObject();
+    j.set("workers", (double)jobs.workers);
+    j.set("dispatches", (double)jobs.dispatches);
+    j.set("indices", (double)jobs.indices);
+    out.set("jobs", j);
     return out;
 }
 

@@ -373,6 +373,8 @@ check(profile && profile.result.scopes.some(s => s.name === 'update') &&
     'engine.profile records update and render scopes', profile && profile.result && profile.result.scopes.map(s => s.name));
 check(profile && profile.result.render.drawCalls > 0 && profile.result.entities > 0,
     'engine.profile carries render counters', profile && profile.result && profile.result.render);
+check(profile && profile.result.jobs.workers >= 1 && profile.result.jobs.dispatches > 0,
+    'engine.profile reports job-system telemetry', profile && profile.result && profile.result.jobs);
 
 // Input injection + picking.
 const inputBatch = path.join(scratch, 'input.jsonl');

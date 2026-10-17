@@ -198,6 +198,7 @@ CAIRN_SCRIPT(Collector)
 - **图元名首字母大写**：`Cube`、`Sphere`、`Plane`、`Quad`、`Cylinder`、`Cone`、`Torus`。
 - **`component.setProps` 要求组件已存在**，先用 `component.add` 添加。
 - **批量作业请固定后端**：GPU 的每一帧都会阻塞等回读 fence，几百帧下来会和桌面抢显卡；`CAIRN_RENDER_BACKEND=software` 让批量跑在 CPU 上。
+- **先量再猜**：`cairn engine.profile` 给出各阶段耗时（`update`/`scripts`/`physics` 与 `render`/`gather`/`raster`/`post`/`gpu`），按耗时降序排列，并附带绘制计数与工作池遥测。`CAIRN_JOBS_WORKERS=1` 会把 CPU 各阶段强制串行，便于量出并行加速比。
 - **看退出码，别只看 stdout**：失败的命令同样会打印 JSON，只是 `"ok": false` 且带一个 `code`，比如 `invalid_arg`、`prop_rejected`。
 
 ## 文档
@@ -227,7 +228,7 @@ docs/           文档
 
 ## 状态
 
-Cairn 当前版本 **0.1.8**——是个能用但仍早的起点。GPU 后端是默认路径但还年轻；软件光栅化器是参考实现，测试套件也固定跑它，因此**两条路径之间任何渲染差异都算 GPU 后端的 bug，而不是有意为之**。里程碑历史见 [CHANGELOG](CHANGELOG.md)，提 PR 前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+Cairn 当前版本 **0.1.9**——是个能用但仍早的起点。GPU 后端是默认路径但还年轻；软件光栅化器是参考实现，测试套件也固定跑它，因此**两条路径之间任何渲染差异都算 GPU 后端的 bug，而不是有意为之**。里程碑历史见 [CHANGELOG](CHANGELOG.md)，提 PR 前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 

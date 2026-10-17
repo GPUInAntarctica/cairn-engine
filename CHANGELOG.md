@@ -2,6 +2,18 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.9] - 2026-10-17
+
+### Performance: job system + parallel CPU passes
+- **`Jobs` (`<cairn/jobs.h>`).** One process-wide worker pool backs `Jobs::ParallelFor(count, f)`: indices are handed out dynamically, the calling thread participates, and a single `hardware_concurrency`-sized pool (capped at 16) is created lazily and shared by the whole process. The renderer's private band pool is now this shared pool.
+- **Re-entrancy is handled.** A `ParallelFor` body that dispatches again would clobber the in-flight task (a single `task_` pointer into the caller's frame); a nested call is therefore downgraded to a serial loop on the calling thread instead of corrupting state.
+- **`CAIRN_JOBS_WORKERS=n`** caps the pool; `n <= 1` runs everything on the calling thread, which is how the benchmark harness measures the speedup.
+- **Parallelism where it is provably safe.** Work is split only where each index owns its output: the software rasterizer's row bands (as before), the whole post-processing chain (bloom bright pass + separable blur, colour grading, vignette, FXAA), and the clear/sky fill. Every parallel loop writes disjoint rows and reads only shared inputs, so the software image is **bit-identical** to the serial one; the pixel-exact suites pin this.
+- **Measured.** 1280x720, 300 objects, all four post effects on: the post chain drops from 57.6 ms to 6.4 ms (≈8.9× on 16 workers) and the frame from ≈70 ms to ≈20 ms. `engine.profile` reports the per-phase split; `CAIRN_JOBS_WORKERS=1` reproduces the serial baseline.
+- **Telemetry.** `Jobs::Snapshot()` (`{workers, dispatches, indices}`) is folded into `engine.profile` as `jobs`, so a host can see the pool size and how much work is going through it.
+- **Docs.** Job-system and profiler sections in `docs/architecture.md`; a `Jobs::ParallelFor` example in `docs/scripting-api.md`.
+- **Tests.** `TestJobs` (every index exactly once, `count <= 0` no-op, reproducible output, nested dispatch does not deadlock or clobber, telemetry advances) and a CLI check for the `jobs` block.
+
 ## [0.1.8] - 2026-10-17
 
 ### Performance: frame profiler

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cairn-engine VERSION 0.1.8 LANGUAGES CXX)
+project(cairn-engine VERSION 0.1.9 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -116,6 +116,7 @@ add_library(cairn_engine SHARED
     src/renderer.cpp
     src/backend_vulkan.cpp
     src/physics.cpp
+    src/jobs.cpp
     src/profiler.cpp
     src/script_host.cpp
     src/engine.cpp

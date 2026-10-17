@@ -85,3 +85,13 @@ Cairn 由四个主要部分组成：**C++ 引擎运行时**、**N-API 插件**�
 **共同的取舍是阻塞回读。** GPU 帧最后用 `vkCmdCopyImageToBuffer` 把颜色与深度拷进宿主可见缓冲，再等 fence——因为宿主（Electron canvas、CLI 截图）要的就是一份普通像素。这一步让 GPU 路径天然不适合"渲染几千帧但一张都不要"的场景：批量作业应当用 `CAIRN_RENDER_BACKEND=software`。
 
 后端选择的决策点在 `Renderer::RenderScene`：`Auto` 优先 GPU 并静默回退，`Vulkan` 强制 GPU（失败记日志后回退），`Software` 永远走 CPU。
+
+## 任务系统与性能分析
+
+**一个进程级的工作池支撑所有并行。** `Cairn::Jobs::ParallelFor(count, f)` 把下标 `0..count-1` 动态分发给工作线程，调用线程自己也参与，因此负载天然均衡。池在首次使用时惰性创建（`hardware_concurrency` 上限 16），进程内只此一份；`CAIRN_JOBS_WORKERS=1` 会让它退化为串行执行，方便对照测量。
+
+**并行只用在"下标无关"的地方。** 一个 `f(i)` 不得依赖其它下标的结果，也不得与其它下标写同一块内存。需要确定性结果的调用方应各自写入按下标分配的槽位，再按下标顺序合并——软件光栅化就是这样按扫描行分带（每条带只写自己的行），后处理（泛光、调色、暗角、FXAA）与天空/清除也按行并行。`f` 内部**禁止再次调用** `ParallelFor`：嵌套分发会覆盖正在执行的任务，因此嵌套调用被降级为串行。
+
+**确定性优先于吞吐。** 并行不改变任何一个像素的取值——每条行只读共享输入、只写自己的像素，所以软件路径的输出与串行版本逐位相同，测试套件里固定的像素断言因此仍然成立。真正的收益在重负载上：1280×720、300 个物体、开启全部后处理时，后处理链从 57.6 ms 降到 6.4 ms（约 8.9×），整帧从约 70 ms 降到约 20 ms。
+
+**帧剖析器。** `Profiler`（`<cairn/profiler.h>`）用 `BeginSample`/`EndSample` 或 RAII 的 `CAIRN_PROFILE("名字")` 记录命名样本，按名字维护约 1 秒的滚动窗口（last/avg/max）。引擎在固定位置插桩：`update`、`scripts`、`physics` 来自 `Engine::Update`，`render`、`gather`、`shadows`、`raster`、`post`、`gpu` 来自共享的 `Renderer::RenderScene`。每帧提交一次，`engine.profile` 命令读出快照（按耗时降序排列）并附带本帧的绘制计数与任务系统遥测。

@@ -107,6 +107,14 @@ Profiling: wrap hot code with a named sample and read the rolling window from th
 }
 ```
 
+Parallelism: `Jobs::ParallelFor(count, f)` runs `f(0..count-1)` across the shared worker pool (the calling thread participates). `f(i)` must not depend on other indices or write memory another index owns — write a per-index slot and merge in index order for a deterministic result. Do not call `ParallelFor` from inside a body.
+
+```cpp
+std::vector<float> cost(items.size(), 0.0f);
+Jobs::ParallelFor((int)items.size(), [&](int i) { cost[i] = ScoreItem(items[i]); });
+// cost is fully populated, in index order, regardless of worker count.
+```
+
 Queries run against colliders in the active scene:
 
 ```cpp

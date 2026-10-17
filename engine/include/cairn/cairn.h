@@ -6,5 +6,6 @@
 
 #include "math.h"
 #include "json.h"
+#include "jobs.h"
 #include "scripting.h"
 #include "profiler.h"
