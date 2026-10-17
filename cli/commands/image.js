@@ -100,16 +100,43 @@ def('image.open', {
 });
 
 def('image.info', {
-    summary: 'Document dimensions, layer list and pixel statistics (composite histogram, average color).',
-    args: {},
+    summary: 'Dimensions, layer list and pixel statistics: histogram, average color, content bounds, coverage, edge clipping, mirror symmetry and dominant colors.',
+    args: {
+        layer: { type: 'int', desc: 'Analyze this layer instead of the composite.' },
+        spans: { type: 'bool', default: false, desc: 'Also report per-row and per-column content extents.' },
+    },
     returns: '{width, height, path, layers, stats}',
-    examples: ['cairn image.info'],
-    run(ctx) {
+    examples: ['cairn image.info', 'cairn image.info --layer 0 --spans'],
+    run(ctx, args) {
         const doc = getDoc(ctx);
+        if (args.layer !== undefined) getLayer(ctx, args.layer);
         return Object.assign(describe(doc), {
             path: ctx.session._imagePath ? ctx.session.toProjectRelative(ctx.session._imagePath) : null,
-            stats: imaging.analyze(doc),
+            stats: imaging.analyze(doc, { layer: args.layer, spans: args.spans }),
         });
+    },
+});
+
+def('image.preview', {
+    summary: 'Render the image (or a layer) as text so its shape can be checked without opening a file.',
+    args: {
+        layer: { type: 'int', desc: 'Preview this layer instead of the composite.' },
+        scale: { type: 'int', default: 1, desc: 'Average blocks of this many pixels into one cell.' },
+        format: { type: 'enum', enum: ['ascii', 'blocks', 'hex'], default: 'ascii', desc: 'Cell representation.' },
+        chars: { type: 'string', desc: 'Dark-to-light character ramp for the ascii/blocks formats.' },
+        empty: { type: 'string', default: ' ', desc: 'Character for fully transparent cells.' },
+    },
+    returns: '{width, height, scale, cols, rows, format, lines}',
+    examples: [
+        'cairn image.preview --scale 4',
+        'cairn image.preview --format blocks --scale 2',
+        'cairn image.preview --format hex --scale 8',
+    ],
+    run(ctx, args) {
+        const doc = getDoc(ctx);
+        if (args.layer !== undefined) getLayer(ctx, args.layer);
+        if (args.scale < 1 || args.scale > 64) throw invalidArg('--scale must be between 1 and 64');
+        return imaging.previewText(doc, args);
     },
 });
 
@@ -265,7 +292,18 @@ const drawArgs = {
     hardness: { type: 'number', default: 0.8, desc: 'Brush hardness 0-1 (1 = hard edge).' },
 };
 
+// Shared by the shape commands: `--filled` fills the interior, `--stroke`
+// adds an outline drawn *outside* the boundary (so it never eats the fill),
+// and `--strokeColor` lets fill and outline differ (e.g. a gold coin with a
+// dark rim) in a single call.
+const shapeArgs = Object.assign({}, drawArgs, {
+    filled: { type: 'bool', default: false, desc: 'Fill the interior.' },
+    stroke: { type: 'number', default: 0, desc: 'Outline width in pixels, drawn outside the shape (0 = none).' },
+    strokeColor: { type: 'color', desc: 'Outline color (default: the fill color).' },
+});
+
 function draw(ctx, args, fn) {
+    if (args.stroke !== undefined && args.stroke < 0) throw invalidArg('--stroke must be 0 or greater');
     const layer = activeLayer(ctx, args);
     const doc = ctx.session._image;
     const count = fn(layer.data, doc.width, doc.height, layer);
@@ -274,19 +312,22 @@ function draw(ctx, args, fn) {
 
 def('image.draw.rect', {
     summary: 'Draw a rectangle outline or a filled rectangle.',
-    args: Object.assign({}, drawArgs, {
+    args: Object.assign({}, shapeArgs, {
         x: { type: 'number', required: true, desc: 'Left X.' },
         y: { type: 'number', required: true, desc: 'Top Y.' },
         width: { type: 'number', required: true, desc: 'Rectangle width.' },
         height: { type: 'number', required: true, desc: 'Rectangle height.' },
-        filled: { type: 'bool', default: false, desc: 'Fill instead of stroking.' },
     }),
     returns: '{layer, pixels}',
-    examples: ['cairn image.draw.rect --x 8 --y 8 --width 64 --height 64 --color "#ff8800" --filled'],
+    examples: [
+        'cairn image.draw.rect --x 8 --y 8 --width 64 --height 64 --color "#ff8800" --filled',
+        'cairn image.draw.rect --x 8 --y 8 --width 48 --height 48 --filled --stroke 2 --color "#ffd700" --strokeColor "#4a3200"',
+    ],
     run(ctx, args) {
         return draw(ctx, args, (data, w, h) => {
             if (args.filled) imaging.fillRect(data, w, h, args.x, args.y, args.width, args.height, args.color, args.opacity);
-            else imaging.strokeRect(data, w, h, args.x, args.y, args.x + args.width, args.y + args.height, args.color, args.opacity, args.brush);
+            if (args.stroke > 0) imaging.strokeRectRing(data, w, h, args.x, args.y, args.width, args.height, args.stroke, args.strokeColor || args.color, args.opacity);
+            else if (!args.filled) imaging.strokeRect(data, w, h, args.x, args.y, args.x + args.width, args.y + args.height, args.color, args.opacity, args.brush);
         });
     },
 });
@@ -310,19 +351,64 @@ def('image.draw.line', {
 
 def('image.draw.ellipse', {
     summary: 'Draw an ellipse outline or a filled ellipse.',
-    args: Object.assign({}, drawArgs, {
+    args: Object.assign({}, shapeArgs, {
         cx: { type: 'number', required: true, desc: 'Center X.' },
         cy: { type: 'number', required: true, desc: 'Center Y.' },
         rx: { type: 'number', required: true, desc: 'Horizontal radius.' },
         ry: { type: 'number', required: true, desc: 'Vertical radius.' },
-        filled: { type: 'bool', default: false, desc: 'Fill instead of stroking.' },
     }),
     returns: '{layer, pixels}',
-    examples: ['cairn image.draw.ellipse --cx 64 --cy 64 --rx 40 --ry 24 --filled --color "#3af"'],
+    examples: [
+        'cairn image.draw.ellipse --cx 64 --cy 64 --rx 40 --ry 24 --filled --color "#3af"',
+        'cairn image.draw.ellipse --cx 64 --cy 64 --rx 30 --ry 30 --filled --stroke 3 --color "#3af" --strokeColor "#124"',
+    ],
     run(ctx, args) {
         return draw(ctx, args, (data, w, h) => {
             if (args.filled) imaging.fillEllipse(data, w, h, args.cx, args.cy, args.rx, args.ry, args.color, args.opacity);
-            else imaging.strokeEllipse(data, w, h, args.cx, args.cy, args.rx, args.ry, args.color, args.opacity, args.brush);
+            if (args.stroke > 0) imaging.strokeEllipseRing(data, w, h, args.cx, args.cy, args.rx, args.ry, args.stroke, args.strokeColor || args.color, args.opacity);
+            else if (!args.filled) imaging.strokeEllipse(data, w, h, args.cx, args.cy, args.rx, args.ry, args.color, args.opacity, args.brush);
+        });
+    },
+});
+
+def('image.draw.path', {
+    summary: 'Draw a closed polygon, an open polyline, or a regular polygon/star.',
+    args: Object.assign({}, shapeArgs, {
+        points: { type: 'json', desc: 'Vertices: "x,y x,y …", "x,y;x,y", or JSON [[x,y],…].' },
+        closed: { type: 'bool', default: true, desc: 'Stroke the closing edge (an open polyline when false).' },
+        sides: { type: 'int', desc: 'Build a regular polygon with this many sides instead of --points.' },
+        cx: { type: 'number', desc: 'Center X for --sides.' },
+        cy: { type: 'number', desc: 'Center Y for --sides.' },
+        radius: { type: 'number', desc: 'Outer radius for --sides.' },
+        rotation: { type: 'number', default: 0, desc: 'Rotation in degrees for --sides (0 points up).' },
+        inner: { type: 'number', desc: 'Inner radius ratio 0-1; > 0 makes a star.' },
+    }),
+    returns: '{layer, pixels}',
+    examples: [
+        'cairn image.draw.path --points "32,4 60,20 60,52 32,60 4,52 4,20" --filled --color "#4a90d9"',
+        'cairn image.draw.path --sides 5 --inner 0.45 --cx 32 --cy 32 --radius 28 --filled --stroke 2 --color "#ffd700" --strokeColor "#4a3200"',
+        'cairn image.draw.path --points "8,56 24,16 40,56" --closed false --stroke 3 --color white',
+    ],
+    run(ctx, args) {
+        let points = imaging.parsePoints(args.points);
+        if (!points && args.sides !== undefined) points = imaging.regularPolygonPoints(args);
+        if (!points) {
+            throw invalidArg('image.draw.path needs --points or --sides (at least 2 vertices)', {
+                hint: 'e.g. --points "10,10 50,10 30,50" or --sides 6 --cx 32 --cy 32 --radius 24',
+            });
+        }
+        return draw(ctx, args, (data, w, h) => {
+            if (args.filled) imaging.fillPolygon(data, w, h, points, args.color, args.opacity);
+            if (args.stroke > 0) {
+                if (args.closed && points.length >= 3) {
+                    imaging.strokePolygonRing(data, w, h, points, args.stroke, args.strokeColor || args.color, args.opacity);
+                } else {
+                    imaging.strokePolygon(data, w, h, points, args.strokeColor || args.color, args.opacity, args.stroke, args.closed);
+                }
+            } else if (!args.filled) {
+                imaging.strokePolygon(data, w, h, points, args.color, args.opacity, args.brush, args.closed);
+            }
+            return points.length;
         });
     },
 });

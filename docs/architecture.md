@@ -56,7 +56,7 @@ Cairn 由四个主要部分组成：**C++ 引擎运行时**、**N-API 插件**�
 | `addon/cairn_addon.cc` | N-API 绑定，暴露引擎门面并共享帧缓冲 |
 | `editor/main/` | Electron 主进程：窗口、原生对话框、项目系统、脚本编译管线、Player 导出、偏好 |
 | `editor/renderer/` | 编辑器 UI（esbuild 打包为 CJS 以使用 Node 集成） |
-| `editor/main/imaging.js` | 与 DOM 无关的栅格核心：分层文档、合成、笔刷/形状/填充、Sobel 法线贴图、PNG 编解码、BMP 解码（图像编辑器与 CLI 共用） |
+| `editor/main/imaging.js` | 与 DOM 无关的栅格核心：分层文档、合成、笔刷/形状/填充、多边形与外侧描边、文本预览与像素统计、Sobel 法线贴图、PNG 编解码、BMP 解码（图像编辑器与 CLI 共用；预览/形状原语由 CLI 驱动） |
 | `cli/` | `cairn` 命令行：命令注册表 + 参数 schema、JSON 输出契约、会话状态、批量模式（见 [cli.md](cli.md)） |
 | `runtime/` | 导出的 Player：无编辑器 UI 的 Electron 窗口，加载项目并运行首场景 |
 

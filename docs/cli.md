@@ -185,8 +185,50 @@ cairn --project ./game image.save --out Assets/Textures/wall.png
 
 Layer state lives in the process, so compose image work in one batch (or prime
 the document with `--image FILE`). `image.open`, `image.layer.*`,
-`image.draw.fill`, `image.replaceColor`, `image.flatten`, `image.resize`,
-`image.pixel` and `image.info` (histogram, average color) round out the toolset.
+`image.draw.fill`, `image.replaceColor`, `image.flatten`, `image.resize` and
+`image.pixel` round out the toolset.
+
+### Drawing shapes
+
+`image.draw.rect`, `image.draw.ellipse` and `image.draw.path` each take
+`--filled` for the interior and `--stroke N` for an outline of N pixels drawn
+**outside** the boundary, so a fill keeps its full area. `--strokeColor` colours
+the outline separately, which gets a filled shape with a rim in one call:
+
+```bash
+cairn --project ./game image.draw.path --sides 5 --inner 0.45 --cx 32 --cy 32 --radius 28 \
+    --filled --stroke 2 --color '#ffd700' --strokeColor '#4a3200'
+```
+
+`image.draw.path` takes vertices as `--points "x,y x,y …"` (a JSON array also
+works), or builds a regular polygon/star directly from `--sides`, `--cx`,
+`--cy`, `--radius`, `--rotation` and `--inner`. `--closed false` leaves an open
+polyline. Polygons fill with the non-zero winding rule, so a self-intersecting
+star fills solid.
+
+### Checking your own work
+
+An agent cannot look at a PNG, so `image.preview` renders the document (or one
+layer) as text, and `image.info` reports what the pixels actually are:
+
+```bash
+cairn --project ./game image.preview --scale 4               # ascii density grid
+cairn --project ./game image.preview --format blocks         # Unicode ramp
+cairn --project ./game image.preview --format hex --scale 8  # one #rrggbb per cell
+cairn --project ./game image.info                            # bounds, coverage, symmetry
+cairn --project ./game image.info --spans --layer 0          # per-row/column extents
+```
+
+`image.info` returns the non-transparent bounding box, coverage, which canvas
+edges the content touches (clipping), exact left/right and top/bottom mirror
+symmetry with mismatch counts, 4-bit quantised dominant colors, and — with
+`--spans` — the first/last content column of every row and row of every column.
+That is enough to confirm a silhouette, spot a clipped sprite, check a mirror or
+read a palette without decoding the image by eye.
+
+The shape and preview primitives are driven from the CLI; the editor's image
+editor keeps its own canvas renderer and only shares the colour and normal-map
+helpers from `editor/main/imaging.js`.
 
 ## Command reference
 
@@ -261,12 +303,13 @@ the document with `--image FILE`). `image.open`, `image.layer.*`,
 | --- | --- | --- |
 | `image.color` | `--value` (color, required)<br>`--to` (enum, default "hex", one of hex \| rgb255 \| rgb01 \| hsv) | Convert colors between hex, rgb 0-255, rgb 0-1 and hsv. |
 | `image.draw.brush` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--x` (number, required)<br>`--y` (number, required)<br>`--x2` (number)<br>`--y2` (number)<br>`--erase` (bool, default false) | Paint a brush stroke along a path (single point when no end is given). |
-| `image.draw.ellipse` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--cx` (number, required)<br>`--cy` (number, required)<br>`--rx` (number, required)<br>`--ry` (number, required)<br>`--filled` (bool, default false) | Draw an ellipse outline or a filled ellipse. |
+| `image.draw.ellipse` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--filled` (bool, default false)<br>`--stroke` (number, default 0)<br>`--strokeColor` (color)<br>`--cx` (number, required)<br>`--cy` (number, required)<br>`--rx` (number, required)<br>`--ry` (number, required) | Draw an ellipse outline or a filled ellipse. |
 | `image.draw.fill` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--x` (number, required)<br>`--y` (number, required)<br>`--tolerance` (int, default 24) | Flood fill the contiguous region around a pixel (tolerance matched). |
 | `image.draw.line` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--x1` (number, required)<br>`--y1` (number, required)<br>`--x2` (number, required)<br>`--y2` (number, required) | Draw a line segment. |
-| `image.draw.rect` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--x` (number, required)<br>`--y` (number, required)<br>`--width` (number, required)<br>`--height` (number, required)<br>`--filled` (bool, default false) | Draw a rectangle outline or a filled rectangle. |
+| `image.draw.path` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--filled` (bool, default false)<br>`--stroke` (number, default 0)<br>`--strokeColor` (color)<br>`--points` (json)<br>`--closed` (bool, default true)<br>`--sides` (int)<br>`--cx` (number)<br>`--cy` (number)<br>`--radius` (number)<br>`--rotation` (number, default 0)<br>`--inner` (number) | Draw a closed polygon, an open polyline, or a regular polygon/star. |
+| `image.draw.rect` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--filled` (bool, default false)<br>`--stroke` (number, default 0)<br>`--strokeColor` (color)<br>`--x` (number, required)<br>`--y` (number, required)<br>`--width` (number, required)<br>`--height` (number, required) | Draw a rectangle outline or a filled rectangle. |
 | `image.flatten` | — | Collapse all visible layers into a single layer. |
-| `image.info` | — | Document dimensions, layer list and pixel statistics (composite histogram, average color). |
+| `image.info` | `--layer` (int)<br>`--spans` (bool, default false) | Dimensions, layer list and pixel statistics: histogram, average color, content bounds, coverage, edge clipping, mirror symmetry and dominant colors. |
 | `image.layer.add` | `--name` (string, default "Layer")<br>`--index` (int)<br>`--fill` (color) | Insert an empty layer above the given one (or on top). |
 | `image.layer.delete` | `--index` (int, required) | Delete a layer (the last remaining layer cannot be removed). |
 | `image.layer.duplicate` | `--index` (int, required) | Copy a layer and insert the copy above it. |
@@ -278,6 +321,7 @@ the document with `--image FILE`). `image.open`, `image.layer.*`,
 | `image.normalMap` | `--source` (enum, default "luma", one of luma \| alpha)<br>`--strength` (number, default 6)<br>`--invertX` (bool, default false)<br>`--invertY` (bool, default false)<br>`--out` (string)<br>`--name` (string, default "Normal Map") | Generate a tangent-space normal map from the composite height field and add it as a new layer. |
 | `image.open` | `--file` (string, required) | Load a PNG or BMP file as a single-layer document. |
 | `image.pixel` | `--x` (int, required)<br>`--y` (int, required)<br>`--layer` (int) | Sample a pixel from the active layer or the composite. |
+| `image.preview` | `--layer` (int)<br>`--scale` (int, default 1)<br>`--format` (enum, default "ascii", one of ascii \| blocks \| hex)<br>`--chars` (string)<br>`--empty` (string, default " ") | Render the image (or a layer) as text so its shape can be checked without opening a file. |
 | `image.replaceColor` | `--layer` (int)<br>`--color` (color, default "#ffffff")<br>`--opacity` (number, default 1)<br>`--brush` (number, default 1)<br>`--hardness` (number, default 0.8)<br>`--from` (color, required)<br>`--tolerance` (int, default 8) | Recolor every pixel of a layer whose color matches within a tolerance. |
 | `image.resize` | `--width` (int, required)<br>`--height` (int, required) | Resample every layer to new dimensions (nearest neighbour). |
 | `image.save` | `--out` (string)<br>`--layer` (int) | Write the composited image to a PNG file. |

@@ -564,6 +564,105 @@ check(colorConv && colorConv.hex === '#ff8000' && Math.abs(colorConv.hsv.h - 0.0
     'image.color converts to HSV', colorConv);
 
 // ---------------------------------------------------------------------------
+console.log('cli: image preview + shapes');
+// ---------------------------------------------------------------------------
+// The agent-facing drawing surface: a text preview and pixel statistics it can
+// iterate against, plus polygons and one-call fill+outline shapes.
+function runBatch(file) {
+    const r = spawnSync(process.execPath, [cli, 'exec.run', '--file', file], { encoding: 'utf8', cwd: scratch, env: batchEnv() });
+    const lines = r.stdout.trim().split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    const byId = {};
+    for (const l of lines) if (l.id) byId[l.id] = l;
+    return { byId, lines, stdout: r.stdout, stderr: r.stderr };
+}
+
+const plateBatch = path.join(scratch, 'image-plate.jsonl');
+fs.writeFileSync(plateBatch, [
+    { command: 'image.new', args: { width: 40, height: 40, background: 'transparent' }, id: 'new' },
+    // Fill + outline in one call: the 3px rim sits outside the 20x20 fill.
+    { command: 'image.draw.rect', args: { x: 10, y: 10, width: 20, height: 20, filled: true, stroke: 3, color: '#ffd700', strokeColor: '#000000' }, id: 'plate' },
+    { command: 'image.pixel', args: { x: 20, y: 20 }, id: 'fill' },
+    { command: 'image.pixel', args: { x: 10, y: 20 }, id: 'fillEdge' },
+    { command: 'image.pixel', args: { x: 9, y: 20 }, id: 'rim' },
+    { command: 'image.pixel', args: { x: 7, y: 20 }, id: 'rimOuter' },
+    { command: 'image.pixel', args: { x: 6, y: 20 }, id: 'outside' },
+    { command: 'image.info', args: {}, id: 'info' },
+    { command: 'image.preview', args: { scale: 5 }, id: 'preview' },
+    { command: 'image.draw.path', args: { sides: 6, cx: 20, cy: 20, radius: 6, filled: true, stroke: 1, color: '#00ff00', strokeColor: '#004400' }, id: 'hexagon' },
+    { command: 'image.info', args: { spans: true }, id: 'spans' },
+].map(s => JSON.stringify(s)).join('\n'));
+const plate = runBatch(plateBatch);
+check(plate.lines.length && plate.lines.every(l => l.ok !== false), 'image preview/shape batch runs clean', plate.stdout + plate.stderr);
+
+const plateStats = plate.byId.info && plate.byId.info.result.stats;
+check(plate.byId.fillEdge && plate.byId.fillEdge.result.hex === '#ffd700',
+    'the outline never eats into the fill', plate.byId.fillEdge);
+check(plate.byId.fill && plate.byId.fill.result.hex === '#ffd700'
+    && plate.byId.rim.result.hex === '#000000' && plate.byId.rim.result.a === 255
+    && plate.byId.rimOuter.result.hex === '#000000' && plate.byId.rimOuter.result.a === 255
+    && plate.byId.outside.result.a === 0,
+    'the outline is drawn outside the shape boundary',
+    [plate.byId.fill, plate.byId.rim, plate.byId.rimOuter, plate.byId.outside]);
+check(plateStats && JSON.stringify(plateStats.bounds) === '{"x":7,"y":7,"width":26,"height":26}',
+    'image.info reports the content bounding box', plateStats && plateStats.bounds);
+check(plateStats && Math.abs(plateStats.coverage - 676 / 1600) < 1e-9,
+    'image.info reports coverage', plateStats && plateStats.coverage);
+check(plateStats && plateStats.mirrorLeftRight === true && plateStats.mirrorLeftRightMismatch === 0
+    && plateStats.mirrorTopBottom === true && plateStats.mirrorTopBottomMismatch === 0,
+    'image.info verifies mirror symmetry', plateStats && {
+        lr: plateStats.mirrorLeftRight, lrm: plateStats.mirrorLeftRightMismatch,
+        tb: plateStats.mirrorTopBottom, tbm: plateStats.mirrorTopBottomMismatch,
+    });
+check(plateStats && plateStats.touchesEdge && !plateStats.touchesEdge.left && !plateStats.touchesEdge.right
+    && !plateStats.touchesEdge.top && !plateStats.touchesEdge.bottom,
+    'image.info flags content clipping at the canvas edge', plateStats && plateStats.touchesEdge);
+check(plateStats && plateStats.topColors.length === 2 && plateStats.topColors[0].hex === '#ffdd00'
+    && plateStats.topColors[0].count === 400,
+    'image.info lists the dominant colors', plateStats && plateStats.topColors);
+
+const preview = plate.byId.preview && plate.byId.preview.result;
+check(preview && preview.cols === 8 && preview.rows === 8 && preview.lines.length === 8
+    && preview.lines.every(l => l.length === 8),
+    'image.preview samples the image into a text grid', preview);
+check(preview && preview.lines.join('').includes('#') && preview.lines[0][0] === ' ',
+    'image.preview distinguishes content from transparency', preview && preview.lines);
+
+check(plate.byId.hexagon && plate.byId.hexagon.result.pixels === 6,
+    'image.draw.path builds a regular polygon from --sides', plate.byId.hexagon);
+const spans = plate.byId.spans && plate.byId.spans.result.stats;
+check(spans && spans.rowSpans.length === 40 && spans.colSpans.length === 40
+    && spans.rowSpans[5] === null && Array.isArray(spans.rowSpans[20]),
+    'image.info --spans reports per-row/column extents', spans && { r0: spans.rowSpans[5], r20: spans.rowSpans[20] });
+
+// An open polyline is not closed; the same points with the default `closed`
+// paint the closing edge. Sampling one pixel on that edge is the A/B proof.
+const pathBatch = path.join(scratch, 'image-path.jsonl');
+fs.writeFileSync(pathBatch, [
+    { command: 'image.new', args: { width: 48, height: 48, background: 'transparent' }, id: 'new' },
+    { command: 'image.draw.path', args: { points: '8,8 40,8 40,40', closed: false, stroke: 2, color: '#00ffff' }, id: 'open' },
+    { command: 'image.pixel', args: { x: 24, y: 25 }, id: 'openPixel' },
+    { command: 'image.draw.path', args: { points: '8,8 40,8 40,40', stroke: 2, color: '#ff00ff' }, id: 'closed' },
+    { command: 'image.pixel', args: { x: 24, y: 25 }, id: 'closedPixel' },
+    { command: 'image.draw.path', args: { points: '8,8 40,8 40,40', filled: true, color: '#224466' }, id: 'triangle' },
+    { command: 'image.pixel', args: { x: 30, y: 20 }, id: 'insidePixel' },
+].map(s => JSON.stringify(s)).join('\n'));
+const pathRun = runBatch(pathBatch);
+check(pathRun.lines.length && pathRun.lines.every(l => l.ok !== false), 'image path batch runs clean', pathRun.stdout + pathRun.stderr);
+check(pathRun.byId.open && pathRun.byId.open.result.pixels === 3 && pathRun.byId.openPixel.result.a === 0,
+    '--closed false leaves the path open', [pathRun.byId.open, pathRun.byId.openPixel]);
+check(pathRun.byId.closedPixel && pathRun.byId.closedPixel.result.hex === '#ff00ff',
+    'a closed path outlines the closing edge', pathRun.byId.closedPixel);
+check(pathRun.byId.insidePixel && pathRun.byId.insidePixel.result.hex === '#224466' && pathRun.byId.insidePixel.result.a === 255,
+    'image.draw.path fills the polygon interior', pathRun.byId.insidePixel);
+
+expectFail(['image.info'], 'usage');
+expectFail(['image.draw.path'], 'invalid_arg');
+expectFail(['image.draw.path', '--points', '3,4'], 'invalid_arg');
+expectFail(['--project', projectDir, '--image', 'Assets/Textures/cli_texture.png', 'image.info', '--layer', '7'], 'not_found');
+expectFail(['--project', projectDir, '--image', 'Assets/Textures/cli_texture.png', 'image.preview', '--scale', '0'], 'invalid_arg');
+expectFail(['--project', projectDir, '--image', 'Assets/Textures/cli_texture.png', 'image.draw.rect', '--x', '0', '--y', '0', '--width', '4', '--height', '4', '--stroke', '-1'], 'invalid_arg');
+
+// ---------------------------------------------------------------------------
 console.log('cli: export + preferences');
 // ---------------------------------------------------------------------------
 const prefs = expectOk(['project.preferences', '--set', '{"language":"en"}']);

@@ -306,6 +306,228 @@ function samplePixel(data, w, h, x, y) {
     return { x, y, r: data[o], g: data[o + 1], b: data[o + 2], a: data[o + 3], hex: rgbaToHex([data[o] / 255, data[o + 1] / 255, data[o + 2] / 255]) };
 }
 
+// ------------------------------------------------------------------ polygons
+// Vertex parsing and the scanline machinery the path and outline tools share.
+
+// Accepts "x,y x,y …", "x,y;x,y", "x y x y", [[x,y],…] or a flat [x,y,x,y].
+function parsePoints(value) {
+    if (value === undefined || value === null) return null;
+    let raw = value;
+    if (typeof raw === 'string') {
+        const text = raw.trim();
+        if (!text) return null;
+        if (/^[[{]/.test(text)) {
+            try { raw = JSON.parse(text); } catch { return null; }
+        } else {
+            const tokens = text.split(/[;\s]+/).filter(Boolean);
+            raw = tokens.some(t => t.includes(','))
+                ? tokens.map(t => t.split(',').map(Number))
+                : tokens.map(Number);
+        }
+    }
+    if (!Array.isArray(raw) || raw.length < 2) return null;
+    if (typeof raw[0] === 'number') {
+        if (raw.length % 2 !== 0) return null;
+        const flat = [];
+        for (let i = 0; i < raw.length; i += 2) flat.push([Number(raw[i]), Number(raw[i + 1])]);
+        raw = flat;
+    }
+    const pts = [];
+    for (const p of raw) {
+        if (!Array.isArray(p) || p.length < 2) return null;
+        const x = Number(p[0]), y = Number(p[1]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+        pts.push([x, y]);
+    }
+    return pts.length >= 2 ? pts : null;
+}
+
+function polygonSignedArea(pts) {
+    let area = 0;
+    for (let i = 0; i < pts.length; ++i) {
+        const a = pts[i], b = pts[(i + 1) % pts.length];
+        area += a[0] * b[1] - b[0] * a[1];
+    }
+    return area / 2;
+}
+
+// Per-scanline fill intervals of a closed polygon using the non-zero winding
+// rule, so self-intersecting shapes (a star drawn as a single outline) fill
+// solid instead of leaving a hole. Each entry is a sorted list of disjoint
+// [x0, x1) column intervals, or null for an empty row.
+function polygonSpans(pts, w, h) {
+    const spans = new Array(h).fill(null);
+    if (pts.length < 3) return spans;
+    let minY = Infinity, maxY = -Infinity;
+    for (const p of pts) { if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1]; }
+    const y0 = Math.max(0, Math.floor(minY)), y1 = Math.min(h - 1, Math.ceil(maxY));
+    for (let y = y0; y <= y1; ++y) {
+        const cy = y + 0.5;
+        const crossings = [];
+        for (let i = 0; i < pts.length; ++i) {
+            const a = pts[i], b = pts[(i + 1) % pts.length];
+            if (a[1] === b[1]) continue;
+            const t = (cy - a[1]) / (b[1] - a[1]);
+            if (t < 0 || t >= 1) continue;
+            crossings.push([a[0] + (b[0] - a[0]) * t, a[1] < b[1] ? 1 : -1]);
+        }
+        if (!crossings.length) continue;
+        crossings.sort((p, q) => p[0] - q[0] || q[1] - p[1]);
+        const row = [];
+        let wind = 0, startX = 0;
+        for (const [x, dir] of crossings) {
+            if (wind === 0) startX = x;
+            wind += dir;
+            if (wind === 0) {
+                const xs = Math.round(startX), xe = Math.round(x);
+                if (xe > xs) row.push([xs, xe]);
+            }
+        }
+        if (row.length) spans[y] = row;
+    }
+    return spans;
+}
+
+function fillRowRange(data, w, h, y, x0, x1, rgba, alpha) {
+    const a = Math.max(0, Math.round(x0)), b = Math.min(w, Math.round(x1));
+    for (let x = a; x < b; ++x) blendPixel(data, w, h, x, y, rgba, alpha);
+}
+
+function fillSpans(data, w, h, spans, rgba, alpha = 1) {
+    for (let y = 0; y < h; ++y) {
+        const row = spans[y];
+        if (!row) continue;
+        for (const [x0, x1] of row) fillRowRange(data, w, h, y, x0, x1, rgba, alpha);
+    }
+}
+
+function fillPolygon(data, w, h, pts, rgba, alpha = 1) {
+    fillSpans(data, w, h, polygonSpans(pts, w, h), rgba, alpha);
+}
+
+// Blends the scanline region `outer` minus `inner` -- the basis of the
+// outside-the-boundary outlines.
+function drawSpanRing(data, w, h, outer, inner, rgba, alpha = 1) {
+    for (let y = 0; y < h; ++y) {
+        const row = outer[y];
+        if (!row) continue;
+        const holes = inner[y] || [];
+        for (const [x0, x1] of row) {
+            let cur = x0;
+            for (const [i0, i1] of holes) {
+                if (i1 <= cur) continue;
+                if (i0 >= x1) break;
+                if (i0 > cur) fillRowRange(data, w, h, y, cur, i0, rgba, alpha);
+                cur = Math.max(cur, i1);
+                if (cur >= x1) break;
+            }
+            if (cur < x1) fillRowRange(data, w, h, y, cur, x1, rgba, alpha);
+        }
+    }
+}
+
+function edgeNormal(a, b, winding) {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-9) return null;
+    return [winding * dy / len, -winding * dx / len];
+}
+
+// Pushes every vertex out along its miter so the polygon grows by `dist`
+// uniformly (so a square corner lands `dist` diagonally out).
+function offsetPolygon(pts, dist) {
+    const n = pts.length;
+    if (n < 3) return null;
+    const winding = polygonSignedArea(pts) >= 0 ? 1 : -1;
+    const out = [];
+    for (let i = 0; i < n; ++i) {
+        const prev = pts[(i - 1 + n) % n], cur = pts[i], next = pts[(i + 1) % n];
+        const n1 = edgeNormal(prev, cur, winding);
+        const n2 = edgeNormal(cur, next, winding);
+        if (!n1 || !n2) return null;
+        let mx = n1[0] + n2[0], my = n1[1] + n2[1];
+        const len = Math.hypot(mx, my);
+        if (len < 1e-9) return null;
+        mx /= len; my /= len;
+        const denom = mx * n1[0] + my * n1[1];
+        if (Math.abs(denom) < 1e-6) return null;
+        const limit = dist * 4;
+        const scale = clamp(dist / denom, -limit, limit);
+        out.push([cur[0] + mx * scale, cur[1] + my * scale]);
+    }
+    return out;
+}
+
+// Outline of `width` pixels drawn outside the polygon boundary.
+function strokePolygonRing(data, w, h, pts, width, rgba, alpha = 1) {
+    const outer = offsetPolygon(pts, width);
+    if (!outer) {
+        strokePolygon(data, w, h, pts, rgba, alpha, width, true);
+        return;
+    }
+    drawSpanRing(data, w, h, polygonSpans(outer, w, h), polygonSpans(pts, w, h), rgba, alpha);
+}
+
+// Centred stroke along the polygon edges (the closing edge optional).
+function strokePolygon(data, w, h, pts, rgba, alpha = 1, width = 1, closed = true) {
+    const edges = closed ? pts.length : pts.length - 1;
+    for (let i = 0; i < edges; ++i) {
+        const a = pts[i], b = pts[(i + 1) % pts.length];
+        strokeLine(data, w, h, a[0], a[1], b[0], b[1], rgba, alpha, width);
+    }
+}
+
+// Outline of `width` pixels drawn outside an axis-aligned rectangle.
+function strokeRectRing(data, w, h, x0, y0, rw, rh, width, rgba, alpha = 1) {
+    const ax = Math.round(x0), ay = Math.round(y0);
+    const bx = Math.round(x0 + rw), by = Math.round(y0 + rh);
+    const n = Math.max(1, Math.round(width));
+    fillRect(data, w, h, ax - n, ay - n, (bx - ax) + 2 * n, n, rgba, alpha);   // top
+    fillRect(data, w, h, ax - n, by, (bx - ax) + 2 * n, n, rgba, alpha);       // bottom
+    fillRect(data, w, h, ax - n, ay, n, by - ay, rgba, alpha);                 // left
+    fillRect(data, w, h, bx, ay, n, by - ay, rgba, alpha);                     // right
+}
+
+// Outline of `width` pixels drawn outside the ellipse boundary.
+function strokeEllipseRing(data, w, h, cx, cy, rx, ry, width, rgba, alpha = 1) {
+    const ax = Math.abs(rx), ay = Math.abs(ry);
+    const ox = ax + width, oy = ay + width;
+    const x0 = Math.max(0, Math.floor(cx - ox)), x1 = Math.min(w - 1, Math.ceil(cx + ox));
+    const y0 = Math.max(0, Math.floor(cy - oy)), y1 = Math.min(h - 1, Math.ceil(cy + oy));
+    for (let y = y0; y <= y1; ++y) {
+        for (let x = x0; x <= x1; ++x) {
+            const px = x + 0.5 - cx, py = y + 0.5 - cy;
+            const outside = (px * px) / ((ox || 1) * (ox || 1)) + (py * py) / ((oy || 1) * (oy || 1));
+            if (outside > 1) continue;
+            const inside = (px * px) / ((ax || 1) * (ax || 1)) + (py * py) / ((ay || 1) * (ay || 1));
+            if (inside <= 1) continue;
+            blendPixel(data, w, h, x, y, rgba, alpha);
+        }
+    }
+}
+
+// Regular polygon vertices around (cx, cy); `inner` between 0 and 1 turns it
+// into a `sides`-pointed star. rotation is in degrees, 0 points up.
+function regularPolygonPoints(options) {
+    const sides = Math.round(Number(options.sides));
+    const cx = Number(options.cx), cy = Number(options.cy), radius = Number(options.radius);
+    if (!(sides >= 3) || !Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(radius)) return null;
+    const rotation = Number(options.rotation) || 0;
+    const inner = options.inner === undefined || options.inner === null ? 0 : Number(options.inner);
+    const star = Number.isFinite(inner) && inner > 0;
+    const count = star ? sides * 2 : sides;
+    const step = (Math.PI * 2) / count;
+    const start = (-90 + rotation) * Math.PI / 180;
+    const ir = star ? radius * clamp(inner, 0.01, 1) : radius;
+    const pts = [];
+    for (let i = 0; i < count; ++i) {
+        const r = star && i % 2 === 1 ? ir : radius;
+        const a = start + i * step;
+        pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]);
+    }
+    return pts;
+}
+
 // --------------------------------------------------------------- normal maps
 // Height field -> tangent-space normal map (Sobel), as used by the editor.
 function normalMapFromHeight(rgba, w, h, options = {}) {
@@ -346,29 +568,151 @@ function normalMapFromHeight(rgba, w, h, options = {}) {
 }
 
 // ------------------------------------------------------------------- analysis
-function analyze(doc) {
-    const compositeData = composite(doc);
+// Pixel statistics for `image.info`. Beyond the histogram this reports what an
+// agent needs to check its own work without seeing the picture: the non
+// transparent bounding box, coverage, edge clipping, mirror symmetry and the
+// dominant colors. `options.layer` selects one layer, `options.spans` adds
+// per-row/column content extents.
+function analyze(doc, options = {}) {
+    const w = doc.width, h = doc.height, n = w * h;
+    const data = options.layer === undefined || options.layer === null
+        ? composite(doc)
+        : doc.layers[options.layer].data;
     const histogram = { r: new Array(16).fill(0), g: new Array(16).fill(0), b: new Array(16).fill(0), a: new Array(16).fill(0) };
     let opaque = 0, transparent = 0, sum = [0, 0, 0, 0];
-    for (let p = 0; p < doc.width * doc.height; ++p) {
-        const o = p * 4;
-        histogram.r[compositeData[o] >> 4]++;
-        histogram.g[compositeData[o + 1] >> 4]++;
-        histogram.b[compositeData[o + 2] >> 4]++;
-        histogram.a[compositeData[o + 3] >> 4]++;
-        if (compositeData[o + 3] === 0) transparent++; else opaque++;
-        sum[0] += compositeData[o]; sum[1] += compositeData[o + 1]; sum[2] += compositeData[o + 2]; sum[3] += compositeData[o + 3];
+    let minX = w, minY = h, maxX = -1, maxY = -1;
+    const buckets = new Map();
+    const rowSpans = options.spans ? new Array(h).fill(null) : null;
+    const colSpans = options.spans ? new Array(w).fill(null) : null;
+    for (let y = 0; y < h; ++y) {
+        for (let x = 0; x < w; ++x) {
+            const o = (y * w + x) * 4;
+            const r = data[o], g = data[o + 1], b = data[o + 2], a = data[o + 3];
+            histogram.r[r >> 4]++;
+            histogram.g[g >> 4]++;
+            histogram.b[b >> 4]++;
+            histogram.a[a >> 4]++;
+            if (a === 0) { transparent++; continue; }
+            opaque++;
+            sum[0] += r; sum[1] += g; sum[2] += b; sum[3] += a;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+            const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+            buckets.set(key, (buckets.get(key) || 0) + 1);
+            if (rowSpans) {
+                if (rowSpans[y] === null) rowSpans[y] = [x, x];
+                else rowSpans[y][1] = x;
+            }
+            if (colSpans) {
+                if (colSpans[x] === null) colSpans[x] = [y, y];
+                else colSpans[x][1] = y;
+            }
+        }
     }
-    const n = doc.width * doc.height;
+    const bounds = maxX >= 0 ? { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 } : null;
+
+    // Mirror symmetry: left<->right about the vertical centre line, and
+    // top<->bottom about the horizontal one. Two transparent pixels always
+    // match, whatever color they carry.
+    const same = (a, b) => (data[a + 3] === 0 && data[b + 3] === 0)
+        || (data[a] === data[b] && data[a + 1] === data[b + 1] && data[a + 2] === data[b + 2] && data[a + 3] === data[b + 3]);
+    let mirrorLeftRight = true, mirrorLeftRightMismatch = 0;
+    for (let y = 0; y < h && mirrorLeftRight; ++y) {
+        for (let x = 0; x < (w >> 1); ++x) {
+            if (!same((y * w + x) * 4, (y * w + (w - 1 - x)) * 4)) { mirrorLeftRight = false; mirrorLeftRightMismatch++; }
+        }
+    }
+    let mirrorTopBottom = true, mirrorTopBottomMismatch = 0;
+    for (let y = 0; y < (h >> 1) && mirrorTopBottom; ++y) {
+        for (let x = 0; x < w; ++x) {
+            if (!same((y * w + x) * 4, ((h - 1 - y) * w + x) * 4)) { mirrorTopBottom = false; mirrorTopBottomMismatch++; }
+        }
+    }
+
+    // Dominant colors, quantised to 4 bits per channel.
+    const toHex = v => v.toString(16).padStart(2, '0');
+    const topColors = [...buckets.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+        .slice(0, 8)
+        .map(([key, count]) => ({
+            hex: '#' + toHex((key >> 8 & 15) * 17) + toHex((key >> 4 & 15) * 17) + toHex((key & 15) * 17),
+            count,
+        }));
+
     return {
-        width: doc.width,
-        height: doc.height,
+        width: w,
+        height: h,
         pixelCount: n,
         opaquePixels: opaque,
         transparentPixels: transparent,
+        coverage: n ? opaque / n : 0,
         averageColor: sum.map(v => Math.round(v / n)),
         histogram,
+        bounds,
+        topColors,
+        mirrorLeftRight,
+        mirrorLeftRightMismatch,
+        mirrorTopBottom,
+        mirrorTopBottomMismatch,
+        touchesEdge: bounds
+            ? { left: minX === 0, right: maxX === w - 1, top: minY === 0, bottom: maxY === h - 1 }
+            : { left: false, right: false, top: false, bottom: false },
+        ...(options.spans ? { rowSpans, colSpans } : {}),
     };
+}
+
+// Renders the document (or one layer) as text so an agent can "look at" its
+// work in a terminal or straight out of the JSON envelope. Blocks of
+// `options.scale` pixels average into one character; the color is weighted by
+// alpha so transparent pixels do not wash it out. `options.format` is ascii
+// (a luminance ramp), blocks (a Unicode density ramp) or hex (one #rrggbb per
+// cell).
+function previewText(doc, options = {}) {
+    const w = doc.width, h = doc.height;
+    const data = options.layer === undefined || options.layer === null
+        ? composite(doc)
+        : doc.layers[options.layer].data;
+    const scale = Math.max(1, Math.round(Number(options.scale) || 1));
+    const cols = Math.ceil(w / scale), rows = Math.ceil(h / scale);
+    const format = options.format || 'ascii';
+    const ramp = options.chars === undefined || options.chars === null
+        ? (format === 'blocks' ? ' \u2591\u2592\u2593\u2588' : ' .:-=+*#%@')
+        : String(options.chars);
+    const empty = options.empty === undefined || options.empty === null ? ' ' : String(options.empty).charAt(0);
+    const lines = [];
+    for (let ry = 0; ry < rows; ++ry) {
+        const y1 = Math.min(h, (ry + 1) * scale);
+        let line = '';
+        for (let rx = 0; rx < cols; ++rx) {
+            const x1 = Math.min(w, (rx + 1) * scale);
+            let sr = 0, sg = 0, sb = 0, sa = 0, cells = 0;
+            for (let y = ry * scale; y < y1; ++y) {
+                for (let x = rx * scale; x < x1; ++x) {
+                    const o = (y * w + x) * 4;
+                    const a = data[o + 3] / 255;
+                    sr += data[o] * a;
+                    sg += data[o + 1] * a;
+                    sb += data[o + 2] * a;
+                    sa += a;
+                    cells++;
+                }
+            }
+            const alpha = cells ? sa / cells : 0;
+            if (alpha <= 0.002) { line += empty; continue; }
+            const r = sr / sa, g = sg / sa, b = sb / sa;
+            if (format === 'hex') {
+                line += rgbaToHex([r / 255, g / 255, b / 255]) + (rx < cols - 1 ? ' ' : '');
+            } else {
+                const luma = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+                const idx = clamp(Math.round(luma * (ramp.length - 1)), 0, ramp.length - 1);
+                line += ramp.charAt(idx);
+            }
+        }
+        lines.push(line);
+    }
+    return { width: w, height: h, scale, cols, rows, format, lines };
 }
 
 // ---------------------------------------------------------------- PNG codec
@@ -591,14 +935,26 @@ module.exports = {
     fillRect,
     strokeLine,
     strokeRect,
+    strokeRectRing,
     strokeEllipse,
+    strokeEllipseRing,
     fillEllipse,
     floodFill,
     stampDisc,
     stampEraser,
     samplePixel,
+    parsePoints,
+    polygonSignedArea,
+    polygonSpans,
+    fillPolygon,
+    fillSpans,
+    strokePolygon,
+    strokePolygonRing,
+    offsetPolygon,
+    regularPolygonPoints,
     normalMapFromHeight,
     analyze,
+    previewText,
     encodePng,
     decodePng,
     decodeBmp,
