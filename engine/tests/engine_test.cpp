@@ -1093,6 +1093,101 @@ static void WriteTestBmp(const std::string& path, int w, int h, uint8_t r, uint8
         }
 }
 
+// Bindless texture arrays: a batched run shares one mesh and cull mode, so the
+// only thing keeping two draws' textures apart is the per-instance slot index
+// in the draw uniform. Three cubes with three albedo textures must render as
+// three colours, and both backends must agree on which is which.
+static void TestBindlessTextureSlots() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-bindless").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const char* tex[3] = {"Assets/Textures/red.bmp", "Assets/Textures/green.bmp",
+                          "Assets/Textures/blue.bmp"};
+    WriteTestBmp(dir + "/" + tex[0], 8, 8, 255, 0, 0);
+    WriteTestBmp(dir + "/" + tex[1], 8, 8, 0, 255, 0);
+    WriteTestBmp(dir + "/" + tex[2], 8, 8, 0, 0, 255);
+
+    auto build = [&](Engine& engine, int backend) {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(192, 96);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.shadows = 0;  // keep the frame to one opaque pass
+        GameObject* sun = scene.CreateEntity("Sun");
+        sun->transform().SetEulerDegrees(Vec3(0, 0, 0));  // head on, so each face is lit
+        auto* light = sun->AddComponent<LightComponent>();
+        light->type = LightComponent::LightType::Directional;
+        light->intensity = 1.0f;
+        for (int i = 0; i < 3; ++i) {
+            GameObject* cube = scene.CreateEntity("Cube");
+            cube->AddComponent<MeshRenderer>()->albedoTexturePath = tex[i];
+            cube->transform().position = Vec3((float)(i - 1) * 2.6f, 0, 0);
+            cube->transform().scale = Vec3(1.2f, 1.2f, 1.2f);
+        }
+        // Orthographic and tight, so each cube sits well inside one third of
+        // the frame and a neighbour's colour cannot bleed across.
+        ViewportCamera& cam = engine.viewCamera();
+        cam.position = Vec3(0, 0, 9);
+        cam.yaw = 0.0f;
+        cam.pitch = 0.0f;
+        cam.orthographic = true;
+        cam.orthoSize = 2.0f;
+    };
+    // Strongest value of one channel over the left / middle / right third. A
+    // solid lit face peaks near its texture's colour, so the peak identifies
+    // which texture that third was drawn with.
+    auto channelPeak = [](Engine& engine, int third, int channel) {
+        const FrameTarget& t = engine.frame();
+        const int w = t.width, h = t.height;
+        const int x0 = third * w / 3, x1 = (third + 1) * w / 3;
+        int peak = 0;
+        for (int y = 0; y < h; ++y)
+            for (int x = x0; x < x1; ++x)
+                peak = std::max(peak, (int)t.color[((size_t)y * (size_t)w + (size_t)x) * 4 +
+                                       (size_t)channel]);
+        return peak;
+    };
+    auto channelMean = [](Engine& engine, int channel) {
+        const FrameTarget& t = engine.frame();
+        long sum = 0, n = 0;
+        for (size_t i = 0; i < t.color.size(); i += 4) { sum += t.color[i + (size_t)channel]; ++n; }
+        return n ? (double)sum / (double)n : 0.0;
+    };
+    // Third `i` must peak in channel `i`: that is exactly what a per-instance
+    // texture slot buys, and what a single shared slot would break.
+    auto checkThirds = [&](Engine& engine) {
+        for (int i = 0; i < 3; ++i) {
+            const int own = channelPeak(engine, i, i);
+            for (int c = 0; c < 3; ++c) {
+                if (c == i) continue;
+                CHECK(own > channelPeak(engine, i, c) + 30);
+            }
+        }
+        // ...and the frame as a whole is balanced: three different textures,
+        // three comparable channel contributions.
+        const double r = channelMean(engine, 0), g = channelMean(engine, 1), b = channelMean(engine, 2);
+        const double lo = std::min(r, std::min(g, b)), hi = std::max(r, std::max(g, b));
+        CHECK(hi < lo * 1.6);
+    };
+
+    Engine cpu;
+    build(cpu, 2);
+    cpu.RenderEditorFrame();
+    checkThirds(cpu);
+
+    if (!VulkanBackendAvailable()) return;
+    Engine gpu;
+    build(gpu, 1);
+    const RenderStats stats = gpu.RenderEditorFrame();
+    CHECK(std::string(stats.backend) == "vulkan");
+    // One opaque draw plus the sky: the three cubes batched despite having
+    // different textures, which is the whole point of the bindless table.
+    CHECK(stats.drawCalls <= 3);
+    checkThirds(gpu);
+    for (int i = 0; i < 3; ++i)
+        for (int c = 0; c < 3; ++c)
+            CHECK(std::abs(channelPeak(gpu, i, c) - channelPeak(cpu, i, c)) < 70);
+}
+
 // Texture cache: per-slot color space, byte-budgeted LRU eviction, and mtime
 // based reload.
 static void TestTextureCache() {
@@ -1675,6 +1770,7 @@ int main() {
     TestRender();
     TestRenderBackendSelection();
     TestRenderBackendsAgree();
+    TestBindlessTextureSlots();
     TestShadows();
     TestPostProcessing();
     TestPhysics();

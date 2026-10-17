@@ -27,6 +27,7 @@ namespace vk {
     X(EnumeratePhysicalDevices, vkEnumeratePhysicalDevices)         \
     X(GetPhysicalDeviceProperties, vkGetPhysicalDeviceProperties)   \
     X(GetPhysicalDeviceFeatures, vkGetPhysicalDeviceFeatures)       \
+    X(GetPhysicalDeviceFeatures2, vkGetPhysicalDeviceFeatures2)     \
     X(GetPhysicalDeviceMemoryProperties, vkGetPhysicalDeviceMemoryProperties) \
     X(GetPhysicalDeviceQueueFamilyProperties, vkGetPhysicalDeviceQueueFamilyProperties) \
     X(GetPhysicalDeviceFormatProperties, vkGetPhysicalDeviceFormatProperties) \

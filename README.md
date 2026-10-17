@@ -206,6 +206,7 @@ CAIRN_SCRIPT(Collector)
 | Document | Contents |
 | --- | --- |
 | [Architecture overview](docs/architecture.md) | Module breakdown, render backends, data flow, hot-reload mechanics |
+| [Roadmap & progress](docs/roadmap.md) | Phase plan, delivered increments, what is next, known limits |
 | [Editor manual](docs/editor-manual.md) | Interface, keyboard navigation, workflows |
 | [CLI reference](docs/cli.md) | Every `cairn` command, the JSON contract, batch mode, recipes |
 | [Scripting API](docs/scripting-api.md) | Complete C++ scripting reference |
@@ -228,7 +229,7 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.1.11** — an early but usable foundation. The GPU backend is the default but young; the software rasterizer remains the reference implementation and is what the test suite pins, so any rendering difference between the two is a bug in the GPU path rather than an intentional difference. See the [CHANGELOG](CHANGELOG.md) for the milestone history, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+Cairn is at version **0.1.12** — an early but usable foundation. The GPU backend is the default but young; the software rasterizer remains the reference implementation and is what the test suite pins, so any rendering difference between the two is a bug in the GPU path rather than an intentional difference. See the [CHANGELOG](CHANGELOG.md) for the milestone history, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 

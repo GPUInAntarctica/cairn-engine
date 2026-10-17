@@ -17,7 +17,9 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <unordered_map>
+#include <utility>
 
 #include "shaders_spirv.h"
 
@@ -75,12 +77,16 @@ struct DrawUbo {
     float surf[4];
     float flags[4];
     float misc[4];
+    // Bindless sampler slots into the fragment stage's texture arrays: x is the
+    // albedo slot, y the normal slot. They replace the per-draw albedo/normal
+    // descriptor pair, which is what let a batched run span several materials.
+    float texIndex[4];
     // Padded so the std140 array stride in the shader (roundUp(alignof, sizeof))
     // equals the CPU stride (256 = minUniformBufferOffsetAlignment's upper bound).
     // That lets one instanced draw read draws[gl_InstanceIndex] and collapse a run
     // of identical draws into a single vkCmdDrawIndexed. Keep this a multiple of
     // 16 and >= 256.
-    float pad[24];
+    float pad[20];
 };
 static_assert(sizeof(DrawUbo) == 256, "DrawUBO stride must be 256 to match the shader's draws[]");
 
@@ -135,11 +141,26 @@ struct VulkanBackend::Impl {
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     };
 
-    // Draws addressable in one frame; the descriptor pool is sized from this.
-    // A handful of slots past the draw range serve the post chain.
-    static constexpr size_t kMaxDraws = 2048;
+    // Descriptor sets the post chain borrows. The scene path no longer needs
+    // per-draw sets: it samples through the bindless texture arrays instead.
     static constexpr size_t kPostSlots = 8;
-    size_t texSetsCapacity = kMaxDraws + kPostSlots;
+    // Bindless texture array size. Must match the albedoMaps[] / normalMaps[]
+    // declarations in mesh.frag and sprite.frag. It is a soft cap: when every
+    // slot is live the least recently used one is stolen, so the worst case is
+    // one extra draw's worth of slot churn, never a dropped texture.
+    static constexpr uint32_t kBindlessSlots = 512;
+    // One table per binding (0 albedo, 1 normal). A texture gets a stable slot
+    // the first time a frame samples it, so a warm scene writes no descriptors
+    // at all. Slot 0 is the 1x1 white stand-in that "no texture" resolves to.
+    struct BindlessTable {
+        std::map<std::pair<const Texture*, VkSampler>, uint32_t> index;
+        std::vector<uint32_t> freeSlots;
+        uint32_t next = 1;  // slot 0 stays white
+        const Texture* slotTex[kBindlessSlots] = {};
+        VkSampler slotSampler[kBindlessSlots] = {};
+        uint64_t slotAge[kBindlessSlots] = {};
+    };
+    BindlessTable bindless[2];
 
     Buffer frameUbo, lightsUbo, shadowUbo, drawUbo, sceneVerts, sceneIndices;
     Buffer lineVerts, readback;
@@ -158,18 +179,17 @@ struct VulkanBackend::Impl {
     // span maxUniformBufferRange, so the DrawUBO is addressed through a window
     // of frame sets rather than one set covering the whole pool.
     std::vector<VkDescriptorSet> frameSets;
-    // Bound by the passes that sample nothing (sky, lines, shadow casters).
-    // It is written once and never updated, so it can stay bound anywhere.
-    VkDescriptorSet placeholderSet = VK_NULL_HANDLE;
     uint32_t drawUboChunk = 256;
     // Layouts the render targets are left in across frames, so every pass can
     // transition from a known state instead of guessing.
 
     VkDescriptorSetLayout frameLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout texLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout bindlessLayout = VK_NULL_HANDLE;
     VkDescriptorPool descPool = VK_NULL_HANDLE;
     VkDescriptorSet frameSet = VK_NULL_HANDLE;
-    std::vector<VkDescriptorSet> texSets;
+    VkDescriptorSet bindlessSet = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> postSets;
 
     VkPipelineLayout scenePipeLayout = VK_NULL_HANDLE;
     VkPipelineLayout postPipeLayout = VK_NULL_HANDLE;
@@ -434,6 +454,7 @@ struct VulkanBackend::Impl {
         if (descPool) fn.DestroyDescriptorPool(device, descPool, nullptr);
         if (frameLayout) fn.DestroyDescriptorSetLayout(device, frameLayout, nullptr);
         if (texLayout) fn.DestroyDescriptorSetLayout(device, texLayout, nullptr);
+        if (bindlessLayout) fn.DestroyDescriptorSetLayout(device, bindlessLayout, nullptr);
         if (fence) fn.DestroyFence(device, fence, nullptr);
         if (pool) fn.DestroyCommandPool(device, pool, nullptr);
         fn.DestroyDevice(device, nullptr);
@@ -564,14 +585,37 @@ bool VulkanBackend::Initialize(std::string* error) {
     qci.queueFamilyIndex = family;
     qci.queueCount = 1;
     qci.pQueuePriorities = &priority;
+    // The scene path samples albedo / normal maps through bindless texture
+    // arrays (one array per binding, indexed per instance), so the device must
+    // expose descriptor indexing and dynamic, non-uniform indexing of
+    // sampled-image arrays. A device without them falls back to the software
+    // rasterizer rather than losing the feature silently.
+    VkPhysicalDeviceVulkan12Features have12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceFeatures2 have2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    have2.pNext = &have12;
+    I.fn.GetPhysicalDeviceFeatures2(I.physical, &have2);
+    if (!have2.features.shaderSampledImageArrayDynamicIndexing || !have12.descriptorIndexing ||
+        !have12.shaderSampledImageArrayNonUniformIndexing)
+        return fail("device lacks descriptor-indexing features for the bindless texture path");
+    if (I.physProps.limits.maxPerStageDescriptorSampledImages < 2 * Impl::kBindlessSlots)
+        return fail("device cannot bind both bindless texture arrays in one stage");
+
     // Vulkan 1.3 moves dynamicRendering and synchronization2 out of the core
     // VkPhysicalDeviceFeatures struct; both are opt-in through the 1.3 feature
     // struct and every draw the backend makes depends on them.
     VkPhysicalDeviceVulkan13Features features13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     features13.dynamicRendering = VK_TRUE;
     features13.synchronization2 = VK_TRUE;
+    // 1.2 features chain in front of 1.3; the structs are walked in pNext order.
+    VkPhysicalDeviceVulkan12Features features12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    features12.descriptorIndexing = VK_TRUE;
+    features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    features12.pNext = &features13;
+    VkPhysicalDeviceFeatures coreFeatures{};
+    coreFeatures.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-    dci.pNext = &features13;
+    dci.pNext = &features12;
+    dci.pEnabledFeatures = &coreFeatures;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     if (I.fn.CreateDevice(I.physical, &dci, nullptr, &I.device) != VK_SUCCESS)
@@ -706,7 +750,8 @@ bool VulkanBackend::Initialize(std::string* error) {
     }
 
     // Descriptor layouts. set 0 is frame state plus the dynamic DrawUBO; set 1
-    // is the per-draw albedo / normal pair.
+    // is the bindless texture arrays the scene path samples. The post chain
+    // still uses the two-sampler texLayout as its own set 0.
     {
         VkDescriptorSetLayoutBinding binds[5]{};
         for (uint32_t i = 0; i < 5; ++i) {
@@ -734,6 +779,16 @@ bool VulkanBackend::Initialize(std::string* error) {
         ci.pBindings = tb;
         if (I.fn.CreateDescriptorSetLayout(I.device, &ci, nullptr, &I.texLayout) != VK_SUCCESS)
             return fail("descriptor layout failed");
+        // Bindless arrays: one slot per texture the frame samples, addressed by
+        // a per-instance index so a batched run can span several materials.
+        for (uint32_t i = 0; i < 2; ++i) {
+            tb[i].binding = i;
+            tb[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            tb[i].descriptorCount = Impl::kBindlessSlots;
+            tb[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
+        if (I.fn.CreateDescriptorSetLayout(I.device, &ci, nullptr, &I.bindlessLayout) != VK_SUCCESS)
+            return fail("descriptor layout failed");
     }
     {
         constexpr uint32_t kChunks = 8;   // 8 * 256 = 2048 draws per frame
@@ -743,12 +798,13 @@ bool VulkanBackend::Initialize(std::string* error) {
         sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         sizes[1].descriptorCount = 4 * kChunks;
         sizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        // Two samplers per texture set, one per frame set, two for the
-        // placeholder set.
-        sizes[2].descriptorCount = (uint32_t)(2 * I.texSetsCapacity + kChunks + 2);
+        // The two bindless arrays (written white once, then per texture), the
+        // shadow sampler of every frame set, and the post sets.
+        sizes[2].descriptorCount =
+            (uint32_t)(2 * Impl::kBindlessSlots + kChunks + 2 * Impl::kPostSlots);
         VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        // Texture sets, the frame-set windows and the placeholder set.
-        ci.maxSets = (uint32_t)(I.texSetsCapacity + kChunks + 1);
+        // Frame-set windows, the bindless set and the post sets.
+        ci.maxSets = (uint32_t)(kChunks + 1 + Impl::kPostSlots);
         ci.poolSizeCount = 3;
         ci.pPoolSizes = sizes;
         if (I.fn.CreateDescriptorPool(I.device, &ci, nullptr, &I.descPool) != VK_SUCCESS)
@@ -762,33 +818,39 @@ bool VulkanBackend::Initialize(std::string* error) {
         for (uint32_t i = 0; i < kChunks; ++i)
             I.fn.AllocateDescriptorSets(I.device, &ai, &I.frameSets[i]);
         I.frameSet = I.frameSets[0];
-        I.texSets.assign(I.texSetsCapacity, VK_NULL_HANDLE);
-        ai.pSetLayouts = &I.texLayout;
-        ai.descriptorSetCount = 1;
-        I.fn.AllocateDescriptorSets(I.device, &ai, &I.placeholderSet);
+
+        // The bindless set starts fully white so every slot holds a valid
+        // descriptor before any texture is uploaded; slots are then updated as
+        // textures are first sampled and when the cache evicts them.
+        ai.pSetLayouts = &I.bindlessLayout;
+        if (I.fn.AllocateDescriptorSets(I.device, &ai, &I.bindlessSet) != VK_SUCCESS)
+            return fail("bindless descriptor set failed");
         {
-            VkDescriptorImageInfo white[2]{};
-            white[0].sampler = I.linearClamp;
-            white[0].imageView = I.whiteTex.view;
-            white[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            white[1] = white[0];
+            VkDescriptorImageInfo white{};
+            white.sampler = I.linearClamp;
+            white.imageView = I.whiteTex.view;
+            white.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            std::vector<VkDescriptorImageInfo> whites(Impl::kBindlessSlots, white);
             VkWriteDescriptorSet w[2]{};
             for (uint32_t i = 0; i < 2; ++i) {
                 w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                w[i].dstSet = I.placeholderSet;
+                w[i].dstSet = I.bindlessSet;
                 w[i].dstBinding = i;
-                w[i].descriptorCount = 1;
+                w[i].descriptorCount = Impl::kBindlessSlots;
                 w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                w[i].pImageInfo = &white[i];
+                w[i].pImageInfo = whites.data();
             }
             I.fn.UpdateDescriptorSets(I.device, 2, w, 0, nullptr);
         }
-        ai.pSetLayouts = &I.texLayout;
-        ai.descriptorSetCount = (uint32_t)I.texSetsCapacity;
-        std::vector<VkDescriptorSetLayout> texLayouts(I.texSetsCapacity, I.texLayout);
-        ai.pSetLayouts = texLayouts.data();
-        if (I.fn.AllocateDescriptorSets(I.device, &ai, I.texSets.data()) != VK_SUCCESS)
-            return fail("texture descriptor sets failed");
+
+        // Post-chain sets, bound directly as set 0 of postPipeLayout and
+        // rewritten per pass.
+        I.postSets.assign(Impl::kPostSlots, VK_NULL_HANDLE);
+        std::vector<VkDescriptorSetLayout> postLayouts(Impl::kPostSlots, I.texLayout);
+        ai.pSetLayouts = postLayouts.data();
+        ai.descriptorSetCount = (uint32_t)Impl::kPostSlots;
+        if (I.fn.AllocateDescriptorSets(I.device, &ai, I.postSets.data()) != VK_SUCCESS)
+            return fail("post descriptor sets failed");
     }
     {
         VkPushConstantRange pc{};
@@ -798,7 +860,7 @@ bool VulkanBackend::Initialize(std::string* error) {
         VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         ci.setLayoutCount = 2;
         ci.pSetLayouts = nullptr;  // filled below
-        VkDescriptorSetLayout layouts[2] = {I.frameLayout, I.texLayout};
+        VkDescriptorSetLayout layouts[2] = {I.frameLayout, I.bindlessLayout};
         ci.pSetLayouts = layouts;
         ci.pushConstantRangeCount = 1;
         ci.pPushConstantRanges = &pc;
@@ -1220,6 +1282,79 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         I.sceneBuffersDirty = false;
     }
 
+    // ---- bindless texture slots --------------------------------------------
+    // Each distinct (texture, sampler) pair gets a stable slot in the fragment
+    // stage's sampler arrays. The slot index travels in the draw uniform, so a
+    // batched run no longer has to share one albedo / normal pair. Descriptor
+    // writes are queued here and applied once the frame's uploads have created
+    // the views.
+    struct BindlessUpdate {
+        uint32_t binding;
+        uint32_t slot;
+        const Texture* tex;  // null means "white"
+        VkSampler sampler;
+    };
+    std::vector<BindlessUpdate> bindlessUpdates;
+    auto bindlessSlot = [&](uint32_t binding, const Texture* tex, VkSampler sampler) -> uint32_t {
+        if (!tex) return 0;  // slot 0 stays white on both bindings
+        Impl::BindlessTable& table = I.bindless[binding];
+        const auto key = std::make_pair(tex, sampler);
+        auto it = table.index.find(key);
+        if (it != table.index.end()) {
+            table.slotAge[it->second] = I.frameIndex;
+            return it->second;
+        }
+        uint32_t slot;
+        if (!table.freeSlots.empty()) {
+            slot = table.freeSlots.back();
+            table.freeSlots.pop_back();
+        } else if (table.next < Impl::kBindlessSlots) {
+            slot = table.next++;
+        } else {
+            // Every slot is taken: steal the least recently used one. A texture
+            // the frame already drew has today's age, so the victim is normally
+            // one this frame does not reference and can be rebound. Only a frame
+            // that alone needs more than the whole table has no better option.
+            slot = 0;
+            uint64_t oldest = UINT64_MAX;
+            for (uint32_t s = 1; s < Impl::kBindlessSlots; ++s) {
+                if (!table.slotTex[s]) continue;  // free or never allocated
+                if (table.slotAge[s] < oldest) {
+                    oldest = table.slotAge[s];
+                    slot = s;
+                }
+            }
+            if (slot == 0) return 0;  // nothing to steal: fall back to white
+            table.index.erase(std::make_pair(table.slotTex[slot], table.slotSampler[slot]));
+        }
+        table.index.emplace(key, slot);
+        table.slotTex[slot] = tex;
+        table.slotSampler[slot] = sampler;
+        table.slotAge[slot] = I.frameIndex;
+        bindlessUpdates.push_back({binding, slot, tex, sampler});
+        return slot;
+    };
+    // Eviction destroys a texture's image, so its slots go back to white before
+    // the next frame binds the set (and are then reusable).
+    auto releaseBindless = [&](const Texture* tex) {
+        for (uint32_t binding = 0; binding < 2; ++binding) {
+            Impl::BindlessTable& table = I.bindless[binding];
+            for (auto it = table.index.begin(); it != table.index.end();) {
+                if (it->first.first == tex) {
+                    const uint32_t slot = it->second;
+                    bindlessUpdates.push_back({binding, slot, nullptr, I.linearClamp});
+                    table.freeSlots.push_back(slot);
+                    table.slotTex[slot] = nullptr;
+                    table.slotSampler[slot] = VK_NULL_HANDLE;
+                    table.slotAge[slot] = 0;
+                    it = table.index.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+    };
+
     // Textures: upload the first time a frame references one. Entries that stop
     // being referenced are dropped so a long session does not pin every asset
     // it ever drew.
@@ -1246,6 +1381,22 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
     for (const auto& item : list.items2D) {
         noteTexture(item.mat.albedo);
         noteTexture(item.mat.normalMap);
+    }
+
+    // Slots for this frame's draws. Albedo and normal are resolved separately,
+    // which is what lets two draws sharing a mesh but not a map still batch.
+    std::vector<uint32_t> opaqueAlbedoSlot(list.opaque.size(), 0);
+    std::vector<uint32_t> opaqueNormalSlot(list.opaque.size(), 0);
+    for (size_t i = 0; i < list.opaque.size(); ++i) {
+        opaqueAlbedoSlot[i] = bindlessSlot(0, list.opaque[i].mat.albedo, I.linearRepeat);
+        opaqueNormalSlot[i] = bindlessSlot(1, list.opaque[i].mat.normalMap, I.linearRepeat);
+    }
+    std::vector<uint32_t> item2DAlbedoSlot(list.items2D.size(), 0);
+    std::vector<uint32_t> item2DNormalSlot(list.items2D.size(), 0);
+    for (size_t i = 0; i < list.items2D.size(); ++i) {
+        const MaterialGpu& m = list.items2D[i].mat;
+        item2DAlbedoSlot[i] = bindlessSlot(0, m.albedo, m.pixelPerfect ? I.linearClamp : I.linearRepeat);
+        item2DNormalSlot[i] = bindlessSlot(1, m.normalMap, I.linearClamp);
     }
 
     // ---- uniform blocks ----------------------------------------------------
@@ -1327,7 +1478,8 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
     const size_t drawBudget = std::min(totalDraws, maxDraws);
     std::vector<DrawUbo> drawData;
     drawData.reserve(drawBudget);
-    auto pushDraw = [&](const MaterialGpu& mat, const Mat4& model) {
+    auto pushDraw = [&](const MaterialGpu& mat, const Mat4& model, uint32_t albedoSlot,
+                        uint32_t normalSlot) {
         if (drawData.size() >= drawBudget) return;
         DrawUbo d{};
         std::memcpy(d.model, model.m, sizeof(d.model));
@@ -1343,17 +1495,20 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         d.flags[2] = (mat.albedo && mat.albedo->isSRGB()) ? 1.0f : 0.0f;
         d.flags[3] = mat.normalMap ? 1.0f : 0.0f;
         d.misc[0] = mat.spriteLighting ? 1.0f : 0.0f;
+        d.texIndex[0] = (float)albedoSlot;
+        d.texIndex[1] = (float)normalSlot;
         drawData.push_back(d);
     };
     const Mat4 kIdentity = Mat4::Identity();
-    for (const auto& d : list.opaque) pushDraw(d.mat, d.model);
+    for (size_t i = 0; i < list.opaque.size(); ++i)
+        pushDraw(list.opaque[i].mat, list.opaque[i].model, opaqueAlbedoSlot[i], opaqueNormalSlot[i]);
     const size_t opaqueCount = drawData.size();
-    for (const auto& item : list.items2D) pushDraw(item.mat, kIdentity);
+    for (size_t i = 0; i < list.items2D.size(); ++i)
+        pushDraw(list.items2D[i].mat, kIdentity, item2DAlbedoSlot[i], item2DNormalSlot[i]);
     const size_t item2DCount = drawData.size() - opaqueCount;
-    const size_t textureDraws = opaqueCount + item2DCount;
     for (const auto& c : list.casters) {
         MaterialGpu mat;
-        pushDraw(mat, c.model);
+        pushDraw(mat, c.model, 0, 0);
     }
     for (size_t i = 0; i < drawData.size(); ++i)
         std::memcpy(static_cast<uint8_t*>(I.drawUbo.mapped) + i * stride, &drawData[i],
@@ -1500,6 +1655,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         if (I.textures.size() > 512) {
             for (auto it = I.textures.begin(); it != I.textures.end();) {
                 if (it->second.lastFrame + 512 < I.frameIndex) {
+                    releaseBindless(it->first);
                     I.DestroyImage(&I.textureImages[it->first]);
                     I.textureImages.erase(it->first);
                     it = I.textures.erase(it);
@@ -1508,6 +1664,32 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
                 }
             }
         }
+    }
+
+    // Apply the queued bindless writes: slot assignments made while the draw
+    // list was walked, plus the white-out of every evicted texture's slots.
+    if (!bindlessUpdates.empty()) {
+        std::vector<VkDescriptorImageInfo> infos(bindlessUpdates.size());
+        std::vector<VkWriteDescriptorSet> writes(bindlessUpdates.size());
+        for (size_t i = 0; i < bindlessUpdates.size(); ++i) {
+            const BindlessUpdate& u = bindlessUpdates[i];
+            VkImageView view = I.whiteTex.view;
+            if (u.tex) {
+                auto it = I.textureImages.find(u.tex);
+                if (it != I.textureImages.end()) view = it->second.view;
+            }
+            infos[i].sampler = u.sampler;
+            infos[i].imageView = view;
+            infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = I.bindlessSet;
+            writes[i].dstBinding = u.binding;
+            writes[i].dstArrayElement = u.slot;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[i].pImageInfo = &infos[i];
+        }
+        fn.UpdateDescriptorSets(device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
     }
 
     // ---- frame descriptors -------------------------------------------------
@@ -1546,66 +1728,48 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         fn.UpdateDescriptorSets(device, 5, writes, 0, nullptr);
     }
     // Draw `n` lives in window n / drawUboChunk at offset (n % drawUboChunk) * stride.
+    // Set 1 is the one bindless table, identical for every draw.
     auto bindFrameSet = [&](VkCommandBuffer cb, uint32_t set) {
         const uint32_t window = set / I.drawUboChunk;
         const VkDescriptorSet target = I.frameSets[window < I.frameSets.size() ? window : 0];
         const uint32_t offset = (set % I.drawUboChunk) * (uint32_t)stride;
-        const VkDescriptorSet sets[2] = {target, I.texSets[set < I.texSets.size() ? set : 0]};
+        const VkDescriptorSet sets[2] = {target, I.bindlessSet};
         fn.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, I.scenePipeLayout, 0, 2, sets, 1,
                                  &offset);
     };
-    // Same, but the texture set is chosen independently of the draw index: the
-    // dynamic offset points at draw `base` while the shader reads
-    // draws[gl_InstanceIndex] for the rest of the run.
-    auto bindBatch = [&](VkCommandBuffer cb, uint32_t base, uint32_t texSlot) {
-        const uint32_t window = base / I.drawUboChunk;
-        const VkDescriptorSet target = I.frameSets[window < I.frameSets.size() ? window : 0];
-        const uint32_t offset = (base % I.drawUboChunk) * (uint32_t)stride;
-        const VkDescriptorSet sets[2] = {target,
-                                         I.texSets[texSlot < I.texSets.size() ? texSlot : 0]};
-        fn.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, I.scenePipeLayout, 0, 2, sets, 1,
-                                 &offset);
-    };
-    // Shadow casters read no textures, but the layout still declares set 1, so a
-    // real (stale-content) set has to be bound. The window/offset math is the
-    // same as bindBatch; the old code always used window 0, which overran the
+    // Same, but the dynamic offset points at the run's first draw while the
+    // shader reads draws[gl_InstanceIndex] for the rest. Shadow casters use it
+    // too: they read no textures, but the layout still declares set 1 and the
+    // bindless table is a valid (if unread) binding. The window is taken from
+    // the run's first draw — using window 0 unconditionally would overrun the
     // 64 KiB descriptor range once a frame had more than drawUboChunk draws.
-    auto bindShadowCaster = [&](VkCommandBuffer cb, uint32_t base) {
+    auto bindBatch = [&](VkCommandBuffer cb, uint32_t base) {
         const uint32_t window = base / I.drawUboChunk;
         const VkDescriptorSet target = I.frameSets[window < I.frameSets.size() ? window : 0];
         const uint32_t offset = (base % I.drawUboChunk) * (uint32_t)stride;
-        const VkDescriptorSet sets[2] = {target, I.placeholderSet};
+        const VkDescriptorSet sets[2] = {target, I.bindlessSet};
         fn.CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, I.scenePipeLayout, 0, 2, sets, 1,
                                  &offset);
     };
 
-    auto bindTexSet = [&](uint32_t slot, VkImageView albedo, VkSampler albedoSampler,
-                          VkImageView normal, VkSampler normalSampler) {
-        if (slot >= I.texSets.size()) return;
+    // The post chain keeps its own two-sampler set layout and rewrites a set
+    // per pass.
+    auto writePostSet = [&](uint32_t slot, VkImageView src, VkImageView second) {
+        if (slot >= I.postSets.size()) return;
         VkDescriptorImageInfo images[2]{};
-        images[0].sampler = albedoSampler;
-        images[0].imageView = albedo;
+        images[0].sampler = I.linearClamp;
+        images[0].imageView = src;
         images[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        images[1].sampler = normalSampler;
-        images[1].imageView = normal;
+        images[1].sampler = I.linearClamp;
+        images[1].imageView = second;
         images[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet = I.texSets[slot];
+        w.dstSet = I.postSets[slot];
         w.dstBinding = 0;
         w.descriptorCount = 2;
         w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         w.pImageInfo = images;
         fn.UpdateDescriptorSets(device, 1, &w, 0, nullptr);
-    };
-    auto textureView = [&](const Texture* tex, VkSampler* sampler) -> VkImageView {
-        auto it = I.textures.find(tex);
-        if (it == I.textures.end()) {
-            *sampler = I.linearRepeat;
-            return I.whiteTex.view;
-        }
-        it->second.lastFrame = I.frameIndex;
-        *sampler = I.linearRepeat;
-        return it->second.view;
     };
 
     VkViewport viewport{0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f};
@@ -1682,7 +1846,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
                         if (CullModeFor(list.casters[j].cullMode) != cull) break;
                     }
                 }
-                bindShadowCaster(cmd, slot);
+                bindBatch(cmd, slot);
                 const VkDeviceSize vOffset = meshIt->second.vertexOffset;
                 fn.CmdBindVertexBuffers(cmd, 0, 1, &I.sceneVerts.handle, &vOffset);
                 fn.CmdBindIndexBuffer(cmd, I.sceneIndices.handle,
@@ -1770,7 +1934,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         // Sky: fullscreen triangle, no depth interaction.
         fn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines->second.sky);
         {
-            const VkDescriptorSet sets[2] = {I.frameSet, I.placeholderSet};
+            const VkDescriptorSet sets[2] = {I.frameSet, I.bindlessSet};
             fn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, I.scenePipeLayout, 0, 2,
                                      sets, 1, &zero);
         }
@@ -1778,47 +1942,35 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
 
         // Opaque meshes, instanced. Culling is dynamic state so one pipeline
         // serves every material; the GL->VK y flip makes front faces clockwise.
-        // A run of consecutive draws sharing mesh, textures and cull mode
-        // collapses into one vkCmdDrawIndexed: the dynamic offset points at the
-        // run's first draw and the vertex shader reads draws[gl_InstanceIndex].
+        // A run of consecutive draws sharing a mesh and cull mode collapses
+        // into one vkCmdDrawIndexed: the dynamic offset points at the run's
+        // first draw and the vertex shader reads draws[gl_InstanceIndex]. The
+        // textures are addressed per instance through the bindless table, so
+        // the run no longer has to share an albedo / normal pair.
         fn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines->second.mesh);
-        uint32_t batchSlot = 0;
         for (size_t i = 0; i < list.opaque.size() && i < opaqueCount;) {
             const FrameDrawList::OpaqueDraw& first = list.opaque[i];
             auto meshIt = I.meshes.find(first.mesh.get());
             if (meshIt == I.meshes.end()) { ++i; continue; }
-            VkSampler sampler = I.linearRepeat;
-            const VkImageView albedo = textureView(first.mat.albedo, &sampler);
-            VkSampler normalSampler = I.linearRepeat;
-            const VkImageView normal = first.mat.normalMap ? textureView(first.mat.normalMap, &normalSampler)
-                                                           : I.whiteTex.view;
             const VkCullModeFlags cull = CullModeFor(first.mat.cullMode);
-            // Extend the run: same mesh, same textures, same cull mode. Never
-            // cross a draw-UBO window — the shader cannot index past its 64 KiB.
+            // Extend the run: same mesh, same cull mode. Never cross a draw-UBO
+            // window — the shader cannot index past its 64 KiB.
             const size_t windowEnd = ((i / I.drawUboChunk) + 1) * (size_t)I.drawUboChunk;
             size_t j = i + 1;
             if (!noInstancing) {
                 for (; j < list.opaque.size() && j < opaqueCount && j < windowEnd; ++j) {
                     const FrameDrawList::OpaqueDraw& d = list.opaque[j];
                     if (d.mesh.get() != first.mesh.get()) break;
-                    VkSampler s2 = I.linearRepeat;
-                    if (textureView(d.mat.albedo, &s2) != albedo || s2 != sampler) break;
-                    VkSampler ns2 = I.linearRepeat;
-                    const VkImageView n2 = d.mat.normalMap ? textureView(d.mat.normalMap, &ns2)
-                                                           : I.whiteTex.view;
-                    if (n2 != normal || ns2 != normalSampler) break;
                     if (CullModeFor(d.mat.cullMode) != cull) break;
                 }
             }
-            bindTexSet(batchSlot, albedo, sampler, normal, normalSampler);
-            bindBatch(cmd, static_cast<uint32_t>(i), batchSlot);
+            bindBatch(cmd, static_cast<uint32_t>(i));
             const VkDeviceSize vOffset = meshIt->second.vertexOffset;
             fn.CmdBindVertexBuffers(cmd, 0, 1, &I.sceneVerts.handle, &vOffset);
             fn.CmdBindIndexBuffer(cmd, I.sceneIndices.handle,
                                    (VkDeviceSize)meshIt->second.indexOffset * 4, VK_INDEX_TYPE_UINT32);
             fn.CmdSetCullMode(cmd, cull);
             fn.CmdDrawIndexed(cmd, meshIt->second.indexCount, (uint32_t)(j - i), 0, 0, 0);
-            ++batchSlot;
             ++opaqueBatches;
             i = j;
         }
@@ -1833,13 +1985,6 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
                 const auto& item = list.items2D[i];
                 if (item.vertCount == 0) continue;
                 const size_t slot = opaqueCount + itemIndex;
-                VkSampler sampler = item.mat.pixelPerfect ? I.linearClamp : I.linearRepeat;
-                const VkImageView albedo = textureView(item.mat.albedo, &sampler);
-                VkSampler normalSampler = I.linearClamp;
-                const VkImageView normal = item.mat.normalMap
-                                               ? textureView(item.mat.normalMap, &normalSampler)
-                                               : I.whiteTex.view;
-                bindTexSet(static_cast<uint32_t>(slot), albedo, sampler, normal, normalSampler);
                 bindFrameSet(cmd, static_cast<uint32_t>(slot));
                 fn.CmdDraw(cmd, item.vertCount, 1, item.firstVert, 0);
                 ++itemIndex;
@@ -1851,7 +1996,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             std::memcpy(I.lineVerts.mapped, lineData.data(), lineData.size() * sizeof(LineVert));
             fn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines->second.line);
             {
-                const VkDescriptorSet sets[2] = {I.frameSet, I.placeholderSet};
+                const VkDescriptorSet sets[2] = {I.frameSet, I.bindlessSet};
                 fn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, I.scenePipeLayout, 0,
                                          2, sets, 1, &zero);
             }
@@ -1884,12 +2029,12 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
                  VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
                  VK_ACCESS_2_TRANSFER_READ_BIT);
 
-    // Post passes get slots of their own, past the per-draw range. Reusing a
-    // slot would mean updating a set that an earlier pass in this same command
-    // buffer is still bound to.
-    uint32_t postSlot = (uint32_t)textureDraws + 1;
+    // Post passes each rewrite a set, so each gets a slot of its own: reusing
+    // one would mean updating a set an earlier pass in the same command buffer
+    // is still bound to.
+    uint32_t postSlot = 0;
     auto postSetSlot = [&]() {
-        return postSlot < I.texSets.size() ? postSlot++ : I.texSets.size() - 1;
+        return postSlot < I.postSets.size() ? postSlot++ : I.postSets.size() - 1;
     };
     // `dstPrev` is the layout the destination is in right now; the pass moves
     // it to COLOR_ATTACHMENT_OPTIMAL, renders, then leaves it readable for the
@@ -1924,9 +2069,9 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         fn.CmdBeginRendering(cmd, &info);
         fn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         const uint32_t slot = postSetSlot();
-        bindTexSet(slot, src->view, I.linearClamp, second, I.linearClamp);
+        writePostSet(slot, src->view, second);
         fn.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, I.postPipeLayout, 0, 1,
-                                 &I.texSets[slot], 0, nullptr);
+                                 &I.postSets[slot], 0, nullptr);
         fn.CmdPushConstants(cmd, I.postPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, push);
         fn.CmdDraw(cmd, 3, 1, 0, 0);
         fn.CmdEndRendering(cmd);

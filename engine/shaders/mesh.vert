@@ -38,9 +38,12 @@ struct DrawUbo {
     vec4 surf;
     vec4 flags;
     vec4 misc;
+    // Bindless sampler slots (x albedo, y normal) into the fragment stage's
+    // texture arrays. Occupies the first 16 bytes of the old padding.
+    vec4 texIndex;
     // Padding so the std140 array stride is 256 bytes, matching the CPU
     // DrawUbo stride (and the 256-byte dynamic-offset window).
-    vec4 pad[6];
+    vec4 pad[5];
 };
 // One instanced draw covers a run of identical meshes/materials; the dynamic
 // offset points at the run's first element and gl_InstanceIndex picks the rest.

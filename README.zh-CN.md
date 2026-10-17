@@ -206,6 +206,7 @@ CAIRN_SCRIPT(Collector)
 | 文档 | 内容 |
 | --- | --- |
 | [架构总览](docs/architecture.md) | 模块划分、渲染后端、数据流、热重载机制 |
+| [路线图与进度](docs/roadmap.md) | 阶段划分、已交付增量、下一步、已知限制 |
 | [编辑器手册](docs/editor-manual.md) | 界面、键盘导航、工作流 |
 | [CLI 参考](docs/cli.md) | 全部 `cairn` 命令、JSON 契约、批量模式、实用配方 |
 | [脚本 API](docs/scripting-api.md) | 完整的 C++ 脚本接口 |
@@ -228,7 +229,7 @@ docs/           文档
 
 ## 状态
 
-Cairn 当前版本 **0.1.11**——是个能用但仍早的起点。GPU 后端是默认路径但还年轻；软件光栅化器是参考实现，测试套件也固定跑它，因此**两条路径之间任何渲染差异都算 GPU 后端的 bug，而不是有意为之**。里程碑历史见 [CHANGELOG](CHANGELOG.md)，提 PR 前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+Cairn 当前版本 **0.1.12**——是个能用但仍早的起点。GPU 后端是默认路径但还年轻；软件光栅化器是参考实现，测试套件也固定跑它，因此**两条路径之间任何渲染差异都算 GPU 后端的 bug，而不是有意为之**。里程碑历史见 [CHANGELOG](CHANGELOG.md)，提 PR 前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 

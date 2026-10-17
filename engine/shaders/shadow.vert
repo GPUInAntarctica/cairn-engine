@@ -16,9 +16,12 @@ struct DrawUbo {
     vec4 surf;
     vec4 flags;
     vec4 misc;
+    // Bindless sampler slots (x albedo, y normal) into the fragment stage's
+    // texture arrays. Occupies the first 16 bytes of the old padding.
+    vec4 texIndex;
     // Padding so the std140 array stride is 256 bytes, matching the CPU
     // DrawUbo stride (and the 256-byte dynamic-offset window).
-    vec4 pad[6];
+    vec4 pad[5];
 };
 layout(std140, set = 0, binding = 4) uniform DrawUBO {
     DrawUbo draws[256];   // one 64 KiB window: 256 x 256-byte stride

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 // Cairn mesh fragment stage: GGX/Cook-Torrance specular + Lambert diffuse
 // (metallic workflow), cascaded directional shadows with 3x3 PCF, exponential
 // height fog, then the shared tonemap + sRGB encode. This mirrors
@@ -54,16 +55,22 @@ struct DrawUbo {
     vec4 surf;         // x metallic, y roughness, z normalStrength, w unused
     vec4 flags;        // x unlit, y receiveShadows, z albedoSRGB, w hasNormalMap
     vec4 misc;
+    // Bindless sampler slots (x albedo, y normal) into the texture arrays
+    // below; they let one instanced draw span materials with different maps.
+    vec4 texIndex;
     // Padding so the std140 array stride is 256 bytes, matching the CPU
     // DrawUbo stride (and the 256-byte dynamic-offset window).
-    vec4 pad[6];
+    vec4 pad[5];
 };
 layout(std140, set = 0, binding = 4) uniform DrawUBO {
     DrawUbo draws[256];   // one 64 KiB window: 256 x 256-byte stride
 };
 
-layout(set = 1, binding = 0) uniform sampler2D albedoMap;
-layout(set = 1, binding = 1) uniform sampler2D normalMap;
+// Bindless texture arrays: every texture the frame samples is given a stable
+// slot, so a batched run no longer has to share one albedo / normal pair.
+// The size must match Impl::kBindlessSlots in backend_vulkan.cpp.
+layout(set = 1, binding = 0) uniform sampler2D albedoMaps[512];
+layout(set = 1, binding = 1) uniform sampler2D normalMaps[512];
 
 const float kPi = 3.14159265;
 
@@ -165,7 +172,7 @@ void main() {
     float viewDist = length(V);
     if (viewDist > 1e-6) V /= viewDist;
 
-    vec4 tex = texture(albedoMap, vUv * draw.tilingSpec.xy);
+    vec4 tex = texture(albedoMaps[nonuniformEXT(int(draw.texIndex.x))], vUv * draw.tilingSpec.xy);
     vec3 albedo = srgbToLinearFast3(draw.color.rgb);
     if (draw.flags.z > 0.5) albedo *= srgbToLinearFast3(tex.rgb);
     else albedo *= tex.rgb;
@@ -189,7 +196,7 @@ void main() {
         if (abs(hand) > 1e-6 && dot(T, T) > 1e-12) {
             T = normalize(T - N * dot(N, T));
             vec3 B = cross(N, T) * (hand >= 0.0 ? 1.0 : -1.0);
-            vec4 nm = texture(normalMap, vUv * draw.tilingSpec.xy);
+            vec4 nm = texture(normalMaps[nonuniformEXT(int(draw.texIndex.y))], vUv * draw.tilingSpec.xy);
             vec3 nts = vec3((nm.r * 2.0 - 1.0) * draw.surf.z,
                             -(nm.g * 2.0 - 1.0) * draw.surf.z,
                             nm.b * 2.0 - 1.0);

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 // Cairn 2D fragment stage: alpha-blended sprites and bitmap text. Handles the
 // unlit text path and the sprite lighting path (ambient + light falloff +
 // directional shadows), then the shared fog / tonemap / encode. The rasterizer
@@ -53,10 +54,13 @@ layout(std140, set = 0, binding = 4) uniform DrawUBO {
     vec4 surf;
     vec4 flags;        // x unlit, y receiveShadows, z albedoSRGB, w hasNormalMap
     vec4 misc;         // x spriteLighting
+    vec4 texIndex;     // x albedo slot, y normal slot (bindless arrays below)
 } draw;
 
-layout(set = 1, binding = 0) uniform sampler2D albedoMap;
-layout(set = 1, binding = 1) uniform sampler2D normalMap;
+// Bindless texture arrays; the size must match Impl::kBindlessSlots in
+// backend_vulkan.cpp. Sprites sample the same slots as meshes.
+layout(set = 1, binding = 0) uniform sampler2D albedoMaps[512];
+layout(set = 1, binding = 1) uniform sampler2D normalMaps[512];
 
 float srgbToLinearFast(float c) {
     return c <= 0.04045 ? c / 12.92 : c * c * (c * 0.305306011 + 0.682171111) + 0.012522878;
@@ -152,7 +156,7 @@ void main() {
     float viewDist = length(V);
     if (viewDist > 1e-6) V /= viewDist;
 
-    vec4 tex = texture(albedoMap, vUv * draw.tilingSpec.xy);
+    vec4 tex = texture(albedoMaps[nonuniformEXT(int(draw.texIndex.x))], vUv * draw.tilingSpec.xy);
     vec3 albedo = srgbToLinearFast3(draw.color.rgb);
     if (draw.flags.z > 0.5) albedo *= srgbToLinearFast3(tex.rgb);
     else albedo *= tex.rgb;
@@ -173,7 +177,7 @@ void main() {
     } else if (draw.misc.x > 0.5) {    // sprite lighting
         vec3 N;
         if (draw.flags.w > 0.5) {      // 2D normal maps sample Clamp, untiled
-            vec4 nm = texture(normalMap, vUv);
+            vec4 nm = texture(normalMaps[nonuniformEXT(int(draw.texIndex.y))], vUv);
             N = vec3(nm.r * 2.0 - 1.0, -(nm.g * 2.0 - 1.0), nm.b * 2.0 - 1.0);
             N = normalize(N);
         } else {

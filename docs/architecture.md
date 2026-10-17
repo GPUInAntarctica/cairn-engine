@@ -86,7 +86,12 @@ Cairn 由四个主要部分组成：**C++ 引擎运行时**、**N-API 插件**�
 
 后端选择的决策点在 `Renderer::RenderScene`：`Auto` 优先 GPU 并静默回退，`Vulkan` 强制 GPU（失败记日志后回退），`Software` 永远走 CPU。
 
-**GPU 侧把相邻的同款绘制合并成一次实例化调用。** 不透明网格的逐实例数据（模型矩阵 + 材质）放在一块 64 KiB 的 uniform 窗口里，步长固定 256 字节——这个数字必须同时满足 `minUniformBufferOffsetAlignment`（规范上限 256）和着色器里 `draws[]` 的 std140 数组步长，所以 CPU 端的 `DrawUbo` 用 24 个 float 补齐到 256，着色器端用 `vec4 pad[6]` 补齐（std140 里 `float arr[N]` 的步长是 16 字节，直接写 `float pad[24]` 会得到 384 字节，这是踩过的坑）。绘制时只把**相邻**且网格、贴图、剔除模式都相同的绘制并入一个 run，动态偏移指向 run 的首元素，顶点着色器读 `draws[gl_InstanceIndex]` 并用 `flat` varying 把下标传给片元着色器；run 不跨 64 KiB 窗口，超过就断开。只合并相邻 run 保证了不同网格之间的绘制顺序不变，因此画面与逐绘制路径**逐位相同**（用 `CAIRN_NO_INSTANCING=1` 可以关掉合并做 A/B 对比）。`RenderStats::drawCalls` 在 GPU 路径上按 API 提交计数，所以一次实例化 run 只算一次。
+**GPU 侧把相邻的同款绘制合并成一次实例化调用。** 不透明网格的逐实例数据（模型矩阵 + 材质 + 贴图槽位）放在一块 64 KiB 的 uniform 窗口里，步长固定 256 字节——这个数字必须同时满足 `minUniformBufferOffsetAlignment`（规范上限 256）和着色器里 `draws[]` 的 std140 数组步长，所以 CPU 端的 `DrawUbo` 补齐到 256 字节，着色器端用 `vec4 texIndex; vec4 pad[5]` 补齐（std140 里 `float arr[N]` 的步长是 16 字节，直接写 `float pad[24]` 会得到 384 字节，这是踩过的坑）。绘制时只把**相邻**且网格、剔除模式相同的绘制并入一个 run，动态偏移指向 run 的首元素，顶点着色器读 `draws[gl_InstanceIndex]` 并用 `flat` varying 把下标传给片元着色器；run 不跨 64 KiB 窗口，超过就断开。只合并相邻 run 保证了不同网格之间的绘制顺序不变，因此画面与逐绘制路径**逐位相同**（用 `CAIRN_NO_INSTANCING=1` 可以关掉合并做 A/B 对比）。`RenderStats::drawCalls` 在 GPU 路径上按 API 提交计数，所以一次实例化 run 只算一次。
+
+**贴图走 bindless 数组，所以合批不再要求贴图相同。** 场景管线布局的 set 1 是两个 `sampler2D` 数组（albedo、normal 各 512 槽），取代了原来的"每次绘制一组 albedo/normal 描述符"。一次绘制把两个槽位下标写进绘制 uniform（`DrawUbo.texIndex`），片元着色器用 `nonuniformEXT` 索引数组取样，于是同一个实例化 run 里每个实例都能用**自己的**贴图——60 个方块、6 张交错贴图的场景从 63 次绘制降到 4 次（1 次不透明 run + 2 次阴影 run + 天空），且画面与合并前逐位相同。槽位表按 `(贴图, 采样器)` 建立、跨帧稳定，所以热场景一帧里一次描述符写入都不需要；槽 0 固定是 1×1 白色贴图，"没有贴图"就指向它，因此数组里每个槽位始终是合法描述符。贴图缓存淘汰某张贴图时会把它的槽位写回白色并归还空闲表；若所有槽位都在用，则抢占最近最少使用的一个——最坏情况是槽位抖动，而不会把某张贴图静默降级成白色。采样器是槽位键的一部分，所以精灵的 `pixelPerfect`（clamp）和网格的（repeat）可以共存；这顺带修掉一个潜在 bug：旧的 `textureView` 助手会把调用方的采样器覆盖成 `linearRepeat`，导致 `pixelPerfect` 精灵与位图文字按 repeat 取样，现在它们按 clamp 取样，与软件参考一致。
+
+**描述符索引是硬性设备要求。** 后端在创建设备时查询并启用 `shaderSampledImageArrayDynamicIndexing`、`descriptorIndexing`、`shaderSampledImageArrayNonUniformIndexing`，并要求 `maxPerStageDescriptorSampledImages >= 1024`。不满足的设备会带着日志原因让后端初始化失败，由软件光栅化接管，而不是悄悄丢掉这个特性。
+
 
 **阴影通道同样实例化，而且级联矩阵只推一次。** 每个 caster 的模型矩阵也来自同一块 `draws[]`，级联的 light-view-proj 是该通道内所有 caster 共用的，所以每个级联只 `CmdPushConstants` 一次，再把相邻且网格/剔除模式相同的可见 caster 合成一个 run。窗口寻址用和主通道一样的 `window/offset` 算法——旧代码固定绑窗口 0，一旦一帧的绘制数超过 `drawUboChunk`（256），caster 的动态偏移就会越过 64 KiB 描述符范围（实测 300 个物体的场景会落到窗口 1、2，修复后校验层干净）。
 

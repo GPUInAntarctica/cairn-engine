@@ -2,6 +2,18 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.1.12] - 2026-10-17
+
+### Performance: bindless texture arrays (batching no longer needs a shared texture)
+- **The scene path samples textures through bindless arrays.** Set 1 of the scene pipeline layout is now two `sampler2D` arrays (albedo and normal, 512 slots each) instead of a per-draw albedo/normal pair. A draw stores its two slot indices in the draw uniform (`DrawUbo.texIndex`) and the fragment stage indexes the arrays, so an instanced run can span materials with *different* textures. A 60-cube scene with 6 interleaved albedo textures drops from 63 draws to 4 (one opaque run, two shadow runs, the sky pass) with a **bit-identical frame**; the software reference is unchanged.
+- **`DrawUbo` gained `texIndex`** by consuming 16 bytes of the existing padding (`float pad[24]` → `float texIndex[4]; float pad[20]`), so the 256-byte stride the instancing relies on is unchanged. The shader mirrors it (`vec4 texIndex; vec4 pad[5]`).
+- **One stable table, written only when it changes.** A `(texture, sampler)` pair gets a slot the first time a frame samples it and keeps it; a warm scene issues no descriptor writes at all. Slot 0 is the 1×1 white stand-in that "no texture" resolves to, so every slot in the array is a valid descriptor at all times. When the texture cache evicts a texture its slots are whited out and returned to the free list, and if every slot is live the least-recently-used one is stolen — the table degrades by slot churn, never by dropping a texture to white.
+- **The sampler is part of the slot key**, so a sprite's `pixelPerfect` (clamp) and a mesh's (repeat) sampling coexist. This incidentally fixes a latent bug: the old `textureView` helper overwrote the caller's sampler with `linearRepeat`, so `pixelPerfect` sprites and bitmap text were sampled with repeat wrap — they now clamp, matching the software reference (2D scene mean difference vs software drops from 28.4 to 25.3).
+- **Device features.** The backend now enables `shaderSampledImageArrayDynamicIndexing`, `descriptorIndexing` and `shaderSampledImageArrayNonUniformIndexing` (queried via `vkGetPhysicalDeviceFeatures2`, which is a new entry in the loader), and requires `maxPerStageDescriptorSampledImages >= 1024`. A device without them fails the backend with a logged reason and the software rasterizer takes over, rather than silently losing the feature.
+- **Removed** the per-draw texture descriptor sets (and the placeholder set they needed); the post chain keeps its own two-sampler layout and a small pool of sets.
+- **Verified** per rule 7: `VK_LAYER_KHRONOS_validation` is clean for the 3D, 2D, normal-map and texture-eviction scenes; the instanced and `CAIRN_NO_INSTANCING=1` frames are bit-identical; the GPU frame keeps tracking the software reference (identical to the 0.1.11 build for the same scenes).
+- **Tests:** `TestBindlessTextureSlots` (three cubes, three albedo textures, one batched run, each third of the frame peaks in its own channel on both backends — confirmed to fail when the slot index is forced to 0).
+
 ## [0.1.11] - 2026-10-17
 
 ### Performance: instanced shadow cascades
