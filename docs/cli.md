@@ -120,6 +120,23 @@ file the batch is about to create. Pass `--scene` only when loading something
 that already exists. Working end-to-end examples live in the
 [README](../README.md#driving-the-engine-from-an-agent).
 
+Level geometry the primitives cannot express (a ramp, a room, a corridor) comes
+from a mesh collider - a project-relative `.obj`, resolved exactly like
+`MeshRenderer --meshPath`:
+
+```bash
+cairn --project ./game entity.create --name Level
+cairn --project ./game component.add --id 7 --type MeshCollider --props '{"meshPath":"Assets/Meshes/level.obj"}'
+cairn --project ./game physics.raycast --origin '[0,20,0]' --direction '[0,-1,0]'
+```
+
+`MeshCollider` is a static/kinematic triangle soup: box, sphere and capsule
+colliders collide with it, `physics.raycast` hits the actual triangles (not the
+bounding box) and `Continuous` CCD sweeps it. A mesh on a non-kinematic
+`RigidBody` is dropped with a one-shot warning in `runtime.logs` - use a primitive
+collider for bodies the solver has to push, and remember that two mesh colliders
+do not interact.
+
 Preview and simulate headlessly:
 
 ```bash
@@ -332,7 +349,7 @@ read what a sprite is actually made of.
 
 | Command | Arguments | Description |
 | --- | --- | --- |
-| `component.add` | `--id` (int, required)<br>`--type` (enum, required, one of Camera \| Light \| MeshRenderer \| SpriteRenderer \| TextRenderer \| RigidBody \| BoxCollider \| SphereCollider \| Collider2D \| CapsuleCollider \| CharacterController \| DistanceJoint \| HingeJoint \| FixedJoint \| Script)<br>`--props` (json) | Add a component to an entity (properties get their defaults). |
+| `component.add` | `--id` (int, required)<br>`--type` (enum, required, one of Camera \| Light \| MeshRenderer \| SpriteRenderer \| TextRenderer \| RigidBody \| BoxCollider \| SphereCollider \| Collider2D \| CapsuleCollider \| MeshCollider \| CharacterController \| DistanceJoint \| HingeJoint \| FixedJoint \| Script)<br>`--props` (json) | Add a component to an entity (properties get their defaults). |
 | `component.enable` | `--id` (int, required)<br>`--type` (string, required)<br>`--enabled` (bool, default true) | Enable or disable a component. |
 | `component.get` | `--id` (int, required)<br>`--type` (string, required) | Read one component with all its property values and editor metadata. |
 | `component.getProp` | `--id` (int, required)<br>`--type` (string, required)<br>`--prop` (string, required) | Read a single component property value. |

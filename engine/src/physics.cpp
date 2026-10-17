@@ -8,10 +8,12 @@
 
 #include "cairn/engine.h"
 #include "cairn/log.h"
+#include "cairn/mesh.h"
 #include "scene_internal.h"
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <unordered_map>
 
 namespace Cairn {
@@ -19,7 +21,7 @@ namespace Cairn {
 namespace {
 
 struct Shape {
-    enum Kind { Box3, Sphere3, Box2, Capsule3 } kind;
+    enum Kind { Box3, Sphere3, Box2, Capsule3, Mesh3 } kind;
     GameObject* go = nullptr;
     Component* comp = nullptr;
     RigidBody* rb = nullptr;
@@ -30,6 +32,14 @@ struct Shape {
     Vec3 center;        // boxes: center; spheres: center; capsules: segment midpoint
     float radius = 0;   // spheres; capsules (cap radius)
     Vec3 p0, p1;        // capsules: world-space segment endpoints
+
+    // Mesh3: the triangles in the mesh's own space plus the transform that
+    // puts them in the world, so a parented or rotated collider needs no
+    // per-triangle rebuild. Mesh colliders are static, so nothing translates
+    // `meshWorld` mid-step the way TranslateShape moves the primitives.
+    std::shared_ptr<Mesh> mesh;
+    Mat4 meshWorld;
+    Mat4 meshWorldInv;
 
     bool Is2D() const { return kind == Box2; }
     bool IsSolid() const { return !isTrigger; }
@@ -151,8 +161,236 @@ void ClosestSegments(const Vec3& p1, const Vec3& q1, const Vec3& p2, const Vec3&
     *c2 = p2 + d2 * t;
 }
 
+// ---------------------------------------------------------------------------
+// Mesh colliders: triangle-soup (non-convex) collision.
+//
+// A mesh shape carries its triangles in local space plus the mesh's world
+// matrix, so a transformed or parented collider needs no per-triangle rebuild.
+// The tests below walk the soup and prune a triangle whose box is already
+// farther from the other shape's box than the best separation found so far -
+// there is no BVH yet, so keep a mesh collider to level geometry of a few
+// thousand triangles. A roughly uniform scale is assumed, the same assumption
+// the sphere and capsule colliders make.
+// ---------------------------------------------------------------------------
+
+// World-space corners of triangle `i`.
+void MeshTriangle(const Shape& s, size_t i, Vec3* a, Vec3* b, Vec3* c) {
+    const Mesh& m = *s.mesh;
+    *a = s.meshWorld.TransformPoint(m.vertices[m.indices[i * 3 + 0]].position);
+    *b = s.meshWorld.TransformPoint(m.vertices[m.indices[i * 3 + 1]].position);
+    *c = s.meshWorld.TransformPoint(m.vertices[m.indices[i * 3 + 2]].position);
+}
+
+size_t MeshTriangleCount(const Shape& s) {
+    return s.mesh ? (s.mesh->indices.size() / 3) : 0;
+}
+
+// Cheap reject before the exact test: does the triangle's box touch [min,max]?
+// Valid for an overlap test (the box contains the shape).
+bool TriangleTouchesBox(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& min,
+                        const Vec3& max) {
+    for (int k = 0; k < 3; ++k) {
+        float lo = std::min({a[k], b[k], c[k]});
+        float hi = std::max({a[k], b[k], c[k]});
+        if (hi < min[k] || lo > max[k]) return false;
+    }
+    return true;
+}
+
+// Squared distance between two axis-aligned boxes (0 when they overlap). A
+// lower bound on the separation of anything inside them, which is what makes it
+// safe to prune a triangle that cannot beat the best separation so far.
+float BoxGapSquared(const Vec3& amin, const Vec3& amax, const Vec3& bmin, const Vec3& bmax) {
+    float sum = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        float g = std::max(amin[k] - bmax[k], bmin[k] - amax[k]);
+        if (g > 0.0f) sum += g * g;
+    }
+    return sum;
+}
+
+// Closest point on triangle abc to p (Ericson, Real-Time Collision Detection).
+Vec3 ClosestOnTriangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c) {
+    Vec3 ab = b - a, ac = c - a, ap = p - a;
+    float d1 = Vec3::Dot(ab, ap), d2 = Vec3::Dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return a;
+
+    Vec3 bp = p - b;
+    float d3 = Vec3::Dot(ab, bp), d4 = Vec3::Dot(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return b;
+
+    float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) return a + ab * (d1 / (d1 - d3));
+
+    Vec3 cp = p - c;
+    float d5 = Vec3::Dot(ab, cp), d6 = Vec3::Dot(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return c;
+
+    float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) return a + ac * (d2 / (d2 - d6));
+
+    float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f)
+        return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+
+    float denom = 1.0f / (va + vb + vc);
+    return a + ab * (vb * denom) + ac * (vc * denom);
+}
+
+// Face normal of abc, or +Y for a degenerate triangle.
+Vec3 TriangleNormal(const Vec3& a, const Vec3& b, const Vec3& c) {
+    Vec3 fn = Vec3::Cross(b - a, c - a);
+    return fn.LengthSq() > 1e-12f ? fn.Normalized() : Vec3(0, 1, 0);
+}
+
+// Signed separation of a sphere from triangle abc (>0 apart, <0 overlapping).
+// `n` points from the triangle toward the sphere.
+float SphereTriangleSeparation(const Vec3& centre, float radius, const Vec3& a, const Vec3& b,
+                               const Vec3& c, Vec3* n) {
+    Vec3 closest = ClosestOnTriangle(centre, a, b, c);
+    Vec3 d = centre - closest;
+    float dist = d.Length();
+    *n = dist > 1e-6f ? d / dist : TriangleNormal(a, b, c);
+    return dist - radius;
+}
+
+// Closest pair (one point on segment p0p1, one on triangle abc). The candidate
+// set - both endpoints on the triangle, each triangle edge against the
+// segment, and the segment's foot on the triangle's plane - is complete for the
+// segment/triangle distance, and every candidate is a real point pair, so the
+// smallest one is exact.
+void ClosestSegmentTriangle(const Vec3& p0, const Vec3& p1, const Vec3& a, const Vec3& b,
+                            const Vec3& c, Vec3* segPt, Vec3* triPt) {
+    float best = 1e30f;
+    auto take = [&](const Vec3& sp, const Vec3& tp) {
+        float d2 = (sp - tp).LengthSq();
+        if (d2 < best) { best = d2; *segPt = sp; *triPt = tp; }
+    };
+    take(p0, ClosestOnTriangle(p0, a, b, c));
+    take(p1, ClosestOnTriangle(p1, a, b, c));
+    Vec3 e0, e1;
+    ClosestSegments(p0, p1, a, b, &e0, &e1); take(e0, e1);
+    ClosestSegments(p0, p1, b, c, &e0, &e1); take(e0, e1);
+    ClosestSegments(p0, p1, c, a, &e0, &e1); take(e0, e1);
+    Vec3 fn = Vec3::Cross(b - a, c - a);
+    float d0 = Vec3::Dot(fn, p0 - a), d1 = Vec3::Dot(fn, p1 - a);
+    if (std::fabs(d0 - d1) > 1e-12f) {
+        float t = std::clamp(d0 / (d0 - d1), 0.0f, 1.0f);
+        Vec3 sp = p0 + (p1 - p0) * t;
+        take(sp, ClosestOnTriangle(sp, a, b, c));
+    }
+}
+
+// Signed separation of the capsule segment p0p1 (radius r) from triangle abc.
+float CapsuleTriangleSeparation(const Vec3& p0, const Vec3& p1, float r, const Vec3& a,
+                                const Vec3& b, const Vec3& c, Vec3* n) {
+    Vec3 sp, tp;
+    ClosestSegmentTriangle(p0, p1, a, b, c, &sp, &tp);
+    Vec3 d = sp - tp;
+    float dist = d.Length();
+    *n = dist > 1e-6f ? d / dist : TriangleNormal(a, b, c);
+    return dist - r;
+}
+
+// Signed separation of the axis-aligned box [bmin,bmax] from triangle abc, by
+// the separating-axis test (3 box axes, the face normal, 9 edge crossings). The
+// largest gap over those axes is the separation and the axis carrying it is the
+// contact normal, pointing from the triangle toward the box.
+float BoxTriangleSeparation(const Vec3& bmin, const Vec3& bmax, const Vec3& a, const Vec3& b,
+                            const Vec3& c, Vec3* n) {
+    const Vec3 centre = (bmin + bmax) * 0.5f;
+    const Vec3 ext = (bmax - bmin) * 0.5f;
+    const Vec3 v0 = a - centre, v1 = b - centre, v2 = c - centre;
+
+    Vec3 axes[13];
+    int count = 0;
+    axes[count++] = Vec3(1, 0, 0);
+    axes[count++] = Vec3(0, 1, 0);
+    axes[count++] = Vec3(0, 0, 1);
+    Vec3 face = Vec3::Cross(v1 - v0, v2 - v0);
+    if (face.LengthSq() > 1e-12f) axes[count++] = face.Normalized();
+    const Vec3 edges[3] = {v1 - v0, v2 - v1, v0 - v2};
+    const Vec3 boxAxes[3] = {Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
+    for (const Vec3& e : edges)
+        for (const Vec3& bx : boxAxes) {
+            Vec3 cr = Vec3::Cross(e, bx);
+            if (cr.LengthSq() > 1e-12f) axes[count++] = cr.Normalized();
+        }
+
+    float best = -1e30f;
+    Vec3 bestAxis(0, 1, 0);
+    for (int i = 0; i < count; ++i) {
+        const Vec3& u = axes[i];
+        float p0 = Vec3::Dot(u, v0), p1 = Vec3::Dot(u, v1), p2 = Vec3::Dot(u, v2);
+        float lo = std::min({p0, p1, p2}), hi = std::max({p0, p1, p2});
+        // The box centre is the origin in this frame.
+        float radius = std::fabs(u.x) * ext.x + std::fabs(u.y) * ext.y + std::fabs(u.z) * ext.z;
+        float gap = std::max(-radius - hi, lo - radius);
+        if (gap > best) { best = gap; bestAxis = u; }
+    }
+    if (Vec3::Dot(bestAxis, -(v0 + v1 + v2) / 3.0f) < 0.0f) bestAxis = -bestAxis;
+    *n = bestAxis;
+    return best;
+}
+
+// Signed separation of a triangle soup from one primitive shape. `n` points
+// from the mesh toward the primitive; the smallest separation over the soup is
+// the answer, so a shape resting on two triangles is pushed by the deeper one.
+// A triangle is skipped only when the gap between its box and the shape's box
+// already exceeds the best separation: such a triangle cannot be closer, so the
+// minimum stays exact. Returns 1e30 (no interaction) for an empty mesh, a 2D
+// primitive or another mesh - two triangle soups are not modelled.
+float MeshSeparation(const Shape& mesh, const Shape& other, Vec3* n) {
+    const size_t count = MeshTriangleCount(mesh);
+    if (count == 0 || other.Is2D() || other.kind == Shape::Mesh3) return 1e30f;
+    float best = 1e30f;
+    Vec3 bestN(0, 1, 0);
+    for (size_t i = 0; i < count; ++i) {
+        Vec3 a, b, c;
+        MeshTriangle(mesh, i, &a, &b, &c);
+        if (best < 1e29f) {  // a separation is already known: try to prune
+            Vec3 lo, hi;
+            for (int k = 0; k < 3; ++k) {
+                lo[k] = std::min({a[k], b[k], c[k]});
+                hi[k] = std::max({a[k], b[k], c[k]});
+            }
+            if (BoxGapSquared(lo, hi, other.min, other.max) > best * best) continue;
+        }
+        Vec3 n2;
+        float sep;
+        switch (other.kind) {
+            case Shape::Sphere3:
+                sep = SphereTriangleSeparation(other.center, other.radius, a, b, c, &n2);
+                break;
+            case Shape::Capsule3:
+                sep = CapsuleTriangleSeparation(other.p0, other.p1, other.radius, a, b, c, &n2);
+                break;
+            default:
+                sep = BoxTriangleSeparation(other.min, other.max, a, b, c, &n2);
+                break;
+        }
+        if (sep < best) { best = sep; bestN = n2; }
+    }
+    *n = bestN;
+    return best;
+}
+
 bool Collide(const Shape& a, const Shape& b, Contact* out) {
     if (a.Is2D() != b.Is2D()) return false;  // never mix 2D and 3D shapes
+
+    // A triangle soup against one primitive. A mesh never resolves against
+    // another mesh (Unity's rule for non-convex colliders).
+    if (a.kind == Shape::Mesh3 || b.kind == Shape::Mesh3) {
+        if (a.kind == Shape::Mesh3 && b.kind == Shape::Mesh3) return false;
+        const Shape& mesh = a.kind == Shape::Mesh3 ? a : b;
+        const Shape& other = a.kind == Shape::Mesh3 ? b : a;
+        Vec3 n;
+        float sep = MeshSeparation(mesh, other, &n);
+        if (sep > 1e29f || sep >= 0.0f) return false;
+        out->penetration = -sep;
+        out->normal = a.kind == Shape::Mesh3 ? -n : n;  // convention: toward A
+        return true;
+    }
 
     // Capsule pairs are resolved exactly (segment/segment and segment/sphere);
     // capsule vs box falls through to the AABB approximation below.
@@ -237,6 +475,18 @@ float ShapeSeparation(const Shape& a, const Shape& b, Vec3* nOut) {
     *nOut = Vec3(0, 1, 0);
     if (a.Is2D() != b.Is2D()) return 1e30f;  // 2D and 3D shapes never interact
 
+    // Meshes: same convention as Collide(), so CCD sweeps them too.
+    if (a.kind == Shape::Mesh3 || b.kind == Shape::Mesh3) {
+        if (a.kind == Shape::Mesh3 && b.kind == Shape::Mesh3) return 1e30f;
+        const Shape& mesh = a.kind == Shape::Mesh3 ? a : b;
+        const Shape& other = a.kind == Shape::Mesh3 ? b : a;
+        Vec3 n;
+        float sep = MeshSeparation(mesh, other, &n);
+        if (sep > 1e29f) return 1e30f;
+        *nOut = a.kind == Shape::Mesh3 ? -n : n;  // convention: b -> a
+        return sep;
+    }
+
     const bool aCap = a.kind == Shape::Capsule3;
     const bool bCap = b.kind == Shape::Capsule3;
     Vec3 d;  // from b toward a
@@ -292,6 +542,49 @@ void TranslateShape(Shape* s, const Vec3& off) {
 // Nearest ray hit against one shape. `d` must be normalized; returns the
 // distance and outward normal at the entry point.
 bool RayShape(const Shape& s, const Vec3& o, const Vec3& d, float maxT, float* tOut, Vec3* nOut) {
+    if (s.kind == Shape::Mesh3) {
+        // Moller-Trumbore over the soup, in the mesh's local frame so the
+        // triangles never need transforming. The local ray direction is scaled
+        // by the transform, so the local parameter is converted back to a world
+        // distance by that same factor.
+        const Mesh& m = *s.mesh;
+        if (m.indices.empty()) return false;
+        Vec3 lo = s.meshWorldInv.TransformPoint(o);
+        Vec3 ldRaw = s.meshWorldInv.TransformDirection(d);
+        float scale = ldRaw.Length();
+        if (scale < 1e-12f) return false;
+        Vec3 ld = ldRaw / scale;
+        float best = maxT * scale;
+        bool found = false;
+        Vec3 bestN(0, 1, 0);
+        const size_t count = m.indices.size() / 3;
+        for (size_t i = 0; i < count; ++i) {
+            const Vec3& a = m.vertices[m.indices[i * 3 + 0]].position;
+            const Vec3& b = m.vertices[m.indices[i * 3 + 1]].position;
+            const Vec3& c = m.vertices[m.indices[i * 3 + 2]].position;
+            Vec3 e1 = b - a, e2 = c - a;
+            Vec3 p = Vec3::Cross(ld, e2);
+            float det = Vec3::Dot(e1, p);
+            if (std::fabs(det) < 1e-12f) continue;
+            float inv = 1.0f / det;
+            Vec3 tv = lo - a;
+            float u = Vec3::Dot(tv, p) * inv;
+            if (u < 0.0f || u > 1.0f) continue;
+            Vec3 q = Vec3::Cross(tv, e1);
+            float v = Vec3::Dot(ld, q) * inv;
+            if (v < 0.0f || u + v > 1.0f) continue;
+            float t = Vec3::Dot(e2, q) * inv;
+            if (t < 0.0f || t > best) continue;
+            best = t;
+            found = true;
+            bestN = Vec3::Cross(e1, e2);
+            if (Vec3::Dot(bestN, ld) > 0.0f) bestN = -bestN;  // always face the ray
+        }
+        if (!found) return false;
+        *tOut = best / scale;
+        *nOut = s.meshWorld.TransformDirection(bestN.Normalized()).Normalized();
+        return true;
+    }
     if (s.kind == Shape::Capsule3) {
         // Ray vs capsule: the entry on the infinite cylinder (clamped to the
         // segment) plus both cap spheres, nearest wins.
@@ -832,6 +1125,19 @@ void SolveFixedJoint(Scene& scene, GameObject& go, FixedJoint& joint, float dt) 
     }
 }
 
+// A triangle soup has no well-defined response for a body the solver has to
+// push, which is why Unity forbids a non-convex MeshCollider on a non-kinematic
+// RigidBody. The collider is dropped and reported once (not once per step).
+void WarnDynamicMeshCollider(Component& c) {
+    static std::unordered_map<uint64_t, bool> warned;
+    if (warned.size() >= 128) return;  // bounded: never grow without limit
+    if (!warned.emplace(c.m_componentId, true).second) return;
+    Log::Warning(
+        "MeshCollider on '%s' is ignored: a non-convex mesh is static-only. "
+        "Use a primitive collider or make the RigidBody kinematic.",
+        c.m_go ? c.m_go->name.c_str() : "<unknown>");
+}
+
 // Gather every enabled collider of one object in world space.
 void GatherObjectShapes(GameObject& go, std::vector<Shape>* out) {
     if (!go.ActiveInHierarchy()) return;
@@ -887,6 +1193,25 @@ void GatherObjectShapes(GameObject& go, std::vector<Shape>* out) {
         s.min = box.min; s.max = box.max; s.center = box.Center();
         add(s);
     }
+    if (auto* c = go.GetComponent<MeshCollider>(); c && c->enabled && !c->meshPath.empty()) {
+        if (dynamic) {
+            WarnDynamicMeshCollider(*c);
+        } else if (std::shared_ptr<Mesh> mesh =
+                       EngineMeshLibrary().GetObj(EngineResolvePath(c->meshPath))) {
+            if (mesh->IsValid()) {
+                Shape s;
+                s.kind = Shape::Mesh3;
+                s.comp = c;
+                s.isTrigger = c->isTrigger;
+                s.mesh = mesh;
+                s.meshWorld = world;
+                s.meshWorldInv = world.Inverted();
+                AABB box = mesh->Bounds().Transformed(world);
+                s.min = box.min; s.max = box.max; s.center = box.Center();
+                add(s);
+            }
+        }
+    }
 }
 
 // Gather every enabled collider in world space. Called once per step for the
@@ -903,6 +1228,7 @@ bool HasEnabledCollider(const GameObject& go) {
             case ComponentTypeId::SphereCollider:
             case ComponentTypeId::Collider2D:
             case ComponentTypeId::CapsuleCollider:
+            case ComponentTypeId::MeshCollider:
                 if (c->enabled) return true;
                 break;
             default:
@@ -1355,6 +1681,17 @@ std::vector<GameObject*> PhysicsOverlapSphere(Scene& scene, const Vec3& center, 
         } else if (s.kind == Shape::Capsule3) {
             Vec3 cp = ClosestOnSegment(center, s.p0, s.p1);
             overlap = (center - cp).Length() <= radius + s.radius;
+        } else if (s.kind == Shape::Mesh3) {
+            // Exact sphere-vs-triangle test, not the bounding box.
+            const size_t count = MeshTriangleCount(s);
+            const Vec3 lo = center - Vec3(radius), hi = center + Vec3(radius);
+            for (size_t i = 0; i < count && !overlap; ++i) {
+                Vec3 a, b, c;
+                MeshTriangle(s, i, &a, &b, &c);
+                if (!TriangleTouchesBox(a, b, c, lo, hi)) continue;
+                Vec3 n;
+                if (SphereTriangleSeparation(center, radius, a, b, c, &n) <= 0.0f) overlap = true;
+            }
         } else {
             Vec3 closest(std::clamp(center.x, s.min.x, s.max.x),
                          std::clamp(center.y, s.min.y, s.max.y),

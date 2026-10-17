@@ -446,6 +446,98 @@ check(sleeperStep && Math.abs(sleeperStep.result.transform.position[1] - 1.0) < 
 
 
 // ---------------------------------------------------------------------------
+console.log('cli: mesh colliders');
+// ---------------------------------------------------------------------------
+// A triangle-soup collider for level geometry: it stores a project-relative
+// mesh, the ray hits its triangles (not the box around them), a body settles on
+// it, it survives a scene reload, and a mesh on a body the solver has to push is
+// dropped with a warning rather than misbehaving silently.
+const meshDir = path.join(projectDir, 'Assets', 'Meshes');
+fs.mkdirSync(meshDir, { recursive: true });
+fs.writeFileSync(path.join(meshDir, 'ramp.obj'),
+    ['v -6 0 -6', 'v 6 0 -6', 'v 6 0 6', 'v -6 0 6', 'f 1 2 3 4', ''].join('\n'));
+// The lower-right half of the [-4,4] square in the XY plane at z = 0.
+fs.writeFileSync(path.join(meshDir, 'tri.obj'),
+    ['v -4 -4 0', 'v 4 -4 0', 'v 4 4 0', 'f 1 2 3', ''].join('\n'));
+
+const meshSchema = expectOk(['--project', projectDir, 'component.schema', '--type', 'MeshCollider']);
+check(meshSchema && meshSchema.components.length === 1 &&
+    meshSchema.components[0].props.includes('meshPath') &&
+    meshSchema.components[0].props.includes('isTrigger'),
+    'component.schema exposes the mesh collider fields', meshSchema && meshSchema.components);
+
+const meshRun = runProjectBatch(writeBatch('mesh.jsonl', [
+    { command: 'scene.new', args: { name: 'Mesh' } },
+    { command: 'entity.create', args: { name: 'Level' }, id: 'level' },
+    { command: 'component.add', args: { id: '$ref:level', type: 'MeshCollider',
+        props: { meshPath: 'Assets/Meshes/ramp.obj' } } },
+    { command: 'component.getProp', args: { id: '$ref:level', type: 'MeshCollider', prop: 'meshPath' }, id: 'path' },
+    { command: 'physics.raycast', args: { origin: [2, 5, 2], direction: [0, -1, 0], maxDistance: 100 }, id: 'hit' },
+    { command: 'entity.create', args: { name: 'Tri' }, id: 'tri' },
+    { command: 'component.add', args: { id: '$ref:tri', type: 'MeshCollider',
+        props: { meshPath: 'Assets/Meshes/tri.obj' } } },
+    { command: 'physics.raycast', args: { origin: [3, -3, -5], direction: [0, 0, 1], maxDistance: 100 }, id: 'triHit' },
+    { command: 'physics.raycast', args: { origin: [-3, 3, -5], direction: [0, 0, 1], maxDistance: 100 }, id: 'triMiss' },
+    { command: 'entity.create', args: { name: 'Ball', position: [2, 3, 2] }, id: 'ball' },
+    { command: 'component.add', args: { id: '$ref:ball', type: 'SphereCollider', props: { radius: 0.5 } } },
+    { command: 'component.add', args: { id: '$ref:ball', type: 'RigidBody', props: { restitution: 0 } } },
+    { command: 'entity.create', args: { name: 'Mover', position: [20, 3, 20] }, id: 'mover' },
+    { command: 'component.add', args: { id: '$ref:mover', type: 'MeshCollider',
+        props: { meshPath: 'Assets/Meshes/ramp.obj' } } },
+    { command: 'component.add', args: { id: '$ref:mover', type: 'RigidBody', props: {} } },
+    { command: 'physics.step', args: { dt: 0.016667, steps: 240 }, id: 'sim' },
+    { command: 'entity.get', args: { id: '$ref:ball' }, id: 'ballGet' },
+    { command: 'entity.get', args: { id: '$ref:mover' }, id: 'moverGet' },
+    { command: 'runtime.logs', args: { text: 'MeshCollider' }, id: 'logs' },
+    { command: 'scene.save', args: { file: 'Assets/Scenes/Mesh.cscene' } },
+]));
+check(meshRun.lines.every(l => l.ok !== false), 'mesh collider batch is clean', meshRun.stdout + meshRun.stderr);
+
+const meshPathStep = meshRun.step('path');
+check(meshPathStep && meshPathStep.result.value === 'Assets/Meshes/ramp.obj',
+    'component.add MeshCollider keeps the project-relative mesh', meshPathStep && meshPathStep.result);
+
+const meshHit = meshRun.step('hit');
+check(meshHit && meshHit.result.name === 'Level' && Math.abs(meshHit.result.distance - 5) < 0.02,
+    'physics.raycast hits the mesh surface at the right distance', meshHit && meshHit.result);
+
+const triHit = meshRun.step('triHit');
+check(triHit && triHit.result.name === 'Tri' && Math.abs(triHit.result.distance - 5) < 0.02,
+    'physics.raycast hits the triangle itself', triHit && triHit.result);
+const triMiss = meshRun.step('triMiss');
+check(triMiss && triMiss.result === null,
+    'physics.raycast misses the empty half of the bounding box', triMiss && triMiss.result);
+
+const ballGet = meshRun.step('ballGet');
+check(ballGet && Math.abs(ballGet.result.transform.position[1] - 0.5) < 0.05,
+    'a sphere settles on the mesh floor', ballGet && ballGet.result && ballGet.result.transform);
+
+const moverGet = meshRun.step('moverGet');
+check(moverGet && moverGet.result.transform.position[1] < -10,
+    'a mesh on a dynamic body is dropped, so the body keeps falling', moverGet && moverGet.result && moverGet.result.transform);
+const meshLogs = meshRun.step('logs');
+check(meshLogs && meshLogs.result.some(l => l.level === 'warning' && l.text.includes('static-only')),
+    'the dropped collider is reported in the engine log', meshLogs && meshLogs.result);
+
+const savedMesh = fs.readFileSync(path.join(projectDir, 'Assets', 'Scenes', 'Mesh.cscene'), 'utf8');
+check(savedMesh.includes('Assets/Meshes/ramp.obj') && savedMesh.includes('MeshCollider'),
+    'the scene serializes the mesh collider', savedMesh);
+
+const meshReload = runProjectBatch(writeBatch('mesh-reload.jsonl', [
+    { command: 'scene.load', args: { file: 'Assets/Scenes/Mesh.cscene' } },
+    // Away from the settled ball, which the first batch left on the floor.
+    { command: 'physics.raycast', args: { origin: [4, 5, 4], direction: [0, -1, 0], maxDistance: 100 }, id: 'hit' },
+    { command: 'physics.raycast', args: { origin: [3, -3, -5], direction: [0, 0, 1], maxDistance: 100 }, id: 'triHit' },
+]));
+const reloadHit = meshReload.step('hit');
+check(reloadHit && reloadHit.result.name === 'Level' && Math.abs(reloadHit.result.distance - 5) < 0.02,
+    'a reloaded scene keeps working mesh colliders', reloadHit && reloadHit.result);
+const reloadTri = meshReload.step('triHit');
+check(reloadTri && reloadTri.result.name === 'Tri',
+    'a reloaded scene keeps the second mesh collider', reloadTri && reloadTri.result);
+
+
+// ---------------------------------------------------------------------------
 console.log('cli: hinge + fixed joints');
 // ---------------------------------------------------------------------------
 // A hand-written scene pins the whole path: the joint components must come back

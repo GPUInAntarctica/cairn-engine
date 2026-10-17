@@ -82,6 +82,7 @@ export const dict = {
     'comp.sphereCollider': '球碰撞体',
     'comp.collider2d': '2D 碰撞体',
     'comp.capsuleCollider': '胶囊碰撞体',
+    'comp.meshCollider': '网格碰撞体',
     'comp.characterController': '角色控制器',
     'comp.distanceJoint': '距离关节',
     'comp.hingeJoint': '铰链关节',

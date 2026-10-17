@@ -82,6 +82,7 @@ export const dict = {
     'comp.sphereCollider': 'Sphere Collider',
     'comp.collider2d': 'Collider 2D',
     'comp.capsuleCollider': 'Capsule Collider',
+    'comp.meshCollider': 'Mesh Collider',
     'comp.characterController': 'Character Controller',
     'comp.distanceJoint': 'Distance Joint',
     'comp.hingeJoint': 'Hinge Joint',

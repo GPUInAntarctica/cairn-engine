@@ -237,6 +237,14 @@ const std::vector<PropertyDef>& CapsuleColliderDefs() {
     return defs;
 }
 
+const std::vector<PropertyDef>& MeshColliderDefs() {
+    static const std::vector<PropertyDef> defs = {
+        AssetField<MeshCollider, &MeshCollider::meshPath>("meshPath", "Mesh File", "model"),
+        Field<MeshCollider, &MeshCollider::isTrigger>("isTrigger", "Is Trigger", EditorPropKind::Bool),
+    };
+    return defs;
+}
+
 const std::vector<PropertyDef>& CharacterControllerDefs() {
     static const std::vector<PropertyDef> defs = {
         Field<CharacterController, &CharacterController::center>("center", "Center", EditorPropKind::Vec3),
@@ -316,6 +324,7 @@ const std::vector<PropertyDef>* DefsForTypeName(const std::string& typeName) {
     if (typeName == "SphereCollider") return &SphereColliderDefs();
     if (typeName == "Collider2D") return &Collider2DDefs();
     if (typeName == "CapsuleCollider") return &CapsuleColliderDefs();
+    if (typeName == "MeshCollider") return &MeshColliderDefs();
     if (typeName == "CharacterController") return &CharacterControllerDefs();
     if (typeName == "DistanceJoint") return &DistanceJointDefs();
     if (typeName == "HingeJoint") return &HingeJointDefs();
@@ -385,7 +394,7 @@ bool ComponentDeserialize(Component* c, const Json& props) {
 std::vector<std::string> AddableComponentNames() {
     return {"Camera", "Light", "MeshRenderer", "SpriteRenderer", "TextRenderer",
             "RigidBody", "BoxCollider", "SphereCollider", "Collider2D",
-            "CapsuleCollider", "CharacterController", "DistanceJoint",
+            "CapsuleCollider", "MeshCollider", "CharacterController", "DistanceJoint",
             "HingeJoint", "FixedJoint", "Script"};
 }
 

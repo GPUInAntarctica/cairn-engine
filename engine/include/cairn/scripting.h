@@ -60,6 +60,7 @@ class BoxCollider;
 class SphereCollider;
 class Collider2D;
 class CapsuleCollider;
+class MeshCollider;
 class CharacterController;
 class DistanceJoint;
 class HingeJoint;
@@ -120,7 +121,10 @@ enum class ComponentTypeId : int {
     // Added in 0.1.7.
     DistanceJoint,
     // Added in 0.1.16.
-    HingeJoint, FixedJoint, Other = 99,
+    HingeJoint, FixedJoint,
+    // Added in 0.1.19.
+    MeshCollider,
+    Other = 99,
 };
 
 template <typename T>
@@ -144,6 +148,7 @@ CAIRN_COMPONENT_TYPE(Collider2D, Collider2D)
 CAIRN_COMPONENT_TYPE(ScriptComponent, Script)
 CAIRN_COMPONENT_TYPE(PrefabInstance, PrefabInstance)
 CAIRN_COMPONENT_TYPE(CapsuleCollider, CapsuleCollider)
+CAIRN_COMPONENT_TYPE(MeshCollider, MeshCollider)
 CAIRN_COMPONENT_TYPE(CharacterController, CharacterController)
 CAIRN_COMPONENT_TYPE(DistanceJoint, DistanceJoint)
 CAIRN_COMPONENT_TYPE(HingeJoint, HingeJoint)
@@ -491,6 +496,23 @@ public:
 
     const char* TypeName() const override { return "CapsuleCollider"; }
     ComponentTypeId TypeId() const override { return ComponentTypeId::CapsuleCollider; }
+};
+
+// ---------------------------------------------------------------------------
+// MeshCollider - collision geometry taken from a triangle mesh (.obj), for
+// level geometry the primitives cannot express: a ramp, a room, a heightfield.
+// It is a triangle soup (non-convex) and therefore static/kinematic-only, the
+// same rule Unity applies to a non-convex MeshCollider: a body the solver has
+// to push cannot carry one, and a mesh on a non-kinematic RigidBody is ignored
+// with a warning. `meshPath` is project-relative, resolved like MeshRenderer's.
+// ---------------------------------------------------------------------------
+class MeshCollider : public Component {
+public:
+    std::string meshPath;           // project-relative .obj
+    bool isTrigger = false;
+
+    const char* TypeName() const override { return "MeshCollider"; }
+    ComponentTypeId TypeId() const override { return ComponentTypeId::MeshCollider; }
 };
 
 // ---------------------------------------------------------------------------

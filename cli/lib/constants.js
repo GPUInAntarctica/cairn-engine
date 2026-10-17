@@ -6,7 +6,7 @@ const PRIMITIVES = ['Cube', 'Sphere', 'Plane', 'Quad', 'Cylinder', 'Cone', 'Toru
 const COMPONENTS = [
     'Camera', 'Light', 'MeshRenderer', 'SpriteRenderer', 'TextRenderer',
     'RigidBody', 'BoxCollider', 'SphereCollider', 'Collider2D',
-    'CapsuleCollider', 'CharacterController', 'DistanceJoint',
+    'CapsuleCollider', 'MeshCollider', 'CharacterController', 'DistanceJoint',
     'HingeJoint', 'FixedJoint', 'Script',
 ];
 

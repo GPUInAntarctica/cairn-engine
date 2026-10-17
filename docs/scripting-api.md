@@ -84,7 +84,17 @@ rb->AddTorque(Vec3(0, 1, 0));   // accumulated angular acceleration
 rb->collisionDetection = RigidBody::CollisionDetection::Continuous;  // sweep fast movers
 ```
 
-Colliders: `BoxCollider` (3D AABB), `SphereCollider`, `CapsuleCollider` (swept sphere along a Y/X/Z axis), `Collider2D` (XY plane). A collider without a `RigidBody` is static. `isTrigger` colliders fire the trigger callbacks instead of resolving.
+Colliders: `BoxCollider` (3D AABB), `SphereCollider`, `CapsuleCollider` (swept sphere along a Y/X/Z axis), `Collider2D` (XY plane), `MeshCollider` (below). A collider without a `RigidBody` is static. `isTrigger` colliders fire the trigger callbacks instead of resolving.
+
+`MeshCollider` takes its geometry from a triangle mesh for level shapes the primitives cannot express - a ramp, a room, a corridor. `meshPath` is a project-relative `.obj`, resolved exactly like `MeshRenderer::meshPath`:
+
+```cpp
+auto* level = go->AddComponent<MeshCollider>();
+level->meshPath = "Assets/Meshes/level.obj";   // project-relative
+level->isTrigger = false;
+```
+
+It is a triangle soup (non-convex), so like Unity's non-convex MeshCollider it is static/kinematic-only: a mesh on a non-kinematic `RigidBody` is dropped and reported once in the engine log. Sphere, capsule and box colliders collide with it (the box contact is an exact 13-axis separating-axis test), `Physics::Raycast` hits the actual triangles rather than the bounding box, `Physics::OverlapSphere` is exact, `Continuous` CCD sweeps it, and a `CharacterController` stands on it. Two mesh colliders do not interact. The narrow phase walks the triangles with a distance prune and no BVH, so keep a mesh collider to level geometry rather than a dense model.
 
 Collision detection: `Discrete` (default) moves the body by `velocity * dt` and then tests for overlap, so a body whose single-step displacement exceeds an obstacle's thickness passes through it. `Continuous` sweeps the body against solid static/kinematic colliders before moving it (translation only) and stops it at the first contact. Use it for bullets, launched projectiles and long falls; leave it off for bodies that never move fast, since it costs a few extra shape tests per step.
 

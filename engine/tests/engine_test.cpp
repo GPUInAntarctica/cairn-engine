@@ -2130,6 +2130,243 @@ static void TestContinuousCollision() {
     }
 }
 
+// Writes `quads` (four corners each) as an OBJ, one fan-triangulated face per
+// quad. Used by the mesh collider tests.
+static void WriteObjQuads(const std::string& path, const std::vector<std::vector<Vec3>>& faces) {
+    std::ofstream out(path);
+    for (const auto& f : faces)
+        for (const Vec3& v : f) out << "v " << v.x << " " << v.y << " " << v.z << "\n";
+    int base = 1;
+    for (const auto& f : faces) {
+        out << "f";
+        for (size_t i = 0; i < f.size(); ++i) out << " " << base + (int)i;
+        out << "\n";
+        base += (int)f.size();
+    }
+}
+
+// A MeshCollider is a triangle soup: the three primitives rest on it at their
+// expected heights, a ray hits the triangles (not the bounding box), a rotated
+// collider is rotated, a closed mesh holds a body on its roof, CCD stops a fast
+// body at a zero-thickness wall, and a mesh on a body the solver has to push is
+// dropped with a warning.
+static void TestMeshCollider() {
+    const std::string dir =
+        (std::filesystem::temp_directory_path() / "cairn-test-meshcollider").string();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    const std::string floorPath = dir + "/floor.obj";
+    WriteObjQuads(floorPath, {{{-6, 0, -6}, {6, 0, -6}, {6, 0, 6}, {-6, 0, 6}}});
+    // A thin (zero-thickness) vertical wall in the XY plane at z = 0.
+    const std::string wallPath = dir + "/wall.obj";
+    WriteObjQuads(wallPath, {{{-4, -4, 0}, {4, -4, 0}, {4, 4, 0}, {-4, 4, 0}}});
+    // A closed box, x/y/z in [-1, 1].
+    const std::string boxPath = dir + "/box.obj";
+    WriteObjQuads(boxPath, {
+        {{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1}},
+        {{-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}},
+        {{-1, -1, -1}, {-1, -1, 1}, {-1, 1, 1}, {-1, 1, -1}},
+        {{1, -1, -1}, {1, -1, 1}, {1, 1, 1}, {1, 1, -1}},
+        {{-1, -1, -1}, {1, -1, -1}, {1, -1, 1}, {-1, -1, 1}},
+        {{-1, 1, -1}, {1, 1, -1}, {1, 1, 1}, {-1, 1, 1}},
+    });
+    // One triangle: the lower-right half of the [-4,4]x[-4,4] square at z = 0.
+    const std::string triPath = dir + "/tri.obj";
+    {
+        std::ofstream out(triPath);
+        out << "v -4 -4 0\nv 4 -4 0\nv 4 4 0\nf 1 2 3\n";
+    }
+
+    // The three primitives land on the floor at their expected heights.
+    {
+        Scene scene;
+        scene.CreateEntity("Floor")->AddComponent<MeshCollider>()->meshPath = floorPath;
+
+        GameObject* ball = scene.CreateEntity("Ball");
+        ball->transform().position = Vec3(-3, 4, -3);
+        ball->AddComponent<SphereCollider>()->radius = 0.5f;
+        ball->AddComponent<RigidBody>()->restitution = 0.0f;
+
+        GameObject* crate = scene.CreateEntity("Crate");
+        crate->transform().position = Vec3(3, 4, 3);
+        crate->AddComponent<BoxCollider>()->size = Vec3(1, 1, 1);
+        crate->AddComponent<RigidBody>()->restitution = 0.0f;
+
+        GameObject* cap = scene.CreateEntity("Cap");
+        cap->transform().position = Vec3(0, 4, 3);
+        auto* cc = cap->AddComponent<CapsuleCollider>();
+        cc->radius = 0.5f;
+        cc->height = 2.0f;  // local segment spans y in [-0.5, 0.5]
+        cap->AddComponent<RigidBody>()->restitution = 0.0f;
+
+        for (int i = 0; i < 400; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+        CHECK(NearlyEqual(ball->transform().position.y, 0.5f, 0.05f));
+        CHECK(NearlyEqual(crate->transform().position.y, 0.5f, 0.05f));
+        CHECK(NearlyEqual(cap->transform().position.y, 1.0f, 0.05f));
+        CHECK(std::fabs(ball->transform().position.x + 3.0f) < 0.25f);  // no sideways slide
+    }
+
+    // A ray hits the triangles, not the box that contains them: the missing
+    // upper-left half of the square has to report a miss.
+    {
+        Scene scene;
+        GameObject* tri = scene.CreateEntity("Tri");
+        tri->AddComponent<MeshCollider>()->meshPath = triPath;
+
+        PhysicsHit hit;
+        CHECK(PhysicsRaycast(scene, Vec3(3, -3, -5), Vec3(0, 0, 1), 100.0f, &hit));
+        CHECK(hit.go == tri);
+        CHECK(NearlyEqual(hit.distance, 5.0f, 1e-3f));
+        CHECK(std::fabs(hit.normal.z) > 0.99f);
+        CHECK(!PhysicsRaycast(scene, Vec3(-3, 3, -5), Vec3(0, 0, 1), 100.0f, &hit));
+
+        auto inside = PhysicsOverlapSphere(scene, Vec3(3, -3, 0), 0.2f);
+        CHECK(std::find(inside.begin(), inside.end(), tri) != inside.end());
+        auto outside = PhysicsOverlapSphere(scene, Vec3(-3, 3, 0), 0.2f);
+        CHECK(std::find(outside.begin(), outside.end(), tri) == outside.end());
+    }
+
+    // A closed mesh (six quads) carries a body on its roof.
+    {
+        Scene scene;
+        scene.CreateEntity("Cage")->AddComponent<MeshCollider>()->meshPath = boxPath;
+        GameObject* ball = scene.CreateEntity("Ball");
+        ball->transform().position = Vec3(0.2f, 4, 0.2f);
+        ball->AddComponent<SphereCollider>()->radius = 0.5f;
+        ball->AddComponent<RigidBody>()->restitution = 0.0f;
+        for (int i = 0; i < 400; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+        CHECK(NearlyEqual(ball->transform().position.y, 1.5f, 0.08f));
+    }
+
+    // Rotating the entity rotates the collider: the floor quad becomes a wall.
+    {
+        Scene scene;
+        GameObject* wallGo = scene.CreateEntity("TiltedFloor");
+        wallGo->transform().SetEulerDegrees(Vec3(90, 0, 0));  // XZ plane -> z = 0 plane
+        wallGo->AddComponent<MeshCollider>()->meshPath = floorPath;
+
+        GameObject* ball = scene.CreateEntity("Ball");
+        ball->transform().position = Vec3(0, 0, -3);
+        auto* rb = ball->AddComponent<RigidBody>();
+        rb->useGravity = false;
+        rb->restitution = 0.0f;
+        ball->AddComponent<SphereCollider>()->radius = 0.5f;
+        rb->velocity = Vec3(0, 0, 60);  // one unit per step
+        for (int i = 0; i < 60; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+        CHECK(ball->transform().position.z < -0.4f);
+        CHECK(ball->transform().position.z > -0.7f);
+    }
+
+    // CCD sweeps a fast body against a zero-thickness mesh; discrete tunnels.
+    for (int mode = 0; mode < 2; ++mode) {
+        Scene scene;
+        scene.CreateEntity("Wall")->AddComponent<MeshCollider>()->meshPath = wallPath;
+        GameObject* p = scene.CreateEntity("P");
+        p->transform().position = Vec3(0, 0, -8);
+        auto* rb = p->AddComponent<RigidBody>();
+        rb->useGravity = false;
+        rb->restitution = 0.0f;
+        rb->collisionDetection = mode == 0 ? RigidBody::CollisionDetection::Discrete
+                                           : RigidBody::CollisionDetection::Continuous;
+        p->AddComponent<SphereCollider>()->radius = 0.2f;
+        rb->velocity = Vec3(0, 0, 600);  // 10 units per step
+        for (int i = 0; i < 3; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+        if (mode == 0) {
+            CHECK(p->transform().position.z > 1.0f);  // straight through
+        } else {
+            CHECK(p->transform().position.z < -0.19f);
+            CHECK(p->transform().position.z > -0.4f);
+        }
+    }
+
+    // A mesh on a non-kinematic body is dropped (static-only, like Unity) and
+    // reported once. The body still integrates - freezing it would be worse.
+    {
+        Scene scene;
+        GameObject* ground = scene.CreateEntity("Ground");
+        ground->transform().position = Vec3(0, -0.5f, 0);
+        ground->AddComponent<BoxCollider>()->size = Vec3(10, 1, 10);  // top at y = 0
+
+        GameObject* body = scene.CreateEntity("Mover");
+        body->transform().position = Vec3(0, 4, 0);
+        body->AddComponent<MeshCollider>()->meshPath = floorPath;
+        auto* rb = body->AddComponent<RigidBody>();
+        rb->restitution = 0.0f;
+        for (int i = 0; i < 200; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+        CHECK(body->transform().position.y < -3.0f);
+        CHECK(rb->velocity.y < -1.0f);
+
+        bool warned = false;
+        for (const LogEntry& e : Log::Poll(0))
+            if (e.text.find("MeshCollider") != std::string::npos) warned = true;
+        CHECK(warned);
+    }
+
+    // A kinematic body keeps its mesh collider (a moving level piece).
+    {
+        Scene scene;
+        GameObject* platform = scene.CreateEntity("Platform");
+        platform->transform().position = Vec3(0, 2, 0);
+        platform->AddComponent<MeshCollider>()->meshPath = floorPath;
+        auto* prb = platform->AddComponent<RigidBody>();
+        prb->isKinematic = true;
+
+        GameObject* ball = scene.CreateEntity("Ball");
+        ball->transform().position = Vec3(0, 5, 0);
+        ball->AddComponent<SphereCollider>()->radius = 0.5f;
+        ball->AddComponent<RigidBody>()->restitution = 0.0f;
+        for (int i = 0; i < 400; ++i) PhysicsStep(scene, 1.0f / 60.0f);
+        CHECK(NearlyEqual(ball->transform().position.y, 2.5f, 0.08f));
+    }
+
+    std::filesystem::remove_all(dir);
+}
+
+// The wired path: a project-relative mesh path resolves through the project
+// root, the collider answers the engine-level query, and a scene save/load
+// round trip keeps it.
+static void TestMeshColliderScene() {
+    const std::string dir =
+        (std::filesystem::temp_directory_path() / "cairn-test-meshcollider-scene").string();
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir + "/Assets/Meshes");
+    std::filesystem::create_directories(dir + "/Assets/Scenes");
+    WriteObjQuads(dir + "/Assets/Meshes/floor.obj",
+                  {{{-8, 0, -8}, {8, 0, -8}, {8, 0, 8}, {-8, 0, 8}}});
+
+    Engine engine;
+    engine.SetProjectRoot(dir);
+    engine.NewScene("Level");
+
+    GameObject* level = engine.scene().CreateEntity("Level");
+    auto* mc = level->AddComponent<MeshCollider>();
+    mc->meshPath = "Assets/Meshes/floor.obj";
+
+    Physics::RaycastHit hit;
+    CHECK(Physics::Raycast(Vec3(1, 5, 1), Vec3(0, -1, 0), 100.0f, &hit));
+    CHECK(hit.entity == level->m_id);
+    CHECK(NearlyEqual(hit.distance, 5.0f, 1e-2f));
+    mc->enabled = false;
+    CHECK(!Physics::Raycast(Vec3(1, 5, 1), Vec3(0, -1, 0), 100.0f, &hit));
+    mc->enabled = true;
+
+    std::string err;
+    CHECK(engine.SaveSceneFile(dir + "/Assets/Scenes/Level.cscene", &err));
+    CHECK(engine.LoadSceneFile(dir + "/Assets/Scenes/Level.cscene", &err));
+    GameObject* found = nullptr;
+    for (const auto& g : engine.scene().objects)
+        if (g->GetComponent<MeshCollider>()) { found = g.get(); break; }
+    CHECK(found != nullptr);
+    if (found) {
+        CHECK(found->GetComponent<MeshCollider>()->meshPath == "Assets/Meshes/floor.obj");
+        CHECK(Physics::Raycast(Vec3(1, 5, 1), Vec3(0, -1, 0), 100.0f, &hit));
+        CHECK(hit.entity == found->m_id);
+    }
+
+    std::filesystem::remove_all(dir);
+}
+
 // The frame profiler aggregates named samples and reports them heaviest-first.
 static void TestProfiler() {
     Profiler::Reset();
@@ -2267,6 +2504,8 @@ int main() {
     TestFixedJoint();
     TestSleeping();
     TestContinuousCollision();
+    TestMeshCollider();
+    TestMeshColliderScene();
     TestProfiler();
     TestJobs();
 
