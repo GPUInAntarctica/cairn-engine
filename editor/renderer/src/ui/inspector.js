@@ -257,6 +257,7 @@ export class Inspector {
             case 'enum': return enumRow(md.label, read, md.options, commit);
             case 'asset': return assetRow(md.label, read, md.assetKind, commit);
             case 'object': return textRow(md.label, read, commit);
+            case 'json': return jsonRow(md.label, read, commit);
             default: return textRow(md.label, read, commit);
         }
     }
@@ -403,6 +404,26 @@ function textRow(label, read, commit) {
     input.addEventListener('change', () => commit(input.value));
     const row = propRow(label, input, false);
     row._refresh = () => { input.value = read() ?? ''; };
+    return row;
+}
+
+// A structured property holds JSON text: an edit that does not parse is
+// rejected and the field repaints with what the engine still has.
+function jsonRow(label, read, commit) {
+    const text = () => JSON.stringify(read() ?? null);
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.spellcheck = false;
+    input.value = text();
+    input.addEventListener('change', () => {
+        try {
+            commit(JSON.parse(input.value));
+        } catch {
+            input.value = text();
+        }
+    });
+    const row = propRow(label, input, false);
+    row._refresh = () => { input.value = text(); };
     return row;
 }
 

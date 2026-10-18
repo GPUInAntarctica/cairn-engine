@@ -1773,6 +1773,68 @@ check(dominant(animPx(4, 32, 32), 0), 'the clip loops back to the first cell', a
 check(dominant(animPx(5, 32, 32), 2), 'setting frame scrubs to that cell', animPx(5, 32, 32));
 
 // ---------------------------------------------------------------------------
+console.log('cli: named sprite clips (the clip table picks the frames)');
+// ---------------------------------------------------------------------------
+// A character is several animations on one sheet, so they are named: `clips` is
+// a table of ranges and `clip` names the one playing. Two `runtime.step` calls
+// take `walk` through cells 0..1 and back, which is the range the table named -
+// cells 2..3 are never shown - and switching to `attack` draws its first cell
+// with no step in between, then holds its last one because that clip does not
+// loop.
+const clipShot = i => path.join(scratch, `clip${i}.png`);
+const clipSteps = [{ command: 'runtime.play' }];
+for (let i = 0; i < 6; i++) {
+    if (i > 0) clipSteps.push({ command: 'runtime.step' });
+    if (i === 3) {
+        clipSteps.push({ command: 'component.setProps',
+            args: { id: '$ref:sp', type: 'SpriteAnimator', props: { clip: 'attack' } } });
+    }
+    clipSteps.push({ command: 'render.screenshot', args: { out: clipShot(i), mode: 'game', width: 64, height: 64 }, id: `cshot${i}` });
+}
+const clipRun = runProjectBatch(writeBatch('clips.jsonl', [
+    { command: 'image.new', args: { width: 32, height: 32, background: 'transparent' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 16, height: 16, filled: true, color: '#ff0000' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 0, width: 16, height: 16, filled: true, color: '#00ff00' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 16, width: 16, height: 16, filled: true, color: '#0000ff' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 16, width: 16, height: 16, filled: true, color: '#ffffff' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/clips.png' }, id: 'sheet' },
+    { command: 'scene.new', args: { name: 'Clips' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    ...atlasCam(1),
+    { command: 'entity.create', args: { name: 'Sprite' }, id: 'sp' },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteRenderer', props: {
+        texturePath: 'Assets/Sprites/clips.png', pixelsPerUnit: 16, pixelPerfect: true } } },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteAnimator', props: {
+        columns: 2, rows: 2, clip: 'walk',
+        clips: [
+            { name: 'walk', firstFrame: 0, lastFrame: 1, fps: 60 },
+            { name: 'attack', firstFrame: 2, lastFrame: 3, fps: 60, loop: false },
+        ] } }, id: 'anim' },
+    ...clipSteps,
+    // The table comes back the way it went in, which is what makes the clip set
+    // a thing an agent can read, edit and write back.
+    { command: 'component.get', args: { id: '$ref:sp', type: 'SpriteAnimator' }, id: 'read' },
+]));
+check(clipRun.lines.every(l => l.ok !== false), 'the clip batch runs clean', clipRun.stdout + clipRun.stderr);
+const clipPx = (i, x, y) => expectOk(['--image', clipShot(i), 'image.pixel', '--x', String(x), '--y', String(y)]);
+check(dominant(clipPx(0, 32, 32), 0), 'the named clip starts at its first cell', clipPx(0, 32, 32));
+check(dominant(clipPx(1, 32, 32), 1), 'a step plays the clip\'s second cell', clipPx(1, 32, 32));
+check(dominant(clipPx(2, 32, 32), 0), 'and wraps inside the clip, not past it', clipPx(2, 32, 32));
+check(dominant(clipPx(3, 32, 32), 2), 'switching clips draws the new clip\'s first cell', clipPx(3, 32, 32));
+check(whitePx(clipPx(4, 32, 32)), 'the new clip then plays from there', clipPx(4, 32, 32));
+check(dominant(clipPx(5, 32, 32), 0) === false, 'the last cell is not the first one again', clipPx(5, 32, 32));
+check(whitePx(clipPx(5, 32, 32)), 'a clip that does not loop holds its last cell', clipPx(5, 32, 32));
+const clipRead = clipRun.step('read').result.props;
+check(Array.isArray(clipRead.clips) && clipRead.clips.length === 2
+    && clipRead.clips[1].name === 'attack' && clipRead.clips[1].loop === false,
+    'the clip table round-trips through component.get', clipRead.clips);
+check(clipRead.clip === 'attack', 'and so does the clip that is playing', clipRead.clip);
+const clipSchema = expectOk(['component.schema', 'SpriteAnimator']);
+const clipProp = clipSchema.components[0].schema.find(p => p.name === 'clips');
+check(clipProp && clipProp.kind === 'json',
+    'component.schema reports the clip table as a json prop', clipProp);
+
+// ---------------------------------------------------------------------------
 console.log('cli: export + preferences');
 // ---------------------------------------------------------------------------
 const prefs = expectOk(['project.preferences', '--set', '{"language":"en"}']);

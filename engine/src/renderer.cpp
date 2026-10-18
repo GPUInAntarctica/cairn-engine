@@ -1442,7 +1442,7 @@ struct Renderer::Impl {
     // both the cull below and the vertex generation.
     Vec4 SpriteUvRect(const SpriteRenderer& sp, const SpriteAnimator* anim) {
         if (!anim || !anim->enabled) return sp.uvRect;
-        return anim->CellRect(anim->frame, sp.uvRect);
+        return anim->CellRect(anim->DrawnCell(), sp.uvRect);
     }
 
     // Local-space extent of a sprite quad: x runs left to right, y from the

@@ -12,7 +12,9 @@
 namespace Cairn {
 
 // Editor-facing property kinds (superset of PropType).
-enum class EditorPropKind : int { Float, Int, Bool, String, Vec2, Vec3, Vec4, Color, Enum, Asset, Object };
+enum class EditorPropKind : int { Float, Int, Bool, String, Vec2, Vec3, Vec4, Color, Enum, Asset, Object,
+    // Added in 0.1.28. Appended so existing numeric values stay stable.
+    Json };  // a structured value the engine stores and passes through opaquely
 
 struct PropertyDef {
     const char* name = nullptr;      // canonical key (serialization + editor)

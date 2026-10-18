@@ -15,11 +15,14 @@ inline Json ToJson(const Vec2& v) { return Json::MakeArray({v.x, v.y}); }
 inline Json ToJson(const Vec3& v) { return Json::MakeArray({v.x, v.y, v.z}); }
 inline Json ToJson(const Vec4& v) { return Json::MakeArray({v.x, v.y, v.z, v.w}); }
 inline Json ToJson(const Color& c) { return Json::MakeArray({c.r, c.g, c.b, c.a}); }
+// A structured field is already Json: it is stored and handed back as it is.
+inline Json ToJson(const Json& v) { return v; }
 
 template <typename T>
 T FromJson(const Json& j, T def) {
     if (j.isNull()) return def;
-    if constexpr (std::is_same_v<T, float>) return j.asFloat(def);
+    if constexpr (std::is_same_v<T, Json>) return j;
+    else if constexpr (std::is_same_v<T, float>) return j.asFloat(def);
     else if constexpr (std::is_same_v<T, int>) return j.asInt(def);
     else if constexpr (std::is_same_v<T, bool>) return j.asBool(def);
     else if constexpr (std::is_same_v<T, std::string>) return j.isString() ? j.asString() : def;
@@ -85,6 +88,14 @@ constexpr PropertyDef AssetField(const char* name, const char* label, const char
 template <typename C, auto Member>
 constexpr PropertyDef ObjectField(const char* name, const char* label) {
     return PropertyDef{name, label, EditorPropKind::Object, &MemberGet<C, Member>, &MemberSet<C, Member>,
+                       nullptr, 0, ""};
+}
+
+// A structured value the engine does not interpret: stored, serialized and
+// handed to the editor / CLI exactly as it was written.
+template <typename C, auto Member>
+constexpr PropertyDef JsonField(const char* name, const char* label) {
+    return PropertyDef{name, label, EditorPropKind::Json, &MemberGet<C, Member>, &MemberSet<C, Member>,
                        nullptr, 0, ""};
 }
 
@@ -189,6 +200,8 @@ const std::vector<PropertyDef>& SpriteAnimatorDefs() {
         Field<SpriteAnimator, &SpriteAnimator::loop>("loop", "Loop", EditorPropKind::Bool),
         Field<SpriteAnimator, &SpriteAnimator::playing>("playing", "Playing", EditorPropKind::Bool),
         Field<SpriteAnimator, &SpriteAnimator::frame>("frame", "Frame", EditorPropKind::Int),
+        JsonField<SpriteAnimator, &SpriteAnimator::clips>("clips", "Clips"),
+        Field<SpriteAnimator, &SpriteAnimator::clip>("clip", "Clip", EditorPropKind::String),
     };
     return defs;
 }

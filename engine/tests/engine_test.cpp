@@ -1885,6 +1885,201 @@ static void TestSpriteAnimation() {
     });
 }
 
+// Named sprite clips: `clips` is a table of animations and `clip` names the one
+// playing, with a key a clip leaves out falling back to the component's own
+// field. The checks below read the cell that is on screen back as its colour,
+// so they pin which clip was resolved, when a switch takes effect, and that a
+// clip's grid - not the component's - decides the cell's geometry.
+static void TestSpriteClips() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-clips").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/frames.bmp";
+    // Reading order: red, green / blue, white - one distinct colour per cell.
+    WriteTestBmpSheet(dir + "/" + tex, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255);
+    const int sheet[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};
+
+    auto px = [](Engine& engine, int x, int y) {
+        const FrameTarget& t = engine.frame();
+        const uint8_t* p = &t.color[((size_t)y * (size_t)t.width + (size_t)x) * 4];
+        return std::array<int, 3>{(int)p[0], (int)p[1], (int)p[2]};
+    };
+    auto closeTo = [](const std::array<int, 3>& c, int r, int g, int b) {
+        return std::abs(c[0] - r) < 40 && std::abs(c[1] - g) < 40 && std::abs(c[2] - b) < 40;
+    };
+    // Renders and reports the cell at the middle of the sprite: a cell of the
+    // component's 2x2 grid is 8 texels at 4 px/unit, so 2x2 units centred in a
+    // 4-unit view - pixel 64,64 is inside it whichever cell is drawn.
+    auto shows = [&](Engine& engine, int f) {
+        engine.RenderGameFrame();
+        return closeTo(px(engine, 64, 64), sheet[f][0], sheet[f][1], sheet[f][2]);
+    };
+    // Pixel 64,20 sits above a 2x2 cell (2 units tall, screen 32..96) but inside
+    // a 2x1 cell (4 units tall, the whole 128 px view): the same texture, the
+    // same rect, so only a clip's own grid can put a sprite there.
+    auto tall = [&](Engine& engine) {
+        engine.RenderGameFrame();
+        return px(engine, 64, 20);
+    };
+    auto entry = [](const char* name, int first, int last, float fps, bool loop) {
+        Json e = Json::MakeObject();
+        e.set("name", Json(name));
+        e.set("firstFrame", Json(first));
+        e.set("lastFrame", Json(last));
+        e.set("fps", Json(fps));
+        e.set("loop", Json(loop));
+        return e;
+    };
+    auto clipTable = [&]() {
+        Json table = Json::MakeArray();
+        table.push(entry("walk", 0, 1, 2.0f, true));
+        table.push(entry("attack", 2, 3, 2.0f, false));
+        Json bars = Json::MakeObject();     // the first two columns, full height
+        bars.set("name", Json("bars"));
+        bars.set("columns", Json(2));
+        bars.set("rows", Json(1));
+        bars.set("firstFrame", Json(0));
+        bars.set("lastFrame", Json(1));
+        bars.set("fps", Json(2.0f));
+        table.push(bars);
+        table.push(Json(42));               // a stray value is not a clip
+        table.push(Json::MakeObject());     // nor is an entry with no name
+        return table;
+    };
+    auto build = [&](Engine& engine, int backend) {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(128, 128);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        scene.ambient = Color(1, 1, 1, 1);
+        scene.tonemap = 0;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 2.0f;
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        GameObject* go = scene.CreateEntity("Sprite");
+        auto* sr = go->AddComponent<SpriteRenderer>();
+        sr->texturePath = tex;
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = 4.0f;
+        auto* anim = go->AddComponent<SpriteAnimator>();
+        anim->columns = 2;
+        anim->rows = 2;
+        anim->fps = 2.0f;
+        anim->clips = clipTable();
+        return anim;
+    };
+    auto bothBackends = [&](const std::function<void(int, const char*)>& one) {
+        one(2, "software");
+        if (VulkanBackendAvailable()) one(1, "vulkan");
+    };
+
+    // --- a clip's range and its own fps govern the frames -------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        // The component's rate is far above the clips': every step below is the
+        // clip's 2 fps, so an ignored clip rate would run through the range.
+        anim->fps = 100.0f;
+        anim->clip = "walk";
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(shows(engine, 0));          // the switch is drawn before any tick
+        engine.Update(0.5f);
+        CHECK(shows(engine, 1));
+        engine.Update(0.25f);             // half a frame of the clip's own rate
+        CHECK(shows(engine, 1));
+        // Another clip, half a frame into it: the switch restarts the time, so
+        // the 0.25 s already spent on `walk` does not carry over.
+        anim->clip = "attack";
+        CHECK(shows(engine, 2));          // drawn before a tick has happened
+        engine.Update(0.25f);
+        CHECK(shows(engine, 2));
+        engine.Update(0.5f);
+        CHECK(shows(engine, 3));
+        engine.Update(0.5f);
+        CHECK(shows(engine, 3));          // `attack` does not loop
+        // Switching back starts on the new clip's first cell even though the
+        // frame being held is a valid cell of it: the drawn cell is the
+        // switch's, not the stale one clamped into range (which would be green).
+        anim->clip = "walk";
+        CHECK(shows(engine, 0));
+    });
+
+    // --- a clip's grid decides the cell's geometry --------------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        anim->clip = "bars";
+        CHECK(closeTo(tall(engine), 255, 0, 0));         // inside the taller cell
+        anim->clip = "";                                 // the component's grid
+        CHECK(closeTo(tall(engine), 0, 0, 0));           // above the shorter one
+        // Keys the entry leaves out resolve to the component's fields.
+        anim->clip = "attack";
+        CHECK(anim->ActiveClip().columns == 2 && anim->ActiveClip().rows == 2);
+        CHECK(anim->ActiveClip().fps == 2.0f && anim->ActiveClip().loop == false);
+        anim->clip = "bars";
+        CHECK(anim->ActiveClip().columns == 2 && anim->ActiveClip().rows == 1);
+        CHECK(anim->ActiveClip().firstFrame == 0);
+        CHECK(anim->ActiveClip().loop == true);          // `bars` does not say
+    });
+
+    // --- a name that matches nothing falls back to the fields ---------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        anim->clip = "nope";
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(shows(engine, 0));          // the component's first frame
+        engine.Update(0.5f);
+        CHECK(shows(engine, 1));          // and the component's own 2 fps
+        CHECK(anim->ClipCount() == 3);    // five entries, three of them clips
+        CHECK(anim->ClipName(0) == "walk");
+        CHECK(anim->ClipName(1) == "attack");
+        CHECK(anim->ClipName(2) == "bars");
+        CHECK(anim->ClipName(3).empty());
+        CHECK(anim->FindClip("walk") != nullptr);
+        CHECK(anim->FindClip("nope") == nullptr);
+        CHECK(anim->FindClip("") == nullptr);
+        CHECK(anim->ActiveClip().firstFrame == 0 && anim->ActiveClip().lastFrame == -1);
+    });
+
+    // --- the table survives a scene file ------------------------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        anim->clip = "attack";
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(shows(engine, 2));
+        const std::string json = engine.SerializeSceneJson();
+        Engine restored;
+        restored.SetProjectRoot(dir);
+        restored.SetViewportSize(128, 128);
+        CHECK(restored.RestoreSceneJson(json));
+        restored.Play();
+        // The drawn cell comes from the restored table and the restored name.
+        CHECK(shows(restored, 2));
+        GameObject* go = restored.scene().FindByName("Sprite");
+        CHECK(go != nullptr);
+        auto* ra = go ? go->GetComponent<SpriteAnimator>() : nullptr;
+        CHECK(ra != nullptr);
+        CHECK(ra && ra->ClipCount() == 3);
+        CHECK(ra && ra->ClipName(1) == "attack");
+        CHECK(ra && ra->clip == "attack");
+        CHECK(ra && ra->ActiveClip().loop == false);
+    });
+}
+
 // Texture cache: per-slot color space, byte-budgeted LRU eviction, and mtime
 // based reload.
 static void TestTextureCache() {
@@ -3249,6 +3444,7 @@ int main() {
     TestSpriteAtlas();
     TestSpriteCullBounds();
     TestSpriteAnimation();
+    TestSpriteClips();
     TestTextureMips();
     TestParentedPhysics();
     TestTriggerAndEnabled();

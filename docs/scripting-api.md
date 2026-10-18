@@ -247,6 +247,30 @@ anim->loop = true;
 - **Time, not frames.** The frame follows accumulated play time, not the host frame count: the same sequence of `Update(dt)` calls always lands on the same frame, and a stall longer than a whole cycle costs a cycle, not a spin. At 60 fps one `runtime.step` is exactly one frame, which is how a batch script walks a clip.
 - **Scrubbing.** `frame` is an inspector field, so setting it draws that cell — a batch can render any frame without simulating time. `playing = false` freezes the animation, `loop = false` holds the last cell instead of wrapping, a frame outside the clip is drawn as the nearest end of it, and `anim->Restart()` returns to `firstFrame` at zero frame time.
 
+### Naming the animations
+
+A character is several animations on one sheet, so `clips` is a table of them and `clip` names the one playing. Each entry carries a `name` and any of `columns`, `rows`, `firstFrame`, `lastFrame`, `fps`, `loop`; a key an entry leaves out comes from the matching field on the component, and `clip` naming no entry means those fields are the whole animation — so an animator with no table behaves exactly as the fields say.
+
+```json
+"clips": [
+  { "name": "idle",   "firstFrame": 0, "lastFrame": 0, "fps": 4 },
+  { "name": "walk",   "firstFrame": 1, "lastFrame": 4, "fps": 10 },
+  { "name": "attack", "firstFrame": 5, "lastFrame": 7, "fps": 12, "loop": false }
+]
+```
+
+```cpp
+anim->clip = "attack";                       // a script, the CLI or the inspector
+// the same thing from the CLI, in one call:
+// cairn component.setProps --id 5 --type SpriteAnimator --props '{"clip":"attack"}'
+```
+
+- **A clip is an override.** `attack` above inherits the component's `columns`, `rows` and `loop` is given, so a whole character shares one grid; the entry that needs a different one says so (`{"name": "bars", "columns": 2, "rows": 1}`).
+- **Switching draws the new clip's first cell immediately.** `DrawnCell` is the one answer to "which cell is on screen", and it is the new clip's first cell until the next tick has restarted the clip — so `component.setProps {"clip": "attack"}` followed by a screenshot is that clip's first frame, with no half-elapsed time carried over from the clip before it.
+- **A clip's own `fps` and `loop` win** over the component's, which is what makes `attack` play at 12 fps and hold its last cell while `walk` wraps at 10.
+- **The table is a `Json` property** (`EditorPropKind::Json`), so it travels through the scene file, `component.add` / `component.setProps` / `component.get` and the inspector's JSON field unchanged. `ClipCount()`, `ClipName(i)`, `FindClip(name)` and `ActiveClip()` read a resolved clip from a script; entries that are not objects, or have no name, are skipped rather than mistaken for clips.
+- **Not yet a state machine.** Transitions, conditions and parameters do not exist: a script decides when to write `clip`, and there is no per-frame duration or animation event inside a clip.
+
 > **Orientation (0.1.23).** Image space is y-down everywhere in the engine: `image.*` draws `y = 0` at the top, and a texture's row 0 is `v = 0`. The 2D quad maps the image's top row to the **top** of the sprite, so what you draw is what you see — `flipY` is a plain "turn the picture upside down". Until 0.1.23 both the sprite and the glyph quad handed their top corners `v = 1`, which mirrored every sprite and every word (including the bundled `project-2d` template's title text).
 
 ## Inspector fields
@@ -268,3 +292,5 @@ void DescribeProps(ScriptMeta& meta) override {
     meta.Add("target",  PropType::Object, "");  // GameObject reference, stored as its GUID
 }
 ```
+
+A script's properties stop there. Engine components have one kind a script cannot declare — `EditorPropKind::Json`, a structured value the engine stores and passes through without interpreting it (`SpriteAnimator::clips` is one) — so it appears in `component.schema` for an engine component while `PropType` has no matching value.

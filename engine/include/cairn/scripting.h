@@ -401,12 +401,18 @@ public:
 // ---------------------------------------------------------------------------
 // SpriteAnimator - steps a SpriteRenderer through the cells of a sheet.
 //
-// The whole sheet is a `columns` x `rows` grid read left to right, top to
-// bottom - the order image.stamp lays frames out in. Cells are cut out of the
-// sprite's own uvRect, so a sprite that points at one row of a bigger sheet
-// animates that row. `frame` is the current cell and is what the renderer
-// draws while this component is enabled; setting it from a script or the CLI
-// scrubs the animation.
+// The sheet is a `columns` x `rows` grid read left to right, top to bottom -
+// the order image.stamp lays frames out in. Cells are cut out of the sprite's
+// own uvRect, so a sprite that points at one row of a bigger sheet animates
+// that row. `frame` is the current cell and is what the renderer draws while
+// this component is enabled; setting it from a script or the CLI scrubs the
+// animation.
+//
+// A character is more than one animation, so several can be named: `clips` is a
+// table of {"name", "columns", "rows", "firstFrame", "lastFrame", "fps",
+// "loop"} entries and `clip` names the one playing. A key an entry leaves out
+// falls back to the matching field above, and `clip` naming nothing - or naming
+// no entry in the table - means those fields are the whole animation.
 //
 // Play time is accumulated from the engine's Update(dt), and a frame is a pure
 // function of the accumulated dt sequence: the same series of Update calls
@@ -424,40 +430,147 @@ public:
     bool playing = true;     // false freezes on `frame`
     int frame = 0;           // current cell, row-major from the top-left
 
-    // Runtime state, not a reflected field: how far into the current frame the
-    // accumulated play time sits.
-    float frameTime = 0.0f;
+    // Named clips, tried in order. Each entry overrides the fields above; the
+    // table is a Json array so a script, the CLI and the scene file all carry it
+    // the same way.
+    Json clips = Json::MakeArray();
+    std::string clip;        // the clip playing; "" means the fields above
 
-    int CellCount() const {
-        const int c = columns > 0 ? columns : 1;
-        const int r = rows > 0 ? rows : 1;
-        return c * r;
+    // Runtime state, not reflected fields: how far into the current frame the
+    // accumulated play time sits, and which clip that state belongs to.
+    float frameTime = 0.0f;
+    std::string activeClip;
+
+    // One animation, resolved: a clip's own keys with the fields above filling
+    // in whatever it left out.
+    struct Clip {
+        int columns = 1;
+        int rows = 1;
+        int firstFrame = 0;
+        int lastFrame = -1;
+        float fps = 8.0f;
+        bool loop = true;
+    };
+
+    // A usable entry is an object with a non-empty name; anything else in the
+    // array is skipped rather than taken for a clip.
+    static bool IsClipEntry(const Json& e) {
+        return e.isObject() && !e["name"].asString().empty();
     }
-    int FirstCell() const { return firstFrame < 0 ? 0 : ClampCell(firstFrame); }
-    int LastCell() const { return lastFrame < 0 ? CellCount() - 1 : ClampCell(lastFrame); }
-    int FrameCount() const {
-        const int n = LastCell() - FirstCell() + 1;
+
+    // The entry `name` names, or nullptr when the table holds no such clip.
+    const Json* FindClip(const std::string& name) const {
+        if (name.empty() || !clips.isArray()) return nullptr;
+        for (const Json& e : clips.arrayItems()) {
+            if (IsClipEntry(e) && e["name"].asString() == name) return &e;
+        }
+        return nullptr;
+    }
+
+    int ClipCount() const {
+        int n = 0;
+        if (clips.isArray()) {
+            for (const Json& e : clips.arrayItems()) {
+                if (IsClipEntry(e)) n++;
+            }
+        }
+        return n;
+    }
+
+    // Name of the i-th usable entry, or "" when the table has none that far in.
+    std::string ClipName(int i) const {
+        if (!clips.isArray()) return std::string();
+        int n = 0;
+        for (const Json& e : clips.arrayItems()) {
+            if (!IsClipEntry(e)) continue;
+            if (n++ == i) return e["name"].asString();
+        }
+        return std::string();
+    }
+
+    // The animation to play now: the clip `clip` names, key by key over the
+    // component's own fields, or just those fields when it names nothing.
+    Clip ActiveClip() const {
+        Clip c;
+        c.columns = columns;
+        c.rows = rows;
+        c.firstFrame = firstFrame;
+        c.lastFrame = lastFrame;
+        c.fps = fps;
+        c.loop = loop;
+        const Json* e = FindClip(clip);
+        if (!e) return c;
+        // at() is null for a key the entry leaves out, and each accessor takes
+        // the resolved value as its default.
+        c.columns = (*e)["columns"].asInt(c.columns);
+        c.rows = (*e)["rows"].asInt(c.rows);
+        c.firstFrame = (*e)["firstFrame"].asInt(c.firstFrame);
+        c.lastFrame = (*e)["lastFrame"].asInt(c.lastFrame);
+        c.fps = (*e)["fps"].asFloat(c.fps);
+        c.loop = (*e)["loop"].asBool(c.loop);
+        return c;
+    }
+
+    // --- clip arithmetic, on a resolved clip -------------------------------
+    static int CellCountOf(const Clip& c) {
+        const int cc = c.columns > 0 ? c.columns : 1;
+        const int rr = c.rows > 0 ? c.rows : 1;
+        return cc * rr;
+    }
+    static int ClampCellOf(const Clip& c, int v) {
+        const int last = CellCountOf(c) - 1;
+        return v < 0 ? 0 : (v > last ? last : v);
+    }
+    static int FirstCellOf(const Clip& c) {
+        return c.firstFrame < 0 ? 0 : ClampCellOf(c, c.firstFrame);
+    }
+    static int LastCellOf(const Clip& c) {
+        return c.lastFrame < 0 ? CellCountOf(c) - 1 : ClampCellOf(c, c.lastFrame);
+    }
+    static int FrameCountOf(const Clip& c) {
+        const int n = LastCellOf(c) - FirstCellOf(c) + 1;
         return n > 0 ? n : 1;
+    }
+    static int ClampClipOf(const Clip& c, int v) {
+        const int first = FirstCellOf(c);
+        const int last = LastCellOf(c);
+        return v < first ? first : (v > last ? last : v);
+    }
+
+    // --- the clip being played ---------------------------------------------
+    int CellCount() const { return CellCountOf(ActiveClip()); }
+    int FirstCell() const { return FirstCellOf(ActiveClip()); }
+    int LastCell() const { return LastCellOf(ActiveClip()); }
+    int FrameCount() const { return FrameCountOf(ActiveClip()); }
+
+    // The cell the renderer draws. A switch to another clip shows the new clip's
+    // first cell before any tick has happened, so writing `clip` (from a script
+    // or component.setProps) draws that clip exactly, with no half-advanced
+    // frame in between; a frame outside the clip is drawn as the nearest end of
+    // it, because the clip is the range of cells that exists.
+    int DrawnCell() const {
+        const Clip c = ActiveClip();
+        if (clip != activeClip) return FirstCellOf(c);
+        return ClampClipOf(c, frame);
     }
 
     // uvRect of cell `f` inside `region` (the sprite's uvRect): cells are equal
-    // slices of the region, `f` counted row-major from its top-left corner. A
-    // frame outside the clip is drawn as the nearest end of it - the clip is the
-    // range of cells that exists - so an animator whose clip starts at 2 shows
-    // cell 2 before anything has advanced it.
+    // slices of the region, `f` counted row-major from its top-left corner.
     Vec4 CellRect(int f, const Vec4& region) const {
-        const int cols = columns > 0 ? columns : 1;
-        const int rows_ = rows > 0 ? rows : 1;
+        const Clip c = ActiveClip();
+        const int cols = c.columns > 0 ? c.columns : 1;
+        const int rows_ = c.rows > 0 ? c.rows : 1;
         const float cw = region.z / (float)cols;
         const float ch = region.w / (float)rows_;
-        const int c = ClampClip(ClampCell(f));
-        const int cx = c % cols;
-        const int cy = c / cols;
+        const int cell = ClampClipOf(c, ClampCellOf(c, f));
+        const int cx = cell % cols;
+        const int cy = cell / cols;
         return Vec4(region.x + (float)cx * cw, region.y + (float)cy * ch, cw, ch);
     }
 
-    // Back to the first cell of the clip, at zero frame time.
+    // Back to the first cell of the current clip, at zero frame time.
     void Restart() {
+        activeClip = clip;
         frame = FirstCell();
         frameTime = 0.0f;
     }
@@ -466,9 +579,11 @@ public:
     // is capped at a cycle: wrapping or clamping makes the rest a no-op, and it
     // keeps the loop below bounded.
     void AdvanceAnimation(float dt) {
-        const int count = FrameCount();
-        if (!playing || count <= 1 || fps <= 0.0f) return;
-        const float step = 1.0f / fps;
+        if (clip != activeClip) Restart();   // a new clip starts at its own first cell
+        const Clip c = ActiveClip();
+        const int count = FrameCountOf(c);
+        if (!playing || count <= 1 || c.fps <= 0.0f) return;
+        const float step = 1.0f / c.fps;
         frameTime += dt;
         if (frameTime > step * (float)count) frameTime = step * (float)count;
         int n = 0;
@@ -480,27 +595,17 @@ public:
     }
 
     void StepFrames(int n) {
-        const int first = FirstCell();
-        const int count = FrameCount();
-        int f = ClampClip(frame) - first + n;
-        if (loop) f = ((f % count) + count) % count;
+        const Clip c = ActiveClip();
+        const int first = FirstCellOf(c);
+        const int count = FrameCountOf(c);
+        int f = ClampClipOf(c, frame) - first + n;
+        if (c.loop) f = ((f % count) + count) % count;
         else f = f < 0 ? 0 : (f > count - 1 ? count - 1 : f);
         frame = first + f;
     }
 
     const char* TypeName() const override { return "SpriteAnimator"; }
     ComponentTypeId TypeId() const override { return ComponentTypeId::SpriteAnimator; }
-
-private:
-    int ClampCell(int c) const {
-        const int last = CellCount() - 1;
-        return c < 0 ? 0 : (c > last ? last : c);
-    }
-    int ClampClip(int c) const {
-        const int first = FirstCell();
-        const int last = LastCell();
-        return c < first ? first : (c > last ? last : c);
-    }
 };
 
 // ---------------------------------------------------------------------------
