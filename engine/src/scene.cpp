@@ -128,6 +128,7 @@ bool GameObject::AddComponentByName(const std::string& typeName) {
     else if (typeName == "Light") owned.reset(new (std::nothrow) LightComponent());
     else if (typeName == "MeshRenderer") owned.reset(new (std::nothrow) MeshRenderer());
     else if (typeName == "SpriteRenderer") owned.reset(new (std::nothrow) SpriteRenderer());
+    else if (typeName == "SpriteAnimator") owned.reset(new (std::nothrow) SpriteAnimator());
     else if (typeName == "TextRenderer") owned.reset(new (std::nothrow) TextRenderer());
     else if (typeName == "RigidBody") owned.reset(new (std::nothrow) RigidBody());
     else if (typeName == "BoxCollider") owned.reset(new (std::nothrow) BoxCollider());

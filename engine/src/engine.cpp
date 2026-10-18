@@ -651,6 +651,16 @@ void Engine::Update(float dt) {
                 }
             }
         }
+        {
+            // Sprite animation advances on play time, after the scripts that
+            // could have retimed or restarted it.
+            CAIRN_PROFILE("animation");
+            for (const auto& go : scene_->objects) {
+                if (!go->ActiveInHierarchy()) continue;
+                auto* anim = go->GetComponent<SpriteAnimator>();
+                if (anim && anim->enabled) anim->AdvanceAnimation(scaled);
+            }
+        }
         scene_->ProcessDeferred();
     }
     // Expire debug lines quickly (they render for the following frame).

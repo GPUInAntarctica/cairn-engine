@@ -120,7 +120,7 @@ cairn --project ./game exec.run --file steps.jsonl   # 多步批量，共用一�
 
 同一套循环也可以无人值守地驱动图像编辑器：`image.preview` 把画面印成文本、`image.info` 印出关于它的数字，于是精灵和瓦片可以在不打开 PNG 的前提下画、检查、修正。[Agent 绘画教程](docs/drawing.md) 把两种情况各走了一遍。
 
-画好的精灵也能进场景渲染：正交 `Camera` 加一个 `SpriteRenderer`（像素画开 `pixelPerfect`）就把它摆到画面里，`render.screenshot` 把这一帧写回 PNG，`image.open` 与 `image.pixel` 再读回来——于是"画 → 渲染 → 看"也闭环了。`image.stamp` 拼出来的图集配上 `SpriteRenderer.uvRect` / `pivot` 就能只画其中一帧，于是 agent 画出来的一张图本身就是一条动画。2D 画面在**两条路径**上都被钉住——一张 64×64 四象限精灵在软件光栅器和 GPU 上逐字节一致——而且图像空间从头到尾是"y 向下"，你画在图上的那行就是画面上的那行（0.1.22–0.1.26）。
+画好的精灵也能进场景渲染：正交 `Camera` 加一个 `SpriteRenderer`（像素画开 `pixelPerfect`）就把它摆到画面里，`render.screenshot` 把这一帧写回 PNG，`image.open` 与 `image.pixel` 再读回来——于是"画 → 渲染 → 看"也闭环了。`image.stamp` 拼出来的图集配上 `SpriteRenderer.uvRect` / `pivot` 就能只画其中一帧，于是 agent 画出来的一张图本身就是一条动画；再加一个 `SpriteAnimator` 就能把这条动画放起来——`columns` × `rows` 的格子、帧区间、`fps` 与循环，由播放时间驱动，同一串 update 必然落在同一帧。2D 画面在**两条路径**上都被钉住——一张 64×64 四象限精灵在软件光栅器和 GPU 上逐字节一致——而且图像空间从头到尾是"y 向下"，你画在图上的那行就是画面上的那行（0.1.22–0.1.27）。
 
 ### 一条完整流程
 
@@ -234,7 +234,7 @@ docs/           文档
 
 ## 状态
 
-Cairn 当前版本 **0.1.26**——是个能用但仍早的起点。GPU 后端是默认路径但还年轻；软件光栅化器是参考实现，测试套件也固定跑它，因此**两条路径之间任何渲染差异都算 GPU 后端的 bug，而不是有意为之**。里程碑历史见 [CHANGELOG](CHANGELOG.md)，提 PR 前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+Cairn 当前版本 **0.1.27**——是个能用但仍早的起点。GPU 后端是默认路径但还年轻；软件光栅化器是参考实现，测试套件也固定跑它，因此**两条路径之间任何渲染差异都算 GPU 后端的 bug，而不是有意为之**。里程碑历史见 [CHANGELOG](CHANGELOG.md)，提 PR 前请先读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 许可证
 

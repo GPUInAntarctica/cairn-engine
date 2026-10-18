@@ -17,6 +17,7 @@ const KIND_ICONS = {
     Camera: 'camera',
     Light: 'light',
     SpriteRenderer: 'sprite',
+    SpriteAnimator: 'sprite',
     TextRenderer: 'text',
     Script: 'script',
     MeshRenderer: 'cube',

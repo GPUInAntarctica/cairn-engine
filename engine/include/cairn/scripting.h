@@ -54,6 +54,7 @@ class CameraComponent;
 class LightComponent;
 class MeshRenderer;
 class SpriteRenderer;
+class SpriteAnimator;
 class TextRenderer;
 class RigidBody;
 class BoxCollider;
@@ -124,6 +125,8 @@ enum class ComponentTypeId : int {
     HingeJoint, FixedJoint,
     // Added in 0.1.19.
     MeshCollider,
+    // Added in 0.1.27.
+    SpriteAnimator,
     Other = 99,
 };
 
@@ -140,6 +143,7 @@ CAIRN_COMPONENT_TYPE(CameraComponent, Camera)
 CAIRN_COMPONENT_TYPE(LightComponent, Light)
 CAIRN_COMPONENT_TYPE(MeshRenderer, MeshRenderer)
 CAIRN_COMPONENT_TYPE(SpriteRenderer, SpriteRenderer)
+CAIRN_COMPONENT_TYPE(SpriteAnimator, SpriteAnimator)
 CAIRN_COMPONENT_TYPE(TextRenderer, TextRenderer)
 CAIRN_COMPONENT_TYPE(RigidBody, RigidBody)
 CAIRN_COMPONENT_TYPE(BoxCollider, BoxCollider)
@@ -392,6 +396,111 @@ public:
 
     const char* TypeName() const override { return "SpriteRenderer"; }
     ComponentTypeId TypeId() const override { return ComponentTypeId::SpriteRenderer; }
+};
+
+// ---------------------------------------------------------------------------
+// SpriteAnimator - steps a SpriteRenderer through the cells of a sheet.
+//
+// The whole sheet is a `columns` x `rows` grid read left to right, top to
+// bottom - the order image.stamp lays frames out in. Cells are cut out of the
+// sprite's own uvRect, so a sprite that points at one row of a bigger sheet
+// animates that row. `frame` is the current cell and is what the renderer
+// draws while this component is enabled; setting it from a script or the CLI
+// scrubs the animation.
+//
+// Play time is accumulated from the engine's Update(dt), and a frame is a pure
+// function of the accumulated dt sequence: the same series of Update calls
+// always shows the same frame, which is what makes an animation pinnable by a
+// test and reproducible in a batch run.
+// ---------------------------------------------------------------------------
+class SpriteAnimator : public Component {
+public:
+    int columns = 1;         // cells across the sheet (or across the sprite's uvRect)
+    int rows = 1;            // cells down the sheet
+    int firstFrame = 0;      // first cell of the clip; -1 means the last cell
+    int lastFrame = -1;      // inclusive; -1 means the last cell
+    float fps = 8.0f;        // frames per second of play time
+    bool loop = true;        // wrap at the end instead of holding the last frame
+    bool playing = true;     // false freezes on `frame`
+    int frame = 0;           // current cell, row-major from the top-left
+
+    // Runtime state, not a reflected field: how far into the current frame the
+    // accumulated play time sits.
+    float frameTime = 0.0f;
+
+    int CellCount() const {
+        const int c = columns > 0 ? columns : 1;
+        const int r = rows > 0 ? rows : 1;
+        return c * r;
+    }
+    int FirstCell() const { return firstFrame < 0 ? 0 : ClampCell(firstFrame); }
+    int LastCell() const { return lastFrame < 0 ? CellCount() - 1 : ClampCell(lastFrame); }
+    int FrameCount() const {
+        const int n = LastCell() - FirstCell() + 1;
+        return n > 0 ? n : 1;
+    }
+
+    // uvRect of cell `f` inside `region` (the sprite's uvRect): cells are equal
+    // slices of the region, `f` counted row-major from its top-left corner. A
+    // frame outside the clip is drawn as the nearest end of it - the clip is the
+    // range of cells that exists - so an animator whose clip starts at 2 shows
+    // cell 2 before anything has advanced it.
+    Vec4 CellRect(int f, const Vec4& region) const {
+        const int cols = columns > 0 ? columns : 1;
+        const int rows_ = rows > 0 ? rows : 1;
+        const float cw = region.z / (float)cols;
+        const float ch = region.w / (float)rows_;
+        const int c = ClampClip(ClampCell(f));
+        const int cx = c % cols;
+        const int cy = c / cols;
+        return Vec4(region.x + (float)cx * cw, region.y + (float)cy * ch, cw, ch);
+    }
+
+    // Back to the first cell of the clip, at zero frame time.
+    void Restart() {
+        frame = FirstCell();
+        frameTime = 0.0f;
+    }
+
+    // Advance by `dt` seconds of play time. A stall longer than one full cycle
+    // is capped at a cycle: wrapping or clamping makes the rest a no-op, and it
+    // keeps the loop below bounded.
+    void AdvanceAnimation(float dt) {
+        const int count = FrameCount();
+        if (!playing || count <= 1 || fps <= 0.0f) return;
+        const float step = 1.0f / fps;
+        frameTime += dt;
+        if (frameTime > step * (float)count) frameTime = step * (float)count;
+        int n = 0;
+        while (frameTime >= step && n < count) {
+            frameTime -= step;
+            n++;
+        }
+        if (n > 0) StepFrames(n);
+    }
+
+    void StepFrames(int n) {
+        const int first = FirstCell();
+        const int count = FrameCount();
+        int f = ClampClip(frame) - first + n;
+        if (loop) f = ((f % count) + count) % count;
+        else f = f < 0 ? 0 : (f > count - 1 ? count - 1 : f);
+        frame = first + f;
+    }
+
+    const char* TypeName() const override { return "SpriteAnimator"; }
+    ComponentTypeId TypeId() const override { return ComponentTypeId::SpriteAnimator; }
+
+private:
+    int ClampCell(int c) const {
+        const int last = CellCount() - 1;
+        return c < 0 ? 0 : (c > last ? last : c);
+    }
+    int ClampClip(int c) const {
+        const int first = FirstCell();
+        const int last = LastCell();
+        return c < first ? first : (c > last ? last : c);
+    }
 };
 
 // ---------------------------------------------------------------------------

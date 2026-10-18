@@ -25,6 +25,7 @@ const COMP_TITLE = {
     Light: 'comp.light',
     MeshRenderer: 'comp.meshRenderer',
     SpriteRenderer: 'comp.spriteRenderer',
+    SpriteAnimator: 'comp.spriteAnimator',
     TextRenderer: 'comp.textRenderer',
     RigidBody: 'comp.rigidBody',
     BoxCollider: 'comp.boxCollider',
@@ -262,7 +263,7 @@ export class Inspector {
 
     addComponentMenu(ev, ent) {
         import('./contextmenu.js').then(({ showContextMenu }) => {
-            const names = ['Camera', 'Light', 'MeshRenderer', 'SpriteRenderer', 'TextRenderer',
+            const names = ['Camera', 'Light', 'MeshRenderer', 'SpriteRenderer', 'SpriteAnimator', 'TextRenderer',
                 'RigidBody', 'BoxCollider', 'SphereCollider', 'Collider2D',
                 'CapsuleCollider', 'MeshCollider', 'CharacterController', 'DistanceJoint',
                 'HingeJoint', 'FixedJoint', 'Script'];

@@ -364,7 +364,7 @@ read what a sprite is actually made of.
 
 | Command | Arguments | Description |
 | --- | --- | --- |
-| `component.add` | `--id` (int, required)<br>`--type` (enum, required, one of Camera \| Light \| MeshRenderer \| SpriteRenderer \| TextRenderer \| RigidBody \| BoxCollider \| SphereCollider \| Collider2D \| CapsuleCollider \| MeshCollider \| CharacterController \| DistanceJoint \| HingeJoint \| FixedJoint \| Script)<br>`--props` (json) | Add a component to an entity (properties get their defaults). |
+| `component.add` | `--id` (int, required)<br>`--type` (enum, required, one of Camera \| Light \| MeshRenderer \| SpriteRenderer \| SpriteAnimator \| TextRenderer \| RigidBody \| BoxCollider \| SphereCollider \| Collider2D \| CapsuleCollider \| MeshCollider \| CharacterController \| DistanceJoint \| HingeJoint \| FixedJoint \| Script)<br>`--props` (json) | Add a component to an entity (properties get their defaults). |
 | `component.enable` | `--id` (int, required)<br>`--type` (string, required)<br>`--enabled` (bool, default true) | Enable or disable a component. |
 | `component.get` | `--id` (int, required)<br>`--type` (string, required) | Read one component with all its property values and editor metadata. |
 | `component.getProp` | `--id` (int, required)<br>`--type` (string, required)<br>`--prop` (string, required) | Read a single component property value. |

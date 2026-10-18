@@ -1730,6 +1730,49 @@ check(dominant(cullPx(4, 4), 0), 'and the top-left corner', cullPx(4, 4));
 check(dominant(cullPx(60, 60), 0), 'and the bottom-right corner', cullPx(60, 60));
 
 // ---------------------------------------------------------------------------
+console.log('cli: sprite animation (a cell per frame, advanced by runtime.step)');
+// ---------------------------------------------------------------------------
+// The sheet an agent draws is the animation: a SpriteAnimator walks the cells of
+// the sprite's grid at `fps` and the renderer draws the current one. One
+// `runtime.step` is exactly 1/60 s, so at 60 fps one step is exactly one frame -
+// the same frames in the same order on every run.
+const animShot = i => path.join(scratch, `anim${i}.png`);
+const animSteps = [{ command: 'runtime.play' }];
+for (let i = 0; i < 5; i++) {
+    if (i > 0) animSteps.push({ command: 'runtime.step' });
+    animSteps.push({ command: 'render.screenshot', args: { out: animShot(i), mode: 'game', width: 64, height: 64 }, id: `shot${i}` });
+}
+const animRun = runProjectBatch(writeBatch('anim.jsonl', [
+    { command: 'image.new', args: { width: 32, height: 32, background: 'transparent' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 16, height: 16, filled: true, color: '#ff0000' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 0, width: 16, height: 16, filled: true, color: '#00ff00' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 16, width: 16, height: 16, filled: true, color: '#0000ff' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 16, width: 16, height: 16, filled: true, color: '#ffffff' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/frames.png' }, id: 'sheet' },
+    { command: 'scene.new', args: { name: 'Anim' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    ...atlasCam(1),
+    { command: 'entity.create', args: { name: 'Sprite' }, id: 'sp' },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteRenderer', props: {
+        texturePath: 'Assets/Sprites/frames.png', pixelsPerUnit: 16, pixelPerfect: true } } },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteAnimator', props: {
+        columns: 2, rows: 2, fps: 60 } } },
+    ...animSteps,
+    // Scrub: `frame` is what the renderer reads, so a screenshot with no step in
+    // between is that exact cell.
+    { command: 'component.setProps', args: { id: '$ref:sp', type: 'SpriteAnimator', props: { frame: 2 } } },
+    { command: 'render.screenshot', args: { out: animShot(5), mode: 'game', width: 64, height: 64 }, id: 'scrub' },
+]));
+check(animRun.lines.every(l => l.ok !== false), 'the animation batch runs clean', animRun.stdout + animRun.stderr);
+const animPx = (i, x, y) => expectOk(['--image', animShot(i), 'image.pixel', '--x', String(x), '--y', String(y)]);
+check(dominant(animPx(0, 32, 32), 0), 'the first cell is the one drawn before time passes', animPx(0, 32, 32));
+check(dominant(animPx(1, 32, 32), 1), 'one step shows the next cell', animPx(1, 32, 32));
+check(dominant(animPx(2, 32, 32), 2), 'the third cell is on the second row', animPx(2, 32, 32));
+check(whitePx(animPx(3, 32, 32)), 'the fourth cell is the last one of the sheet', animPx(3, 32, 32));
+check(dominant(animPx(4, 32, 32), 0), 'the clip loops back to the first cell', animPx(4, 32, 32));
+check(dominant(animPx(5, 32, 32), 2), 'setting frame scrubs to that cell', animPx(5, 32, 32));
+
+// ---------------------------------------------------------------------------
 console.log('cli: export + preferences');
 // ---------------------------------------------------------------------------
 const prefs = expectOk(['project.preferences', '--set', '{"language":"en"}']);

@@ -1746,6 +1746,145 @@ static void TestSpriteCullBounds() {
     run(1, 0, true, 0.1f, Vec3(1.2f, 0, 0), Vec2(0.5f, 0.5f));
 }
 
+// Sprite animation: a SpriteAnimator steps a sprite through the cells of its
+// sheet. Frame order, looping and the clip range are all read back as the colour
+// of the cell that must be on screen, and time is driven explicitly with
+// Update(dt) so a frame is a function of the dt sequence (and of nothing else) -
+// which is the property a batch run needs. The cells are cut out of the sprite's
+// own uvRect, so the same texture can animate one row of a taller sheet.
+static void TestSpriteAnimation() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-anim").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/frames.bmp";
+    // Reading order: red, green / blue, white - one distinct colour per cell.
+    WriteTestBmpSheet(dir + "/" + tex, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255);
+    const int sheet[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};
+
+    auto px = [](Engine& engine, int x, int y) {
+        const FrameTarget& t = engine.frame();
+        const uint8_t* p = &t.color[((size_t)y * (size_t)t.width + (size_t)x) * 4];
+        return std::array<int, 3>{(int)p[0], (int)p[1], (int)p[2]};
+    };
+    // Renders and reports whether the frame shows cell `f` at the sprite's
+    // middle: the sprite is one cell of the sheet (2 world units at 4 px/unit)
+    // centred in a 4-unit view, so pixel 64,64 is inside it whatever the cell.
+    auto shows = [&](Engine& engine, int f) {
+        engine.RenderGameFrame();
+        const std::array<int, 3> c = px(engine, 64, 64);
+        return std::abs(c[0] - sheet[f][0]) < 40 && std::abs(c[1] - sheet[f][1]) < 40 &&
+               std::abs(c[2] - sheet[f][2]) < 40;
+    };
+    auto build = [&](Engine& engine, int backend, Vec4 rect, int columns, int rows) {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(128, 128);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        scene.ambient = Color(1, 1, 1, 1);
+        scene.tonemap = 0;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 2.0f;   // 4x4 units on screen: 32 px per unit
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        GameObject* go = scene.CreateEntity("Sprite");
+        auto* sr = go->AddComponent<SpriteRenderer>();
+        sr->texturePath = tex;
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = 4.0f;      // an 8-texel cell -> 2 units
+        sr->uvRect = rect;
+        auto* anim = go->AddComponent<SpriteAnimator>();
+        anim->columns = columns;
+        anim->rows = rows;
+        anim->fps = 2.0f;              // 0.5 s per frame
+        return anim;
+    };
+    auto bothBackends = [&](const std::function<void(int, const char*)>& one) {
+        one(2, "software");
+        if (VulkanBackendAvailable()) one(1, "vulkan");
+    };
+
+    // --- the whole sheet, one frame per 0.5 s, looping ---------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend, Vec4(0, 0, 1, 1), 2, 2);
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(shows(engine, 0));          // nothing has advanced yet
+        engine.Update(0.5f);
+        CHECK(shows(engine, 1));
+        engine.Update(0.5f);
+        CHECK(shows(engine, 2));
+        engine.Update(0.5f);
+        CHECK(shows(engine, 3));
+        engine.Update(0.5f);
+        CHECK(shows(engine, 0));          // 2 fps over 2 s wraps back to the start
+        // Half a frame is not a frame: time accumulates, it does not round.
+        engine.Update(0.24f);
+        CHECK(shows(engine, 0));
+        engine.Update(0.26f);
+        CHECK(shows(engine, 1));
+        // `frame` is what the renderer reads, so setting it scrubs.
+        anim->frame = 2;
+        CHECK(shows(engine, 2));
+        // A paused animator keeps its frame however much time passes.
+        anim->playing = false;
+        engine.Update(3.0f);
+        CHECK(shows(engine, 2));
+        // Without looping it holds the last frame instead of wrapping.
+        anim->playing = true;
+        anim->loop = false;
+        anim->Restart();
+        CHECK(shows(engine, 0));
+        engine.Update(2.0f);
+        CHECK(shows(engine, 3));
+        engine.Update(2.0f);
+        CHECK(shows(engine, 3));
+    });
+
+    // --- a clip range picks part of the sheet ------------------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend, Vec4(0, 0, 1, 1), 2, 2);
+        anim->firstFrame = 2;
+        anim->lastFrame = 3;              // the bottom row only
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(shows(engine, 2));
+        engine.Update(0.5f);
+        CHECK(shows(engine, 3));
+        engine.Update(0.5f);
+        CHECK(shows(engine, 2));
+        // A one-cell clip has nothing to step.
+        anim->lastFrame = 2;
+        engine.Update(0.5f);
+        CHECK(shows(engine, 2));
+    });
+
+    // --- cells are cut out of the sprite's rect, not the whole texture ------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        // The sprite draws the bottom row of a 2x2 sheet and animates it: the
+        // cells are blue and white, not the red/green of the sheet's first row.
+        SpriteAnimator* anim = build(engine, backend, Vec4(0, 0.5f, 1, 0.5f), 2, 1);
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(shows(engine, 2));
+        engine.Update(0.5f);
+        CHECK(shows(engine, 3));
+        engine.Update(0.5f);
+        CHECK(shows(engine, 2));
+        // The cell size follows that rect too: half a texture tall, one row of
+        // cells, so a cell is half the texture.
+        CHECK(anim->CellRect(1, Vec4(0, 0.5f, 1, 0.5f)).w == 0.5f);
+    });
+}
+
 // Texture cache: per-slot color space, byte-budgeted LRU eviction, and mtime
 // based reload.
 static void TestTextureCache() {
@@ -3109,6 +3248,7 @@ int main() {
     TestSpriteNormalOrientation();
     TestSpriteAtlas();
     TestSpriteCullBounds();
+    TestSpriteAnimation();
     TestTextureMips();
     TestParentedPhysics();
     TestTriggerAndEnabled();

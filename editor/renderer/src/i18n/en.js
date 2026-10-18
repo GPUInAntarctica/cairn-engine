@@ -76,6 +76,7 @@ export const dict = {
     'comp.light': 'Light',
     'comp.meshRenderer': 'Mesh Renderer',
     'comp.spriteRenderer': 'Sprite Renderer',
+    'comp.spriteAnimator': 'Sprite Animator',
     'comp.textRenderer': 'Text Renderer',
     'comp.rigidBody': 'Rigid Body',
     'comp.boxCollider': 'Box Collider',

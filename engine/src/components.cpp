@@ -179,6 +179,20 @@ const std::vector<PropertyDef>& TextRendererDefs() {
     return defs;
 }
 
+const std::vector<PropertyDef>& SpriteAnimatorDefs() {
+    static const std::vector<PropertyDef> defs = {
+        Field<SpriteAnimator, &SpriteAnimator::columns>("columns", "Columns", EditorPropKind::Int),
+        Field<SpriteAnimator, &SpriteAnimator::rows>("rows", "Rows", EditorPropKind::Int),
+        Field<SpriteAnimator, &SpriteAnimator::firstFrame>("firstFrame", "First Frame", EditorPropKind::Int),
+        Field<SpriteAnimator, &SpriteAnimator::lastFrame>("lastFrame", "Last Frame (-1 = end)", EditorPropKind::Int),
+        Field<SpriteAnimator, &SpriteAnimator::fps>("fps", "FPS", EditorPropKind::Float),
+        Field<SpriteAnimator, &SpriteAnimator::loop>("loop", "Loop", EditorPropKind::Bool),
+        Field<SpriteAnimator, &SpriteAnimator::playing>("playing", "Playing", EditorPropKind::Bool),
+        Field<SpriteAnimator, &SpriteAnimator::frame>("frame", "Frame", EditorPropKind::Int),
+    };
+    return defs;
+}
+
 const std::vector<PropertyDef>& RigidBodyDefs() {
     static const std::vector<PropertyDef> defs = {
         Field<RigidBody, &RigidBody::mass>("mass", "Mass", EditorPropKind::Float),
@@ -320,6 +334,7 @@ const std::vector<PropertyDef>* DefsForTypeName(const std::string& typeName) {
     if (typeName == "Light") return &LightDefs();
     if (typeName == "MeshRenderer") return &MeshRendererDefs();
     if (typeName == "SpriteRenderer") return &SpriteRendererDefs();
+    if (typeName == "SpriteAnimator") return &SpriteAnimatorDefs();
     if (typeName == "TextRenderer") return &TextRendererDefs();
     if (typeName == "RigidBody") return &RigidBodyDefs();
     if (typeName == "BoxCollider") return &BoxColliderDefs();
@@ -394,7 +409,7 @@ bool ComponentDeserialize(Component* c, const Json& props) {
 }
 
 std::vector<std::string> AddableComponentNames() {
-    return {"Camera", "Light", "MeshRenderer", "SpriteRenderer", "TextRenderer",
+    return {"Camera", "Light", "MeshRenderer", "SpriteRenderer", "SpriteAnimator", "TextRenderer",
             "RigidBody", "BoxCollider", "SphereCollider", "Collider2D",
             "CapsuleCollider", "MeshCollider", "CharacterController", "DistanceJoint",
             "HingeJoint", "FixedJoint", "Script"};

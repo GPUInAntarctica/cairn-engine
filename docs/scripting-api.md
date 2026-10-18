@@ -229,6 +229,24 @@ sr->uvRect = Vec4(0.25f, 0.0f, 0.25f, 0.5f);  // column 1, row 0 of a 4x2 sheet
 - **`normalMapPath`** adds tangent-space 2D lighting. The map is authored in the same y-down image space as the albedo: a green channel below 0.5 tilts the surface towards the top of the image (which is the world's up), which is exactly what `image.normalMap` writes (0.1.23).
 - `TextRenderer` takes `text`, `fontSize` (glyph height in the same world units), `color` and `alignment` (`Left` / `Center` / `Right`).
 
+### Animating a sheet
+
+A **`SpriteAnimator`** on the same entity as the sprite turns the sheet into an animation: `columns` × `rows` cuts the sprite's own `uvRect` into equal cells, and play time steps `frame` — the cell being drawn, counted row-major from the region's top-left, the order `image.stamp` lays frames out in.
+
+```cpp
+auto* anim = hero->AddComponent<SpriteAnimator>();
+anim->columns = 4;                          // a 4x1 strip of 16-texel frames
+anim->rows = 1;
+anim->firstFrame = 0;                       // inclusive; -1 means "the last cell"
+anim->lastFrame = 3;
+anim->fps = 10.0f;
+anim->loop = true;
+```
+
+- **Clipping.** `firstFrame` / `lastFrame` select the cells that play, so a 4×3 character sheet animates its second row with `firstFrame = 4, lastFrame = 7` and a single cell is a still. Cells are cut out of the sprite's `uvRect` rather than the whole texture, so pointing the sprite at one row (`uvRect = {0, 1/3, 1, 1/3}`) with `rows = 1` says the same thing — both compose with 0.1.25. One definition decides the rect, and the cull and the vertex generation read the same cell (0.1.27).
+- **Time, not frames.** The frame follows accumulated play time, not the host frame count: the same sequence of `Update(dt)` calls always lands on the same frame, and a stall longer than a whole cycle costs a cycle, not a spin. At 60 fps one `runtime.step` is exactly one frame, which is how a batch script walks a clip.
+- **Scrubbing.** `frame` is an inspector field, so setting it draws that cell — a batch can render any frame without simulating time. `playing = false` freezes the animation, `loop = false` holds the last cell instead of wrapping, a frame outside the clip is drawn as the nearest end of it, and `anim->Restart()` returns to `firstFrame` at zero frame time.
+
 > **Orientation (0.1.23).** Image space is y-down everywhere in the engine: `image.*` draws `y = 0` at the top, and a texture's row 0 is `v = 0`. The 2D quad maps the image's top row to the **top** of the sprite, so what you draw is what you see — `flipY` is a plain "turn the picture upside down". Until 0.1.23 both the sprite and the glyph quad handed their top corners `v = 1`, which mirrored every sprite and every word (including the bundled `project-2d` template's title text).
 
 ## Inspector fields

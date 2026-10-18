@@ -76,6 +76,7 @@ export const dict = {
     'comp.light': '灯光',
     'comp.meshRenderer': '网格渲染器',
     'comp.spriteRenderer': '精灵渲染器',
+    'comp.spriteAnimator': '精灵动画',
     'comp.textRenderer': '文本渲染器',
     'comp.rigidBody': '刚体',
     'comp.boxCollider': '盒碰撞体',

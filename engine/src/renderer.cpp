@@ -1436,23 +1436,32 @@ struct Renderer::Impl {
         int clipRejected = 0;   // meshes that produced no drawable triangles
     };
 
+    // The rect a sprite draws: its own uvRect, or - while an enabled
+    // SpriteAnimator sits beside it - that animator's current cell, cut out of
+    // the sprite's rect. One definition of "which part of the texture", feeding
+    // both the cull below and the vertex generation.
+    Vec4 SpriteUvRect(const SpriteRenderer& sp, const SpriteAnimator* anim) {
+        if (!anim || !anim->enabled) return sp.uvRect;
+        return anim->CellRect(anim->frame, sp.uvRect);
+    }
+
     // Local-space extent of a sprite quad: x runs left to right, y from the
-    // bottom edge to the top one. The pivoted size is the atlas rect's texels
-    // over the pixels-per-unit, and a negated size (flipX/flipY) mirrors the
-    // extents about the pivot. The culling test and the vertex generation both
-    // come from here, so they cannot disagree about what a sprite occupies.
+    // bottom edge to the top one. The pivoted size is the rect's texels over the
+    // pixels-per-unit, and a negated size (flipX/flipY) mirrors the extents about
+    // the pivot. The culling test and the vertex generation both come from here,
+    // so they cannot disagree about what a sprite occupies.
     struct SpriteExtent {
         float x0, x1, y0, y1;
     };
 
-    SpriteExtent SpriteLocalExtent(const SpriteRenderer& sp, float texW, float texH) {
+    SpriteExtent SpriteLocalExtent(const SpriteRenderer& sp, const Vec4& rect, float texW, float texH) {
         // A pixels-per-unit of zero or less is meaningless and falls back to one;
         // any positive value is honoured, including below one, where the sprite
         // is larger than its texels - that is what the documented
         // texturePixels / pixelsPerUnit means.
         const float ppu = sp.pixelsPerUnit > 0.0f ? sp.pixelsPerUnit : 1.0f;
-        const float w = (sp.flipX ? -1.0f : 1.0f) * texW * sp.uvRect.z / ppu;
-        const float h = (sp.flipY ? -1.0f : 1.0f) * texH * sp.uvRect.w / ppu;
+        const float w = (sp.flipX ? -1.0f : 1.0f) * texW * rect.z / ppu;
+        const float h = (sp.flipY ? -1.0f : 1.0f) * texH * rect.w / ppu;
         SpriteExtent e;
         e.x0 = -sp.pivot.x * w;
         e.x1 = (1.0f - sp.pivot.x) * w;
@@ -1595,7 +1604,8 @@ struct Renderer::Impl {
                 else tex = textures.GetBuiltin("checker");
                 const float texW = tex ? (float)tex->width() : 0.0f;
                 const float texH = tex ? (float)tex->height() : 0.0f;
-                const SpriteExtent e = SpriteLocalExtent(*sp, texW, texH);
+                const Vec4 rect = SpriteUvRect(*sp, go->GetComponent<SpriteAnimator>());
+                const SpriteExtent e = SpriteLocalExtent(*sp, rect, texW, texH);
                 bounds = AABB(Vec3(e.x0, e.y0, 0), Vec3(e.x1, e.y1, 0));
             } else {
                 auto* tr = go->GetComponent<TextRenderer>();
@@ -1635,8 +1645,9 @@ struct Renderer::Impl {
                 // The drawn size is the atlas rect measured in texels, divided
                 // by the pixels-per-unit: a sprite cut out of a sheet is as big
                 // as its frame, not as the whole texture.
-                const Vec4& r = sr->uvRect;
-                const SpriteExtent e = SpriteLocalExtent(*sr, (float)tex->width(), (float)tex->height());
+                const Vec4 r = SpriteUvRect(*sr, go->GetComponent<SpriteAnimator>());
+                const SpriteExtent e =
+                    SpriteLocalExtent(*sr, r, (float)tex->width(), (float)tex->height());
                 MaterialGpu mat;
                 mat.albedo = tex.get();
                 mat.albedoSRGB = tex->isSRGB();
