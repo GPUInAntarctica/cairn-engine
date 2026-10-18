@@ -410,9 +410,16 @@ public:
 //
 // A character is more than one animation, so several can be named: `clips` is a
 // table of {"name", "columns", "rows", "firstFrame", "lastFrame", "fps",
-// "loop"} entries and `clip` names the one playing. A key an entry leaves out
-// falls back to the matching field above, and `clip` naming nothing - or naming
-// no entry in the table - means those fields are the whole animation.
+// "loop", "durations"} entries and `clip` names the one playing. A key an entry
+// leaves out falls back to the matching field above, and `clip` naming nothing
+// - or naming no entry in the table - means those fields are the whole
+// animation.
+//
+// `fps` is one rate for the whole animation, which cannot say that a wind-up is
+// slow and the strike fast. `durations` adds a time per cell, counted from the
+// clip's own first cell; a cell the table does not mention - or mentions
+// without a positive number - is shown for the clip's own `1 / fps`, so an
+// empty table is exactly the animation `fps` alone describes.
 //
 // The table is also a state machine when it is given the other two: `params`
 // are the values it reads (a bool, a number, or a trigger) and `transitions`
@@ -432,6 +439,7 @@ public:
     int lastFrame = -1;      // inclusive; -1 means the last cell
     float fps = 8.0f;        // frames per second of play time
     bool loop = true;        // wrap at the end instead of holding the last frame
+    Json durations = Json::MakeArray();   // per-cell seconds, in clip order
     bool playing = true;     // false freezes on `frame`
     int frame = 0;           // current cell, row-major from the top-left
 
@@ -464,6 +472,7 @@ public:
         int lastFrame = -1;
         float fps = 8.0f;
         bool loop = true;
+        Json durations;      // per-cell seconds; null when there is no table
     };
 
     // A usable entry is an object with a non-empty name; anything else in the
@@ -512,6 +521,7 @@ public:
         c.lastFrame = lastFrame;
         c.fps = fps;
         c.loop = loop;
+        c.durations = durations;
         const Json* e = FindClip(clip);
         if (!e) return c;
         // at() is null for a key the entry leaves out, and each accessor takes
@@ -522,6 +532,9 @@ public:
         c.lastFrame = (*e)["lastFrame"].asInt(c.lastFrame);
         c.fps = (*e)["fps"].asFloat(c.fps);
         c.loop = (*e)["loop"].asBool(c.loop);
+        // The entry's own table when it has one - an empty array clears the
+        // component's - and the component's field otherwise.
+        if ((*e)["durations"].isArray()) c.durations = (*e)["durations"];
         return c;
     }
 
@@ -549,6 +562,31 @@ public:
         const int first = FirstCellOf(c);
         const int last = LastCellOf(c);
         return v < first ? first : (v > last ? last : v);
+    }
+
+    // The time cell `cell` is shown: the entry at that cell's index in the
+    // clip's `durations`, or the clip's own rate when the table has no positive
+    // number there. Indices count from the clip's first cell, so a table
+    // describes its own cells in order however the range is placed.
+    static float CellSeconds(const Clip& c, int cell) {
+        const float step = c.fps > 0.0f ? 1.0f / c.fps : 0.0f;
+        if (!c.durations.isArray()) return step;
+        const int i = cell - FirstCellOf(c);
+        const auto& items = c.durations.arrayItems();
+        if (i < 0 || (size_t)i >= items.size()) return step;
+        const float t = items[(size_t)i].asFloat(0.0f);
+        return t > 0.0f ? t : step;
+    }
+
+    // One whole play of the clip: its cells' times added up. With no per-cell
+    // times this is the cell count over the rate, which is what the exit time
+    // has always measured.
+    static float LengthOf(const Clip& c) {
+        const int first = FirstCellOf(c);
+        const int count = FrameCountOf(c);
+        float total = 0.0f;
+        for (int i = 0; i < count; i++) total += CellSeconds(c, first + i);
+        return total;
     }
 
     // --- the clip being played ---------------------------------------------
@@ -592,25 +630,27 @@ public:
 
     // Advance by `dt` seconds of play time. A stall longer than one full cycle
     // is capped at a cycle: wrapping or clamping makes the rest a no-op, and it
-    // keeps the loop below bounded.
+    // keeps the loop below bounded. Cells are stepped one at a time, because
+    // each of them has its own time and a long `dt` can pass through several.
     void AdvanceAnimation(float dt) {
         if (clip != activeClip) Restart();   // a new clip starts at its own first cell
         const Clip c = ActiveClip();
         const int count = FrameCountOf(c);
-        if (!playing || c.fps <= 0.0f) return;
-        const float step = 1.0f / c.fps;
+        if (!playing) return;
+        const float length = LengthOf(c);
+        if (!(length > 0.0f)) return;        // no rate and no times: nothing to advance
         // A one-cell state has no frames to step but still spends time, and the
         // exit time below counts that time like any other state's.
         stateTime += dt;
         if (count <= 1) return;
         frameTime += dt;
-        if (frameTime > step * (float)count) frameTime = step * (float)count;
-        int n = 0;
-        while (frameTime >= step && n < count) {
-            frameTime -= step;
-            n++;
+        if (frameTime > length) frameTime = length;
+        for (int guard = 0; guard <= count; guard++) {
+            const float sec = CellSeconds(c, ClampClipOf(c, frame));
+            if (!(sec > 0.0f) || frameTime < sec) break;
+            frameTime -= sec;
+            StepFrames(1);
         }
-        if (n > 0) StepFrames(n);
     }
 
     void StepFrames(int n) {
@@ -629,13 +669,9 @@ public:
         return params.isObject() ? params.find(name) : nullptr;
     }
 
-    // How long one whole play of the current state takes (its cells at its
-    // rate), which is what the exit time is measured against.
-    float ClipLength() const {
-        const Clip c = ActiveClip();
-        const float step = c.fps > 0.0f ? 1.0f / c.fps : 0.0f;
-        return (float)FrameCountOf(c) * step;
-    }
+    // How long one whole play of the current state takes - its cells' own times
+    // added up - which is what the exit time is measured against.
+    float ClipLength() const { return LengthOf(ActiveClip()); }
 
     // True once the state has played for a whole clip length. A state with no
     // frame rate never finishes, because there is nothing to measure with.

@@ -198,6 +198,7 @@ const std::vector<PropertyDef>& SpriteAnimatorDefs() {
         Field<SpriteAnimator, &SpriteAnimator::lastFrame>("lastFrame", "Last Frame (-1 = end)", EditorPropKind::Int),
         Field<SpriteAnimator, &SpriteAnimator::fps>("fps", "FPS", EditorPropKind::Float),
         Field<SpriteAnimator, &SpriteAnimator::loop>("loop", "Loop", EditorPropKind::Bool),
+        JsonField<SpriteAnimator, &SpriteAnimator::durations>("durations", "Durations"),
         Field<SpriteAnimator, &SpriteAnimator::playing>("playing", "Playing", EditorPropKind::Bool),
         Field<SpriteAnimator, &SpriteAnimator::frame>("frame", "Frame", EditorPropKind::Int),
         JsonField<SpriteAnimator, &SpriteAnimator::clips>("clips", "Clips"),

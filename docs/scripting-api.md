@@ -241,15 +241,17 @@ anim->firstFrame = 0;                       // inclusive; -1 means "the last cel
 anim->lastFrame = 3;
 anim->fps = 10.0f;
 anim->loop = true;
+anim->durations = Json::MakeArray({0.5, 0.1, 0.1, 0.1});   // per-cell seconds
 ```
 
 - **Clipping.** `firstFrame` / `lastFrame` select the cells that play, so a 4×3 character sheet animates its second row with `firstFrame = 4, lastFrame = 7` and a single cell is a still. Cells are cut out of the sprite's `uvRect` rather than the whole texture, so pointing the sprite at one row (`uvRect = {0, 1/3, 1, 1/3}`) with `rows = 1` says the same thing — both compose with 0.1.25. One definition decides the rect, and the cull and the vertex generation read the same cell (0.1.27).
+- **A cell can have its own time.** `durations` is a time per cell of the clip, counted from its own first cell (`[0.5, 0.1, 0.1, 0.1]` is a slow wind-up and three quick cells), so one animation can change pace without being split in two. A cell the table leaves out - or gives without a positive number - is shown for the clip's own `1 / fps`, so an empty table is exactly the animation `fps` alone describes. Everything that measures the clip reads those times: the stepping and the exit time of a transition both treat the clip as the sum of its cells.
 - **Time, not frames.** The frame follows accumulated play time, not the host frame count: the same sequence of `Update(dt)` calls always lands on the same frame, and a stall longer than a whole cycle costs a cycle, not a spin. At 60 fps one `runtime.step` is exactly one frame, which is how a batch script walks a clip.
 - **Scrubbing.** `frame` is an inspector field, so setting it draws that cell — a batch can render any frame without simulating time. `playing = false` freezes the animation, `loop = false` holds the last cell instead of wrapping, a frame outside the clip is drawn as the nearest end of it, and `anim->Restart()` returns to `firstFrame` at zero frame time.
 
 ### Naming the animations
 
-A character is several animations on one sheet, so `clips` is a table of them and `clip` names the one playing. Each entry carries a `name` and any of `columns`, `rows`, `firstFrame`, `lastFrame`, `fps`, `loop`; a key an entry leaves out comes from the matching field on the component, and `clip` naming no entry means those fields are the whole animation — so an animator with no table behaves exactly as the fields say.
+A character is several animations on one sheet, so `clips` is a table of them and `clip` names the one playing. Each entry carries a `name` and any of `columns`, `rows`, `firstFrame`, `lastFrame`, `fps`, `loop`, `durations`; a key an entry leaves out comes from the matching field on the component, and `clip` naming no entry means those fields are the whole animation — so an animator with no table behaves exactly as the fields say.
 
 ```json
 "clips": [
@@ -269,7 +271,7 @@ anim->clip = "attack";                       // a script, the CLI or the inspect
 - **Switching draws the new clip's first cell immediately.** `DrawnCell` is the one answer to "which cell is on screen", and it is the new clip's first cell until the next tick has restarted the clip — so `component.setProps {"clip": "attack"}` followed by a screenshot is that clip's first frame, with no half-elapsed time carried over from the clip before it.
 - **A clip's own `fps` and `loop` win** over the component's, which is what makes `attack` play at 12 fps and hold its last cell while `walk` wraps at 10.
 - **The table is a `Json` property** (`EditorPropKind::Json`), so it travels through the scene file, `component.add` / `component.setProps` / `component.get` and the inspector's JSON field unchanged. `ClipCount()`, `ClipName(i)`, `FindClip(name)` and `ActiveClip()` read a resolved clip from a script; entries that are not objects, or have no name, are skipped rather than mistaken for clips.
-- **The table becomes a state machine** once the animator is given `params` and `transitions`, below. There is still no per-frame duration or animation event inside a clip.
+- **A clip's `durations` win** over the component's, like every other key: an entry that names its own table plays at those times, one that names `[]` plays at its rate. Animation events do not exist yet, and the table becomes a state machine once the animator is given `params` and `transitions`, below.
 
 ### Driving the animations
 

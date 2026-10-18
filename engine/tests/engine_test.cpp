@@ -2293,6 +2293,204 @@ static void TestSpriteTransitions() {
     });
 }
 
+// Per-cell frame times: `durations` gives each cell of a clip its own time,
+// counted from the clip's own first cell, and a cell the table leaves out - or
+// gives without a positive number - keeps the clip's own `1 / fps`. Everything
+// that measures the clip reads those times, so a slow wind-up is slow both in
+// the stepping and in the exit time of a transition.
+static void TestSpriteFrameDurations() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-durations").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/frames.bmp";
+    // Reading order: red, green / blue, white - one distinct colour per cell.
+    WriteTestBmpSheet(dir + "/" + tex, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255);
+    const int sheet[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};
+
+    auto px = [](Engine& engine, int x, int y) {
+        const FrameTarget& t = engine.frame();
+        const uint8_t* p = &t.color[((size_t)y * (size_t)t.width + (size_t)x) * 4];
+        return std::array<int, 3>{(int)p[0], (int)p[1], (int)p[2]};
+    };
+    auto closeTo = [](const std::array<int, 3>& c, int r, int g, int b) {
+        return std::abs(c[0] - r) < 40 && std::abs(c[1] - g) < 40 && std::abs(c[2] - b) < 40;
+    };
+    auto shows = [&](Engine& engine, int f) {
+        engine.RenderGameFrame();
+        return closeTo(px(engine, 64, 64), sheet[f][0], sheet[f][1], sheet[f][2]);
+    };
+    auto times = [](std::initializer_list<double> v) {
+        Json a = Json::MakeArray();
+        for (double t : v) a.push(Json(t));
+        return a;
+    };
+    auto clip = [](const char* name, int first, int last, float fps, bool loop, Json durations) {
+        Json e = Json::MakeObject();
+        e.set("name", Json(name));
+        e.set("firstFrame", Json(first));
+        e.set("lastFrame", Json(last));
+        e.set("fps", Json(fps));
+        e.set("loop", Json(loop));
+        if (!durations.isNull()) e.set("durations", std::move(durations));
+        return e;
+    };
+    auto build = [&](Engine& engine, int backend) {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(128, 128);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        scene.ambient = Color(1, 1, 1, 1);
+        scene.tonemap = 0;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 2.0f;
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        GameObject* go = scene.CreateEntity("Sprite");
+        auto* sr = go->AddComponent<SpriteRenderer>();
+        sr->texturePath = tex;
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = 4.0f;
+        auto* anim = go->AddComponent<SpriteAnimator>();
+        anim->columns = 2;
+        anim->rows = 2;
+        anim->fps = 8.0f;
+        return anim;
+    };
+    auto bothBackends = [&](const std::function<void(int, const char*)>& one) {
+        one(2, "software");
+        if (VulkanBackendAvailable()) one(1, "vulkan");
+    };
+
+    // --- the table's times drive the frames ---------------------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        // A rate far above the table's times: reading `fps` instead would rush
+        // through 15 cells in the first quarter of a second.
+        Json table = Json::MakeArray();
+        table.push(clip("walk", 0, 3, 60.0f, true, times({0.5, 0.1, 0.1, 0.1})));
+        anim->clips = std::move(table);
+        anim->clip = "walk";
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(shows(engine, 0));
+        engine.Update(0.25f);
+        CHECK(shows(engine, 0));          // half of the first cell's own time
+        engine.Update(0.25f);
+        CHECK(shows(engine, 1));          // and the second half is the step
+        engine.Update(0.05f);
+        CHECK(shows(engine, 1));          // the next cell is quick
+        engine.Update(0.05f);
+        CHECK(shows(engine, 2));
+        engine.Update(0.1f);
+        CHECK(shows(engine, 3));
+        engine.Update(0.1f);
+        CHECK(shows(engine, 0));          // the table loops with the clip
+        engine.Update(0.8f);              // a whole cycle in one call
+        CHECK(shows(engine, 0));          // lands where it started
+        CHECK(std::abs(anim->ClipLength() - 0.8f) < 1e-4f);
+    });
+
+    // --- the rate fills in what the table does not say ----------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        anim->durations = times({0.1, 0.1, 0.1, 0.1});   // the component's own
+        Json junk = Json::MakeArray();
+        junk.push(Json(0.5));
+        junk.push(Json(0.0));            // not a usable time
+        junk.push(Json("later"));        // nor is a word
+        junk.push(Json(-2.0));
+        Json table = Json::MakeArray();
+        table.push(clip("hold", 0, 3, 4.0f, true, times({0.5})));
+        table.push(clip("junk", 0, 3, 4.0f, true, std::move(junk)));
+        table.push(clip("bare", 0, 3, 4.0f, true, Json::MakeArray()));   // the entry's own, empty
+        table.push(clip("walk", 0, 3, 4.0f, true, Json()));              // no key at all
+        anim->clips = std::move(table);
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        anim->clip = "hold";
+        engine.Update(0.5f);
+        CHECK(shows(engine, 1));          // the one cell it gives, held for it
+        engine.Update(0.25f);
+        CHECK(shows(engine, 2));          // the rest fall back to 1 / fps
+        // A cell with no usable number is the clip's own rate, not a zero-length
+        // frame: 0.0, a word and a negative all have to fall back.
+        anim->clip = "junk";
+        engine.Update(0.5f);
+        CHECK(shows(engine, 1));
+        engine.Update(0.25f);
+        CHECK(shows(engine, 2));
+        engine.Update(0.25f);
+        CHECK(shows(engine, 3));
+        engine.Update(0.25f);
+        CHECK(shows(engine, 0));
+        // An entry with no key keeps the component's table; one that names an
+        // empty array clears it and plays at the rate.
+        anim->clip = "walk";
+        engine.Update(0.15f);
+        CHECK(shows(engine, 1));          // 0.1 s from the component
+        anim->clip = "hold";
+        CHECK(shows(engine, 0));          // the switch restarts the clip
+        engine.Update(0.25f);
+        CHECK(shows(engine, 0));          // the entry's 0.5 s wins over the component's
+        anim->clip = "bare";
+        engine.Update(0.15f);
+        CHECK(shows(engine, 0));          // cleared, so 1 / fps
+        anim->clip = "";                 // the fields, with the component's table
+        CHECK(std::abs(anim->ClipLength() - 0.4f) < 1e-4f);
+    });
+
+    // --- the exit time is the clip's own length -----------------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        Json table = Json::MakeArray();
+        table.push(clip("idle", 0, 0, 60.0f, true, Json()));
+        // 1.0 s + 0.1 s: cells / fps would be 1.0 s and end it early.
+        table.push(clip("attack", 1, 2, 2.0f, false, times({1.0, 0.1})));
+        anim->clips = std::move(table);
+        anim->clip = "idle";
+        anim->params = Json::MakeObject();
+        anim->params.set("go", Json(false));
+        Json tr = Json::MakeArray();
+        Json go = Json::MakeObject();
+        go.set("from", Json("*"));
+        go.set("to", Json("attack"));
+        Json when = Json::MakeObject();
+        when.set("param", Json("go"));
+        when.set("op", Json("trigger"));
+        go.set("when", std::move(when));
+        tr.push(std::move(go));
+        Json back = Json::MakeObject();
+        back.set("from", Json("attack"));
+        back.set("to", Json("idle"));
+        back.set("waitForExit", Json(true));
+        tr.push(std::move(back));
+        anim->transitions = std::move(tr);
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(shows(engine, 0));          // idle
+        anim->params.set("go", Json(true));
+        engine.Update(0.05f);
+        CHECK(shows(engine, 1));          // the attack's first cell
+        engine.Update(0.6f);              // twice what cells / fps would give it
+        CHECK(shows(engine, 1));          // its own second is not up yet
+        engine.Update(0.45f);             // 1.05 s: past 1.0 s, short of 1.1 s
+        CHECK(shows(engine, 2));          // its second cell, still in the attack
+        CHECK(anim->clip == "attack");
+        engine.Update(0.06f);             // 1.11 s: past the clip's own length
+        CHECK(shows(engine, 0));
+        CHECK(anim->clip == "idle");
+    });
+}
+
 // Texture cache: per-slot color space, byte-budgeted LRU eviction, and mtime
 // based reload.
 static void TestTextureCache() {
@@ -3659,6 +3857,7 @@ int main() {
     TestSpriteAnimation();
     TestSpriteClips();
     TestSpriteTransitions();
+    TestSpriteFrameDurations();
     TestTextureMips();
     TestParentedPhysics();
     TestTriggerAndEnabled();

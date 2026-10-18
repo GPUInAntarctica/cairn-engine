@@ -1918,6 +1918,64 @@ check(jsonProps.includes('params') && jsonProps.includes('transitions'),
     'component.schema reports the parameters and the table as json props', jsonProps);
 
 // ---------------------------------------------------------------------------
+console.log('cli: per-cell frame times (each cell of a clip has its own time)');
+// ---------------------------------------------------------------------------
+// One rate for a whole animation cannot say that a wind-up is slow and the
+// strike fast, so a clip carries `durations`: a time per cell, counted from the
+// clip's own first cell. A rate of 60 fps would run this clip four times in the
+// same span, and the component's own table says 0.2 s a cell, so the frames
+// below can only be the clip entry's times.
+const durShot = i => path.join(scratch, `dur${i}.png`);
+const durSteps = [{ command: 'runtime.play' },
+    { command: 'render.screenshot', args: { out: durShot(0), mode: 'game', width: 64, height: 64 }, id: 'd0' }];
+const durAdvance = (frames, i) => {
+    for (let k = 0; k < frames; k++) durSteps.push({ command: 'runtime.step' });   // 1/60 s each
+    durSteps.push({ command: 'render.screenshot',
+        args: { out: durShot(i), mode: 'game', width: 64, height: 64 }, id: `d${i}` });
+};
+durAdvance(29, 1);   // 0.483 s: the first cell's own 0.5 s is not up
+durAdvance(2, 2);    // 0.517 s: it is
+durAdvance(7, 3);    // 0.633 s: the 0.1 s cell after it has gone by
+const durRun = runProjectBatch(writeBatch('durations.jsonl', [
+    { command: 'image.new', args: { width: 32, height: 32, background: 'transparent' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 16, height: 16, filled: true, color: '#ff0000' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 0, width: 16, height: 16, filled: true, color: '#00ff00' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 16, width: 16, height: 16, filled: true, color: '#0000ff' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 16, width: 16, height: 16, filled: true, color: '#ffffff' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/times.png' }, id: 'sheet' },
+    { command: 'scene.new', args: { name: 'Times' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    ...atlasCam(1),
+    { command: 'entity.create', args: { name: 'Sprite' }, id: 'sp' },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteRenderer', props: {
+        texturePath: 'Assets/Sprites/times.png', pixelsPerUnit: 16, pixelPerfect: true } } },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteAnimator', props: {
+        columns: 2, rows: 2, clip: 'walk',
+        durations: [0.2, 0.2, 0.2, 0.2],            // the component's own table
+        clips: [{ name: 'walk', firstFrame: 0, lastFrame: 3, fps: 60,
+                  durations: [0.5, 0.1, 0.1, 0.1] }] } }, id: 'anim' },   // and the clip's, which wins
+    ...durSteps,
+    { command: 'component.get', args: { id: '$ref:sp', type: 'SpriteAnimator' }, id: 'read' },
+]));
+check(durRun.lines.every(l => l.ok !== false), 'the per-cell times batch runs clean', durRun.stdout + durRun.stderr);
+const durPx = i => expectOk(['--image', durShot(i), 'image.pixel', '--x', '32', '--y', '32']);
+const dur0 = durPx(0), dur1 = durPx(1), dur2 = durPx(2), dur3 = durPx(3);
+check(dominant(dur0, 0), 'the clip starts on its first cell', dur0);
+check(dominant(dur1, 0), "a cell with a longer time is held past the clip's rate", dur1);
+check(dominant(dur2, 1), 'its own time is what steps the clip', dur2);
+check(dominant(dur3, 2), 'and the quick cell after it is quick', dur3);
+const durRead = durRun.step('read').result.props;
+check(Array.isArray(durRead.durations) && durRead.durations.length === 4 && durRead.durations[0] === 0.2,
+    'the component\'s own table round-trips through component.get', durRead.durations);
+const durClipRead = Array.isArray(durRead.clips) ? durRead.clips.find(c => c.name === 'walk') : null;
+check(durClipRead && Array.isArray(durClipRead.durations) && durClipRead.durations[0] === 0.5
+    && durClipRead.durations[1] === 0.1,
+    'and so does the clip\'s, which is the one that governs', durClipRead && durClipRead.durations);
+const durSchema = expectOk(['component.schema', 'SpriteAnimator']);
+const durProp = durSchema.components[0].schema.find(p => p.name === 'durations');
+check(durProp && durProp.kind === 'json', 'component.schema reports the times as a json prop', durProp);
+
+// ---------------------------------------------------------------------------
 console.log('cli: export + preferences');
 // ---------------------------------------------------------------------------
 const prefs = expectOk(['project.preferences', '--set', '{"language":"en"}']);
