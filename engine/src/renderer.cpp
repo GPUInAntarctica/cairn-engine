@@ -1436,6 +1436,31 @@ struct Renderer::Impl {
         int clipRejected = 0;   // meshes that produced no drawable triangles
     };
 
+    // Local-space extent of a sprite quad: x runs left to right, y from the
+    // bottom edge to the top one. The pivoted size is the atlas rect's texels
+    // over the pixels-per-unit, and a negated size (flipX/flipY) mirrors the
+    // extents about the pivot. The culling test and the vertex generation both
+    // come from here, so they cannot disagree about what a sprite occupies.
+    struct SpriteExtent {
+        float x0, x1, y0, y1;
+    };
+
+    SpriteExtent SpriteLocalExtent(const SpriteRenderer& sp, float texW, float texH) {
+        // A pixels-per-unit of zero or less is meaningless and falls back to one;
+        // any positive value is honoured, including below one, where the sprite
+        // is larger than its texels - that is what the documented
+        // texturePixels / pixelsPerUnit means.
+        const float ppu = sp.pixelsPerUnit > 0.0f ? sp.pixelsPerUnit : 1.0f;
+        const float w = (sp.flipX ? -1.0f : 1.0f) * texW * sp.uvRect.z / ppu;
+        const float h = (sp.flipY ? -1.0f : 1.0f) * texH * sp.uvRect.w / ppu;
+        SpriteExtent e;
+        e.x0 = -sp.pivot.x * w;
+        e.x1 = (1.0f - sp.pivot.x) * w;
+        e.y0 = (sp.pivot.y - 1.0f) * h;
+        e.y1 = sp.pivot.y * h;
+        return e;
+    }
+
     void CollectLights(const Scene& scene, std::vector<GpuLight>* out) {
         out->clear();
         bool warned = false;
@@ -1547,6 +1572,7 @@ struct Renderer::Impl {
             float depthKey;   // distance along the view direction (far first)
             bool isText;
             GameObject* go;
+            std::shared_ptr<Texture> tex;   // sprites: resolved here, reused by the draw
         };
         std::vector<DrawItem> items;
         for (const auto& go : scene.objects) {
@@ -1555,13 +1581,22 @@ struct Renderer::Impl {
                 go->GetComponent<SpriteRenderer>() && go->GetComponent<SpriteRenderer>()->enabled;
             const bool text = go->GetComponent<TextRenderer>() && go->GetComponent<TextRenderer>()->enabled;
             if (!sprite && !text) continue;
-            // Sprite/text bounds come from their component size; text uses a
+            // A sprite's bounds need the texture's texel size (its world size is
+            // the atlas rect's texels over the pixels-per-unit) and the rect's
+            // pivot, which puts the extent somewhere other than around the
+            // origin; the texture is resolved here and handed to the draw, so
+            // the same size decides both the cull and the quad. Text keeps a
             // rough estimate that only has to be conservative.
             AABB bounds;
+            std::shared_ptr<Texture> tex;
             if (sprite) {
                 auto* sp = go->GetComponent<SpriteRenderer>();
-                float w = sp->pixelsPerUnit * 0.5f;
-                bounds = AABB(Vec3(-w, -w, 0), Vec3(w, w, 0));
+                if (!sp->texturePath.empty()) tex = textures.Get(EngineResolvePath(sp->texturePath));
+                else tex = textures.GetBuiltin("checker");
+                const float texW = tex ? (float)tex->width() : 0.0f;
+                const float texH = tex ? (float)tex->height() : 0.0f;
+                const SpriteExtent e = SpriteLocalExtent(*sp, texW, texH);
+                bounds = AABB(Vec3(e.x0, e.y0, 0), Vec3(e.x1, e.y1, 0));
             } else {
                 auto* tr = go->GetComponent<TextRenderer>();
                 float w = tr->fontSize * 0.6f * static_cast<float>(std::max<size_t>(1, tr->text.size()));
@@ -1578,10 +1613,10 @@ struct Renderer::Impl {
                 Vec3::Dot(go->transform().WorldPosition() - list->camPos, list->camForward);
             if (sprite) {
                 auto* sp = go->GetComponent<SpriteRenderer>();
-                items.push_back({sp->sortingLayer, sp->orderInLayer, viewDepth, false, go.get()});
+                items.push_back({sp->sortingLayer, sp->orderInLayer, viewDepth, false, go.get(), tex});
             } else {
                 auto* tr = go->GetComponent<TextRenderer>();
-                items.push_back({tr->sortingLayer, tr->orderInLayer, viewDepth, true, go.get()});
+                items.push_back({tr->sortingLayer, tr->orderInLayer, viewDepth, true, go.get(), nullptr});
             }
         }
         std::sort(items.begin(), items.end(), [](const DrawItem& a, const DrawItem& b) {
@@ -1594,19 +1629,14 @@ struct Renderer::Impl {
             GameObject* go = item.go;
             if (!item.isText) {
                 auto* sr = go->GetComponent<SpriteRenderer>();
-                std::shared_ptr<Texture> tex;
-                if (!sr->texturePath.empty()) tex = textures.Get(EngineResolvePath(sr->texturePath));
-                else tex = textures.GetBuiltin("checker");
+                std::shared_ptr<Texture> tex = item.tex;   // resolved with the cull
                 if (!tex) continue;
                 list->liveTextures.push_back(tex);  // pin against LRU eviction mid-frame
                 // The drawn size is the atlas rect measured in texels, divided
                 // by the pixels-per-unit: a sprite cut out of a sheet is as big
                 // as its frame, not as the whole texture.
                 const Vec4& r = sr->uvRect;
-                float w = tex->width() * r.z / std::max(1.0f, sr->pixelsPerUnit);
-                float h = tex->height() * r.w / std::max(1.0f, sr->pixelsPerUnit);
-                if (sr->flipX) w = -w;
-                if (sr->flipY) h = -h;
+                const SpriteExtent e = SpriteLocalExtent(*sr, (float)tex->width(), (float)tex->height());
                 MaterialGpu mat;
                 mat.albedo = tex.get();
                 mat.albedoSRGB = tex->isSRGB();
@@ -1638,17 +1668,13 @@ struct Renderer::Impl {
                 // The pivot is in image coordinates as well, so the image's top
                 // edge lands at +pivot.y * h and its bottom edge at
                 // (pivot.y - 1) * h; a negated w or h (flipX/flipY) mirrors the
-                // extents about the pivot.
-                const float x0 = -sr->pivot.x * w;
-                const float x1 = (1.0f - sr->pivot.x) * w;
-                const float y0 = (sr->pivot.y - 1.0f) * h;
-                const float y1 = sr->pivot.y * h;
+                // extents about the pivot. SpriteLocalExtent owns that maths.
                 Mat4 world = go->transform().WorldMatrix();
                 Vec3 q[4];
-                q[0] = world.TransformPoint(Vec3(x0, y0, 0));
-                q[1] = world.TransformPoint(Vec3(x1, y0, 0));
-                q[2] = world.TransformPoint(Vec3(x1, y1, 0));
-                q[3] = world.TransformPoint(Vec3(x0, y1, 0));
+                q[0] = world.TransformPoint(Vec3(e.x0, e.y0, 0));
+                q[1] = world.TransformPoint(Vec3(e.x1, e.y0, 0));
+                q[2] = world.TransformPoint(Vec3(e.x1, e.y1, 0));
+                q[3] = world.TransformPoint(Vec3(e.x0, e.y1, 0));
                 FrameDrawList::Item2D out;
                 out.mat = mat;
                 out.firstVert = AppendQuad(list, q, uv);

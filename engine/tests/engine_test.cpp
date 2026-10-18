@@ -1669,6 +1669,83 @@ static void TestSpriteAtlas() {
         }
     }
 }
+
+// Sprite culling: the bound a sprite is tested against is the quad it actually
+// draws - the atlas rect's texels over the pixels-per-unit, offset by the pivot -
+// and not a function of the pixels-per-unit alone. Two visible failures of the
+// old bound (pixelsPerUnit * 0.5 around the entity) are pinned here: a sprite
+// whose entity sits far outside the view but whose pixels cover it (a large
+// pixels-per-unit sprite, e.g. a parallax layer) was culled away and left the
+// screen empty, and a sprite that is genuinely off screen was kept and drawn
+// because its "bound" was 50 units wide. The pivot participates as well, so the
+// same entity can be culled or drawn depending on where its rect sits - which
+// means the cull and the vertex generation must read one definition of the
+// extent, `SpriteLocalExtent`.
+static void TestSpriteCullBounds() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-cull").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    WriteTestBmp(dir + "/Assets/Textures/red.bmp", 16, 16, 255, 0, 0);
+
+    auto sum = [](const std::array<int, 3>& c) { return c[0] + c[1] + c[2]; };
+    auto px = [](Engine& engine, int x, int y) {
+        const FrameTarget& t = engine.frame();
+        const uint8_t* p = &t.color[((size_t)y * (size_t)t.width + (size_t)x) * 4];
+        return std::array<int, 3>{(int)p[0], (int)p[1], (int)p[2]};
+    };
+    auto build = [&](Engine& engine, int backend, float ppu, Vec3 pos, Vec2 pivot) {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(128, 128);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        scene.ambient = Color(1, 1, 1, 1);
+        scene.tonemap = 0;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 1.0f;   // a 2x2-unit view, 64 px per unit
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        GameObject* go = scene.CreateEntity("Sprite");
+        go->transform().position = pos;
+        auto* sr = go->AddComponent<SpriteRenderer>();
+        sr->texturePath = "Assets/Textures/red.bmp";
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = ppu;
+        sr->pivot = pivot;
+    };
+    // The 16-texel texture is 160 units across at 0.1 px/unit and 0.16 at 100.
+    auto run = [&](int wantDrawn, int wantCulled, bool wantLit, float ppu, Vec3 pos, Vec2 pivot) {
+        auto one = [&](int backend, const char* name) {
+            Engine engine;
+            build(engine, backend, ppu, pos, pivot);
+            engine.Play();
+            const RenderStats st = engine.RenderGameFrame();
+            CHECK(std::string(st.backend) == name);
+            CHECK(st.drawCalls2D == wantDrawn);
+            CHECK(st.frustumCulled == wantCulled);
+            CHECK((sum(px(engine, 64, 64)) > 24) == wantLit);
+        };
+        one(2, "software");
+        if (VulkanBackendAvailable()) one(1, "vulkan");
+    };
+
+    // Its entity is 50 units past the view's edge, but 80 units of the sprite
+    // still cover the view: the old bound put it outside and culled it.
+    run(1, 0, true, 0.1f, Vec3(50, 0, 0), Vec2(0.5f, 0.5f));
+    // 0.16 units wide, 3 units out: nothing of it can reach the view, so the
+    // draw must be dropped rather than submitted and clipped.
+    run(0, 1, false, 100.0f, Vec3(3, 0, 0), Vec2(0.5f, 0.5f));
+    // Same position and size, but the pivot moves the whole rect to the right of
+    // the entity, off screen - the bound has to follow the pivot.
+    run(0, 1, false, 0.1f, Vec3(1.2f, 0, 0), Vec2(0.0f, 1.0f));
+    run(1, 0, true, 0.1f, Vec3(1.2f, 0, 0), Vec2(0.5f, 0.5f));
+}
+
 // Texture cache: per-slot color space, byte-budgeted LRU eviction, and mtime
 // based reload.
 static void TestTextureCache() {
@@ -3031,6 +3108,7 @@ int main() {
     TestSpriteOrientation();
     TestSpriteNormalOrientation();
     TestSpriteAtlas();
+    TestSpriteCullBounds();
     TestTextureMips();
     TestParentedPhysics();
     TestTriggerAndEnabled();

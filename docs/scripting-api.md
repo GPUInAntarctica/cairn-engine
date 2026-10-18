@@ -216,7 +216,7 @@ sr->sortingLayer = 1;                        // coarse group, drawn low to high
 sr->orderInLayer = -5;                       // fine order within the layer
 ```
 
-- **Size.** A sprite's world size is `texturePixels / pixelsPerUnit`; place the camera back (for example `z = 10`, looking down `-Z`) so the sprites are in front of it.
+- **Size.** A sprite's world size is `texturePixels / pixelsPerUnit` (with the atlas rect, `frameTexels / pixelsPerUnit`); place the camera back (for example `z = 10`, looking down `-Z`) so the sprites are in front of it. A `pixelsPerUnit` below one is honoured — a 32-texel texture at `0.5` is 64 units across, which is how a background layer is set up — and only zero or less falls back to one. The editor viewport and the game camera cull a sprite against exactly that quad.
 - **`uvRect`** picks a sub-rectangle of the texture: `{x, y, w, h}` as fractions of the texture, where `(x, y)` is the rectangle's top-left corner. The default `{0, 0, 1, 1}` is the whole texture, and frame `(col, row)` of a sheet that is `cols` by `rows` frames wide is `{col / cols, row / rows, 1 / cols, 1 / rows}` — rows count from the top, which is the order `image.stamp` lays frames out in. The drawn size follows the frame (`frameTexels / pixelsPerUnit`), so one texture can hold a whole animation:
 
 ```cpp

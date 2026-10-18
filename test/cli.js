@@ -1696,6 +1696,40 @@ check(dominant(atlasBlue, 2), "the bottom-left frame is the sheet's blue bottom-
 check(whitePx(atlasWhite), "the bottom-right frame is the sheet's white bottom-right quadrant", atlasWhite);
 
 // ---------------------------------------------------------------------------
+console.log('cli: sprite culling (the bound is the quad, not the ppu)');
+// ---------------------------------------------------------------------------
+// A sprite is culled against the quad it actually draws. That bound used to be
+// `pixelsPerUnit * 0.5` around the entity, which threw away large sprites - a
+// background layer at a pixels-per-unit below one - while their pixels covered
+// the whole view, and kept tiny ones whose quad was nowhere near it. One
+// texture, two entities: the giant at x = 50 covers the 2-unit view, the small
+// one at x = 3 cannot reach it.
+const cullShot = path.join(scratch, 'cull.png');
+const cullRun = runProjectBatch(writeBatch('cull.jsonl', [
+    { command: 'image.new', args: { width: 32, height: 32, background: '#ff0000' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/big.png' }, id: 'tex' },
+    { command: 'scene.new', args: { name: 'Cull' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    ...atlasCam(1),
+    { command: 'entity.create', args: { name: 'Giant', position: [50, 0, 0] }, id: 'giant' },
+    { command: 'component.add', args: { id: '$ref:giant', type: 'SpriteRenderer', props: {
+        texturePath: 'Assets/Sprites/big.png', pixelsPerUnit: 0.1, pixelPerfect: true } } },
+    { command: 'entity.create', args: { name: 'Small', position: [3, 0, 0] }, id: 'small' },
+    { command: 'component.add', args: { id: '$ref:small', type: 'SpriteRenderer', props: {
+        texturePath: 'Assets/Sprites/big.png', pixelsPerUnit: 100, pixelPerfect: true } } },
+    { command: 'runtime.play' },
+    { command: 'render.screenshot', args: { out: cullShot, mode: 'game', width: 64, height: 64 }, id: 'shot' },
+]));
+check(cullRun.lines.every(l => l.ok !== false), 'the culling batch runs clean', cullRun.stdout + cullRun.stderr);
+const cullStep = cullRun.step('shot');
+check(cullStep && cullStep.result.stats.drawCalls2D === 1 && cullStep.result.stats.frustumCulled === 1,
+    'the off-screen sprite is culled and the covering one is drawn', cullStep && cullStep.result.stats);
+const cullPx = (x, y) => expectOk(['--image', cullShot, 'image.pixel', '--x', String(x), '--y', String(y)]);
+check(dominant(cullPx(32, 32), 0), 'the sprite whose entity is 50 units away still covers the centre', cullPx(32, 32));
+check(dominant(cullPx(4, 4), 0), 'and the top-left corner', cullPx(4, 4));
+check(dominant(cullPx(60, 60), 0), 'and the bottom-right corner', cullPx(60, 60));
+
+// ---------------------------------------------------------------------------
 console.log('cli: export + preferences');
 // ---------------------------------------------------------------------------
 const prefs = expectOk(['project.preferences', '--set', '{"language":"en"}']);
