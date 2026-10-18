@@ -204,6 +204,7 @@ const std::vector<PropertyDef>& SpriteAnimatorDefs() {
         JsonField<SpriteAnimator, &SpriteAnimator::clips>("clips", "Clips"),
         JsonField<SpriteAnimator, &SpriteAnimator::params>("params", "Params"),
         JsonField<SpriteAnimator, &SpriteAnimator::transitions>("transitions", "Transitions"),
+        JsonField<SpriteAnimator, &SpriteAnimator::events>("events", "Events"),
         Field<SpriteAnimator, &SpriteAnimator::clip>("clip", "Clip", EditorPropKind::String),
     };
     return defs;

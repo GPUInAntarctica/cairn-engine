@@ -1976,6 +1976,70 @@ const durProp = durSchema.components[0].schema.find(p => p.name === 'durations')
 check(durProp && durProp.kind === 'json', 'component.schema reports the times as a json prop', durProp);
 
 // ---------------------------------------------------------------------------
+console.log('cli: animation events (a clip writes a parameter as it plays)');
+// ---------------------------------------------------------------------------
+// `events` is [{"at", "set"}]: entering the cell `at` names writes the object
+// `set` into the parameters - the same bag the transitions read, so a clip can
+// tell the outside that a wind-up ended or a strike landed. Walking the clip
+// with fixed steps and reading the parameters back is the whole check.
+const evShot = i => path.join(scratch, `event${i}.png`);
+const evAdvance = (frames, i) => {
+    const cmds = [{ command: 'runtime.play' }];
+    for (let k = 0; k < frames; k++) cmds.push({ command: 'runtime.step' });
+    cmds.push({ command: 'render.screenshot',
+        args: { out: evShot(i), mode: 'game', width: 64, height: 64 }, id: `e${i}` });
+    return cmds;
+};
+const evRead = id => ({ command: 'component.get', args: { id: '$ref:sp', type: 'SpriteAnimator' }, id });
+const evRun = runProjectBatch(writeBatch('events.jsonl', [
+    { command: 'image.new', args: { width: 32, height: 32, background: 'transparent' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 16, height: 16, filled: true, color: '#ff0000' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 0, width: 16, height: 16, filled: true, color: '#00ff00' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 16, width: 16, height: 16, filled: true, color: '#0000ff' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 16, width: 16, height: 16, filled: true, color: '#ffffff' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/events.png' }, id: 'sheet' },
+    { command: 'scene.new', args: { name: 'Events' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    ...atlasCam(1),
+    { command: 'entity.create', args: { name: 'Sprite' }, id: 'sp' },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteRenderer', props: {
+        texturePath: 'Assets/Sprites/events.png', pixelsPerUnit: 16, pixelPerfect: true } } },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteAnimator', props: {
+        columns: 2, rows: 2, clip: 'walk', fps: 4,
+        params: { hit: false, hp: 0 },
+        clips: [{ name: 'walk', firstFrame: 0, lastFrame: 3,
+                  events: [{ at: 1, set: { hit: true } },
+                           { at: 3, set: { hp: 3 } }] }] } }, id: 'anim' },
+    { command: 'runtime.play' },
+    evRead('before'),
+    ...evAdvance(10, 0),                                    // 0.167 s: still the first cell
+    evRead('early'),
+    ...evAdvance(6, 1),                                     // 0.267 s: the second cell now
+    evRead('hit'),
+    ...evAdvance(30, 2),                                    // 0.767 s: the last cell
+    evRead('late'),
+]));
+check(evRun.lines.every(l => l.ok !== false), 'the animation events batch runs clean', evRun.stdout + evRun.stderr);
+const evProp = (step, name) => evRun.step(step).result.props.params[name];
+check(evProp('before', 'hit') === false && evProp('before', 'hp') === 0,
+    'parameters start from what the component was given', [evProp('before', 'hit'), evProp('before', 'hp')]);
+check(evProp('early', 'hit') === false, 'an event has not fired before its cell', evProp('early', 'hit'));
+check(evProp('hit', 'hit') === true, 'it fires as its cell is entered', evProp('hit', 'hit'));
+check(evProp('late', 'hp') === 3, 'and it carries the value it names', evProp('late', 'hp'));
+const evClips = evRun.step('late').result.props.clips;
+check(Array.isArray(evClips) && evClips[0].events && evClips[0].events[0].at === 1
+    && evClips[0].events[0].set.hit === true,
+    'the event table round-trips through component.get', evClips);
+const evSchema = expectOk(['component.schema', 'SpriteAnimator']);
+const evSchemaProp = evSchema.components[0].schema.find(p => p.name === 'events');
+check(evSchemaProp && evSchemaProp.kind === 'json', 'component.schema reports events as a json prop', evSchemaProp);
+const evPx = i => expectOk(['--image', evShot(i), 'image.pixel', '--x', '32', '--y', '32']);
+const ev0 = evPx(0), ev1 = evPx(1), ev2 = evPx(2);
+check(dominant(ev0, 0), 'the first cell is what is drawn before the event', ev0);
+check(dominant(ev1, 1), 'then the cell whose event fired', ev1);
+check(whitePx(ev2), 'and the clip walks on to the cell that carries a value', ev2);
+
+// ---------------------------------------------------------------------------
 console.log('cli: export + preferences');
 // ---------------------------------------------------------------------------
 const prefs = expectOk(['project.preferences', '--set', '{"language":"en"}']);

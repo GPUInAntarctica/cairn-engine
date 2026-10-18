@@ -2491,6 +2491,280 @@ static void TestSpriteFrameDurations() {
     });
 }
 
+// Animation events: a clip writes a parameter as it plays, with `events` entries
+// of {"at", "set"} that fire when the cell `at` names is entered. Entering a cell
+// is the only thing that fires one, so a walk over the same clip writes the same
+// values - and because what an event writes is what a transition reads, a clip
+// can drive the state machine instead of a script counting frames.
+static void TestSpriteAnimationEvents() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-events").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/frames.bmp";
+    // Reading order: red, green / blue, white - one distinct colour per cell.
+    WriteTestBmpSheet(dir + "/" + tex, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255);
+    const int sheet[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};
+
+    auto px = [](Engine& engine, int x, int y) {
+        const FrameTarget& t = engine.frame();
+        const uint8_t* p = &t.color[((size_t)y * (size_t)t.width + (size_t)x) * 4];
+        return std::array<int, 3>{(int)p[0], (int)p[1], (int)p[2]};
+    };
+    auto closeTo = [](const std::array<int, 3>& c, int r, int g, int b) {
+        return std::abs(c[0] - r) < 40 && std::abs(c[1] - g) < 40 && std::abs(c[2] - b) < 40;
+    };
+    auto shows = [&](Engine& engine, int f) {
+        engine.RenderGameFrame();
+        return closeTo(px(engine, 64, 64), sheet[f][0], sheet[f][1], sheet[f][2]);
+    };
+    auto times = [](std::initializer_list<double> v) {
+        Json a = Json::MakeArray();
+        for (double t : v) a.push(Json(t));
+        return a;
+    };
+    auto event = [](Json at, const char* key, Json value) {
+        Json e = Json::MakeObject();
+        e.set("at", std::move(at));
+        Json setv = Json::MakeObject();
+        setv.set(key, std::move(value));
+        e.set("set", std::move(setv));
+        return e;
+    };
+    auto clip = [](const char* name, int first, int last, float fps, bool loop, Json durations, Json events) {
+        Json e = Json::MakeObject();
+        e.set("name", Json(name));
+        e.set("firstFrame", Json(first));
+        e.set("lastFrame", Json(last));
+        e.set("fps", Json(fps));
+        e.set("loop", Json(loop));
+        if (!durations.isNull()) e.set("durations", std::move(durations));
+        if (!events.isNull()) e.set("events", std::move(events));
+        return e;
+    };
+    auto build = [&](Engine& engine, int backend) {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(128, 128);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        scene.ambient = Color(1, 1, 1, 1);
+        scene.tonemap = 0;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 2.0f;
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        GameObject* go = scene.CreateEntity("Sprite");
+        auto* sr = go->AddComponent<SpriteRenderer>();
+        sr->texturePath = tex;
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = 4.0f;
+        auto* anim = go->AddComponent<SpriteAnimator>();
+        anim->columns = 2;
+        anim->rows = 2;
+        anim->fps = 8.0f;
+        return anim;
+    };
+    auto bothBackends = [&](const std::function<void(int, const char*)>& one) {
+        one(2, "software");
+        if (VulkanBackendAvailable()) one(1, "vulkan");
+    };
+    auto boolOf = [](SpriteAnimator* anim, const char* name) {
+        const Json* p = anim->Param(name);
+        return p && p->asBool();
+    };
+    auto trigger = [](const char* from, const char* to, const char* param, bool exit) {
+        Json t = Json::MakeObject();
+        t.set("from", Json(from));
+        t.set("to", Json(to));
+        if (param) {
+            Json w = Json::MakeObject();
+            w.set("param", Json(param));
+            w.set("op", Json("trigger"));
+            t.set("when", std::move(w));
+        }
+        if (exit) t.set("waitForExit", Json(true));
+        return t;
+    };
+
+    // --- a clip reports its own progress ------------------------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        Json ev = Json::MakeArray();
+        ev.push(event(Json(0), "started", Json(true)));
+        ev.push(event(Json(2), "hit", Json(true)));
+        ev.push(event(Json(3), "hp", Json(3.0)));
+        Json table = Json::MakeArray();
+        table.push(clip("walk", 0, 3, 4.0f, true, Json(), std::move(ev)));
+        anim->clips = std::move(table);
+        anim->clip = "walk";
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(shows(engine, 0));
+        CHECK(!boolOf(anim, "started"));            // before the clip has been entered
+        engine.Update(0.25f);                        // enters the clip, and cell 1 with it
+        CHECK(shows(engine, 1));
+        CHECK(boolOf(anim, "started"));              // the first cell's event fired
+        CHECK(anim->Param("hit") == nullptr);        // but not another cell's
+        engine.Update(0.25f);
+        CHECK(shows(engine, 2));
+        CHECK(boolOf(anim, "hit"));
+        CHECK(anim->Param("hp") == nullptr);
+        // Every pass fires again: clear the value, walk a full cycle, and the
+        // event sets it once more rather than only on the first play.
+        engine.Update(0.5f);                         // on to cell 0
+        CHECK(shows(engine, 0));
+        CHECK(boolOf(anim, "started"));
+        anim->params.set("hit", Json(false));
+        engine.Update(0.5f);
+        CHECK(shows(engine, 2));
+        CHECK(boolOf(anim, "hit"));
+        CHECK(anim->Param("hp") && std::abs(anim->Param("hp")->asNumber() - 3.0) < 1e-9);
+        // Two events in one tick run in table order, so a later write wins.
+        Json two = Json::MakeArray();
+        two.push(event(Json(1), "x", Json(1.0)));
+        two.push(event(Json(2), "x", Json(2.0)));
+        Json more = Json::MakeArray();
+        more.push(clip("pass", 0, 3, 4.0f, true, Json(), std::move(two)));
+        anim->clips = std::move(more);
+        anim->params.set("x", Json(0.0));
+        anim->clip = "pass";
+        engine.Update(0.6f);                         // through cell 1 and cell 2 at once
+        CHECK(anim->Param("x") && anim->Param("x")->asNumber() == 2.0);
+        // `at: -1` is the clip's own last cell, wherever its range sits.
+        Json tail = Json::MakeArray();
+        tail.push(event(Json(-1), "last", Json(true)));
+        Json mid = Json::MakeArray();
+        mid.push(clip("mid", 1, 2, 4.0f, true, Json(), std::move(tail)));
+        anim->clips = std::move(mid);
+        anim->clip = "mid";
+        anim->params.set("last", Json(false));
+        engine.Update(0.2f);                         // enters the clip: cell 1 of 1..2
+        CHECK(shows(engine, 1));
+        CHECK(!boolOf(anim, "last"));
+        engine.Update(0.1f);
+        CHECK(shows(engine, 2));
+        CHECK(boolOf(anim, "last"));
+    });
+
+    // --- a table with holes in it, and the component's own -------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        Json comp = Json::MakeArray();
+        comp.push(event(Json(0), "comp", Json(true)));
+        anim->events = std::move(comp);              // the component's own table
+        Json bad = Json::MakeArray();
+        Json noAt = Json::MakeObject();
+        Json a1 = Json::MakeObject();
+        a1.set("a", Json(true));
+        noAt.set("set", std::move(a1));              // an event with no `at`
+        bad.push(std::move(noAt));
+        Json noSet = Json::MakeObject();
+        noSet.set("at", Json(1));                    // an event with no `set`
+        bad.push(std::move(noSet));
+        bad.push(event(Json("two"), "b", Json(true)));   // `at` is not a number
+        bad.push(event(Json(5), "c", Json(true)));       // past the clip: its last cell
+        bad.push(event(Json(-1), "d", Json(true)));      // -1 is its last cell
+        bad.push(event(Json(-5), "e", Json(true)));      // before the clip: its first
+        bad.push(Json("nonsense"));                      // not an entry at all
+        Json table = Json::MakeArray();
+        table.push(clip("plain", 0, 3, 4.0f, true, Json(), Json()));             // no key
+        table.push(clip("bare", 0, 3, 4.0f, true, Json(), Json::MakeArray()));   // clears it
+        table.push(clip("bad", 0, 3, 4.0f, true, Json(), std::move(bad)));
+        anim->clips = std::move(table);
+        anim->clip = "plain";
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        engine.Update(0.25f);
+        CHECK(boolOf(anim, "comp"));                 // an entry with no key keeps the component's
+        anim->params.set("comp", Json(false));
+        anim->clip = "bare";
+        engine.Update(0.25f);
+        CHECK(!boolOf(anim, "comp"));                // an entry naming [] clears it
+        anim->clip = "bad";
+        engine.Update(1.0f);                         // a whole cycle: every cell is entered
+        CHECK(anim->Param("a") == nullptr);          // no `at`, so nothing to fire
+        CHECK(anim->Param("b") == nullptr);          // an `at` that is not a number
+        CHECK(boolOf(anim, "c"));                    // clamped to the last cell
+        CHECK(boolOf(anim, "d"));                    // -1 is the last cell
+        CHECK(boolOf(anim, "e"));                    // clamped to the first
+    });
+
+    // --- an event drives the state machine ----------------------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        Json idleEv = Json::MakeArray();
+        idleEv.push(event(Json(0), "start", Json(true)));
+        Json attackEv = Json::MakeArray();
+        attackEv.push(event(Json(0), "landed", Json(true)));
+        Json table = Json::MakeArray();
+        table.push(clip("idle", 0, 0, 60.0f, true, Json(), std::move(idleEv)));
+        table.push(clip("walk", 3, 3, 60.0f, true, Json(), Json()));
+        table.push(clip("attack", 1, 2, 2.0f, false, times({1.0, 0.1}), std::move(attackEv)));
+        anim->clips = std::move(table);
+        anim->clip = "idle";
+        anim->params = Json::MakeObject();
+        anim->params.set("start", Json(false));
+        anim->params.set("strike", Json(false));
+        Json tr = Json::MakeArray();
+        tr.push(trigger("idle", "walk", "start", false));
+        tr.push(trigger("walk", "attack", "strike", false));
+        tr.push(trigger("attack", "idle", nullptr, true));
+        anim->transitions = std::move(tr);
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(shows(engine, 0));                     // idle, before any tick
+        engine.Update(0.02f);                        // its first cell fires `start`...
+        CHECK(shows(engine, 3));                     // ...and the same tick moves to walk
+        CHECK(anim->Param("start") && !anim->Param("start")->asBool());   // spent
+        anim->params.set("strike", Json(true));
+        engine.Update(0.02f);
+        CHECK(shows(engine, 1));                     // walk -> attack
+        CHECK(boolOf(anim, "landed"));               // entering it fired its first cell's event
+        engine.Update(1.2f);                         // past the clip's own 1.1 s
+        CHECK(shows(engine, 0));                     // attack -> idle, whose event fires again
+        engine.Update(0.02f);
+        CHECK(shows(engine, 3));                     // and the cycle goes round
+    });
+
+    // --- an event cannot re-arm the trigger it was spent for ------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        // Both states name the same trigger; the one just spent must not be set
+        // again by the state that was entered with it, or the table would walk
+        // one state per tick with no input at all.
+        Json go = Json::MakeArray();
+        go.push(event(Json(0), "go", Json(true)));
+        Json table = Json::MakeArray();
+        table.push(clip("a", 0, 0, 60.0f, true, Json(), go));
+        table.push(clip("b", 1, 1, 60.0f, true, Json(), go));
+        table.push(clip("c", 2, 2, 60.0f, true, Json(), Json()));
+        anim->clips = std::move(table);
+        anim->clip = "a";
+        anim->params = Json::MakeObject();
+        anim->params.set("go", Json(false));
+        Json tr = Json::MakeArray();
+        tr.push(trigger("a", "b", "go", false));
+        tr.push(trigger("b", "c", "go", false));
+        anim->transitions = std::move(tr);
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        engine.Update(0.02f);                        // a's first cell sets `go`, which moves to b
+        CHECK(shows(engine, 1));
+        engine.Update(0.02f);                        // b's own event is spent with the trigger
+        CHECK(shows(engine, 1));                     // so it stays, rather than walking on to c
+        CHECK(anim->Param("go") && !anim->Param("go")->asBool());
+    });
+}
+
 // Texture cache: per-slot color space, byte-budgeted LRU eviction, and mtime
 // based reload.
 static void TestTextureCache() {
@@ -3858,6 +4132,7 @@ int main() {
     TestSpriteClips();
     TestSpriteTransitions();
     TestSpriteFrameDurations();
+    TestSpriteAnimationEvents();
     TestTextureMips();
     TestParentedPhysics();
     TestTriggerAndEnabled();

@@ -242,6 +242,8 @@ anim->lastFrame = 3;
 anim->fps = 10.0f;
 anim->loop = true;
 anim->durations = Json::MakeArray({0.5, 0.1, 0.1, 0.1});   // per-cell seconds
+anim->events = Json::ParseOr(
+    R"([{"at": 1, "set": {"hit": true}}])", Json::MakeArray());   // cell 1 writes `hit`
 ```
 
 - **Clipping.** `firstFrame` / `lastFrame` select the cells that play, so a 4×3 character sheet animates its second row with `firstFrame = 4, lastFrame = 7` and a single cell is a still. Cells are cut out of the sprite's `uvRect` rather than the whole texture, so pointing the sprite at one row (`uvRect = {0, 1/3, 1, 1/3}`) with `rows = 1` says the same thing — both compose with 0.1.25. One definition decides the rect, and the cull and the vertex generation read the same cell (0.1.27).
@@ -271,7 +273,7 @@ anim->clip = "attack";                       // a script, the CLI or the inspect
 - **Switching draws the new clip's first cell immediately.** `DrawnCell` is the one answer to "which cell is on screen", and it is the new clip's first cell until the next tick has restarted the clip — so `component.setProps {"clip": "attack"}` followed by a screenshot is that clip's first frame, with no half-elapsed time carried over from the clip before it.
 - **A clip's own `fps` and `loop` win** over the component's, which is what makes `attack` play at 12 fps and hold its last cell while `walk` wraps at 10.
 - **The table is a `Json` property** (`EditorPropKind::Json`), so it travels through the scene file, `component.add` / `component.setProps` / `component.get` and the inspector's JSON field unchanged. `ClipCount()`, `ClipName(i)`, `FindClip(name)` and `ActiveClip()` read a resolved clip from a script; entries that are not objects, or have no name, are skipped rather than mistaken for clips.
-- **A clip's `durations` win** over the component's, like every other key: an entry that names its own table plays at those times, one that names `[]` plays at its rate. Animation events do not exist yet, and the table becomes a state machine once the animator is given `params` and `transitions`, below.
+- **A clip's `durations` and `events` win** over the component's, like every other key: an entry that names its own table plays at those times and fires its own events, while one that names `[]` clears the component's. The table becomes a state machine once the animator is given `params` and `transitions`, below, and `events` is what lets a clip talk back to it.
 
 ### Driving the animations
 
@@ -302,6 +304,24 @@ anim->params.set("moving", Json(true));      // a script, the inspector, or:
 - **A transition to the state already playing replays it** from its first cell, which is how a trigger restarts a one-shot clip.
 - **Each tick advances the frame and then runs the table**, so an exit time sees the clip that just finished, and the state that tick enters is the cell the frame shows — its first. Writing `clip` by hand is still a manual override, and a state entered by the machine is drawn before any of its own ticks have run.
 - **`params` is replaced wholesale** by `component.setProps`, like the clip table: send the whole bag, not one key.
+
+### Telling the outside when a frame arrives
+
+An animation usually has to say something part-way through: the wind-up has ended and a hitbox may open, the strike has landed, the clip is back to idle. Counting frames in a script to guess that is exactly the thing the machine was built to avoid, so a clip carries `events` — `[{"at", "set"}]` — and writes a parameter when a named cell is entered.
+
+```json
+{ "name": "attack", "firstFrame": 4, "lastFrame": 7, "fps": 12, "loop": false,
+  "events": [ {"at": 1, "set": {"attackWindow": true}},
+              {"at": 3, "set": {"attackWindow": false, "landed": true}} ] }
+```
+
+- **`at` counts the clip's own cells**, from its first, so `{"at": 1}` is the second cell of that clip wherever its range sits; `-1` is its last cell, and anything out of range is clamped the way a frame is. An event with no `at`, no `set`, or an `at` that is not a number is skipped rather than guessed at.
+- **`set` is a bag of parameters to write**, and the parameters are the same ones `transitions` reads — so the wind-up above can hold a machine in `attack` for exactly as long as the window is open. Values are written as they are given: truth, a number, even a string.
+- **Entering a cell is the only thing that fires an event.** The clip's first cell fires when the clip is entered (starting play, writing `clip`, or a transition entering the state) and every following cell fires as the frame steps into it; a looping clip fires them again on every pass. Nothing watches a clock, so the same ticks write the same values in the same order.
+- **One tick can fire several events**, in table order, when a long `dt` passes through several cells at once; the last write of a tick is the one left in the parameter.
+- **`Restart()` fires the first cell's events**, which is also why a transition to the state already playing re-announces the clip's start.
+- **A trigger is spent by the transition it fires**, and the entered state's events run before that happens: an event that names the trigger which just fired is spent along with it rather than re-arming the machine on the next tick.
+- **Reading one back is reading a parameter**: `anim->Param("landed")` from a script, `component.get` from the CLI. There is no separate event queue to drain, and a fired event leaves no trace beyond the values it wrote.
 
 > **Orientation (0.1.23).** Image space is y-down everywhere in the engine: `image.*` draws `y = 0` at the top, and a texture's row 0 is `v = 0`. The 2D quad maps the image's top row to the **top** of the sprite, so what you draw is what you see — `flipY` is a plain "turn the picture upside down". Until 0.1.23 both the sprite and the glyph quad handed their top corners `v = 1`, which mirrored every sprite and every word (including the bundled `project-2d` template's title text).
 

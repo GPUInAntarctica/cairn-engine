@@ -426,6 +426,13 @@ public:
 // says which state to enter for which parameters. `clip` is then the current
 // state, and writing it by hand is a manual override.
 //
+// A clip can also write a parameter as it plays, with `events`: entries of
+// {"at", "set"} fire when the cell `at` is entered and write the object `set`
+// into the parameters. "at" counts the clip's own cells, with -1 for its last
+// one; the parameters written are the same ones the transitions read, so a
+// wind-up can set a value the machine acts on, and the whole chain - clip,
+// event, parameter, transition - is one deterministic function of the ticks.
+//
 // Play time is accumulated from the engine's Update(dt), and a frame is a pure
 // function of the accumulated dt sequence: the same series of Update calls
 // always shows the same frame, which is what makes an animation pinnable by a
@@ -456,6 +463,13 @@ public:
     Json params = Json::MakeObject();
     Json transitions = Json::MakeArray();
 
+    // Cells of the clip that write something when they are entered:
+    // [{"at", "set"}], where `at` counts the clip's own cells (-1 means its
+    // last) and `set` is an object of parameters to write. This is how a clip
+    // says its strike landed or its wind-up ended, instead of a script counting
+    // frames to guess.
+    Json events = Json::MakeArray();
+
     // Runtime state, not reflected fields: how far into the current frame the
     // accumulated play time sits, how long the current state has been playing,
     // and which clip that state belongs to.
@@ -473,6 +487,7 @@ public:
         float fps = 8.0f;
         bool loop = true;
         Json durations;      // per-cell seconds; null when there is no table
+        Json events;         // per-cell writes; null when there is no table
     };
 
     // A usable entry is an object with a non-empty name; anything else in the
@@ -522,6 +537,7 @@ public:
         c.fps = fps;
         c.loop = loop;
         c.durations = durations;
+        c.events = events;
         const Json* e = FindClip(clip);
         if (!e) return c;
         // at() is null for a key the entry leaves out, and each accessor takes
@@ -535,6 +551,9 @@ public:
         // The entry's own table when it has one - an empty array clears the
         // component's - and the component's field otherwise.
         if ((*e)["durations"].isArray()) c.durations = (*e)["durations"];
+        // The same rule as `durations`: the entry's own table when it has one,
+        // the component's otherwise.
+        if ((*e)["events"].isArray()) c.events = (*e)["events"];
         return c;
     }
 
@@ -589,6 +608,16 @@ public:
         return total;
     }
 
+    // The absolute cell an event's `at` names: an index into the clip's own
+    // cells counting from its first, -1 for its last one, and anything else out
+    // of range clamped the way a frame is.
+    static int EventCellOf(const Clip& c, int at) {
+        const int count = FrameCountOf(c);
+        int i = at == -1 ? count - 1 : (at < 0 ? 0 : at);
+        if (i > count - 1) i = count - 1;
+        return FirstCellOf(c) + i;
+    }
+
     // --- the clip being played ---------------------------------------------
     int CellCount() const { return CellCountOf(ActiveClip()); }
     int FirstCell() const { return FirstCellOf(ActiveClip()); }
@@ -620,12 +649,14 @@ public:
         return Vec4(region.x + (float)cx * cw, region.y + (float)cy * ch, cw, ch);
     }
 
-    // Back to the first cell of the current clip, at zero frame time.
+    // Back to the first cell of the current clip, at zero frame time. Entering
+    // the clip enters its first cell, so that cell's events fire here.
     void Restart() {
         activeClip = clip;
         frame = FirstCell();
         frameTime = 0.0f;
         stateTime = 0.0f;
+        FireEvents(frame);
     }
 
     // Advance by `dt` seconds of play time. A stall longer than one full cycle
@@ -661,12 +692,31 @@ public:
         if (c.loop) f = ((f % count) + count) % count;
         else f = f < 0 ? 0 : (f > count - 1 ? count - 1 : f);
         frame = first + f;
+        // A step over several cells fires the events of the cell it lands on;
+        // the engine's own stepping goes one cell at a time, so it fires every
+        // cell it passes through.
+        FireEvents(frame);
     }
 
     // --- parameters and transitions ----------------------------------------
     // The value a parameter holds, or nullptr when it is not set.
     const Json* Param(const std::string& name) const {
         return params.isObject() ? params.find(name) : nullptr;
+    }
+
+    // Fire the events that name `cell` - the cell just entered - by writing
+    // their `set` objects into the parameters, in table order. Entering a cell
+    // is the only thing that fires an event, so the same walk over the same
+    // clip writes the same values; an entry with no `at`, no `set`, or an `at`
+    // that is not a number is skipped rather than guessed at.
+    void FireEvents(int cell) {
+        const Clip c = ActiveClip();
+        if (!c.events.isArray()) return;
+        for (const Json& e : c.events.arrayItems()) {
+            if (!e.isObject() || !e["set"].isObject() || !e["at"].isNumber()) continue;
+            if (EventCellOf(c, e["at"].asInt(0)) != cell) continue;
+            for (const auto& kv : e["set"].objectItems()) params.set(kv.first, kv.second);
+        }
     }
 
     // How long one whole play of the current state takes - its cells' own times
@@ -738,6 +788,9 @@ public:
             if (!ConditionsHold(t["when"])) continue;
             if (t["waitForExit"].asBool(false) && !Finished()) continue;
             clip = to;
+            // Entering the state runs its first cell's events, and the trigger is
+            // spent after them: an event that names the trigger which just fired
+            // is spent with it instead of re-arming the machine next tick.
             Restart();
             ConsumeTriggers(t["when"]);
             return to;
