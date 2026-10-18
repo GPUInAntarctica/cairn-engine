@@ -1608,6 +1608,94 @@ check(!litTexel(barMirror), "nothing hangs below the bar's left end", barMirror)
 check(litTexel(stemBottom), "the 'T' stem runs down the middle to the bottom", stemBottom);
 
 // ---------------------------------------------------------------------------
+console.log('cli: sprite atlas (uv rect + pivot)');
+// ---------------------------------------------------------------------------
+// A sheet is the prerequisite for 2D animation, and the drawing tools already
+// assemble one: four 16x16 frames in a 32x32 PNG. `uvRect` selects one frame -
+// (x, y, w, h) as fractions of the texture, rows counted from the top like every
+// other image coordinate - and `pivot` places that frame relative to the entity,
+// in the same image coordinates. The drawn size is the *frame's* texels over the
+// pixels-per-unit, not the whole texture's.
+const sheetSteps = [
+    { command: 'image.new', args: { width: 32, height: 32, background: 'transparent' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 16, height: 16, filled: true, color: '#ff0000' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 0, width: 16, height: 16, filled: true, color: '#00ff00' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 16, width: 16, height: 16, filled: true, color: '#0000ff' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 16, width: 16, height: 16, filled: true, color: '#ffffff' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/sheet.png' }, id: 'sheet' },
+];
+// Both batches render a 2x2-world-unit view (orthoSize 1) at 64x64, so one
+// 16-texel frame at 16 px/unit is exactly 32x32 screen pixels.
+const atlasCam = orthoSize => ([
+    { command: 'entity.create', args: { name: 'Main', position: [0, 0, 10] }, id: 'cam' },
+    { command: 'component.add', args: { id: '$ref:cam', type: 'Camera', props: { orthographic: true, orthoSize, clearColor: [0, 0, 0, 1], skyEnabled: false } } },
+]);
+
+// One sprite showing the bottom-right frame: the frame the agent asked for has
+// to be the one drawn (the sheet's top-left frame is red, a whole-sheet sprite
+// would show that), and it has to be one frame big - the view corners stay
+// background instead of being covered by the whole 2-unit sheet.
+const atlasFrameShot = path.join(scratch, 'atlas_frame.png');
+const atlasFrameRun = runProjectBatch(writeBatch('atlas_frame.jsonl', [
+    ...sheetSteps,
+    { command: 'scene.new', args: { name: 'AtlasFrame' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    ...atlasCam(1),
+    { command: 'entity.create', args: { name: 'Sprite' }, id: 'sp' },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteRenderer', props: {
+        texturePath: 'Assets/Sprites/sheet.png', pixelsPerUnit: 16, pixelPerfect: true,
+        uvRect: [0.5, 0.5, 0.5, 0.5] } } },
+    { command: 'runtime.play' },
+    { command: 'render.screenshot', args: { out: atlasFrameShot, mode: 'game', width: 64, height: 64 }, id: 'shot' },
+]));
+check(atlasFrameRun.lines.every(l => l.ok !== false), 'the atlas batch runs clean', atlasFrameRun.stdout + atlasFrameRun.stderr);
+const atlasPx = (x, y) => expectOk(['--image', atlasFrameShot, 'image.pixel', '--x', String(x), '--y', String(y)]);
+const darkPx = p => p.r + p.g + p.b <= 30;
+const whitePx = p => p.r > 60 && Math.abs(p.r - p.g) <= 8 && Math.abs(p.g - p.b) <= 14;
+const atlasCentre = atlasPx(32, 32);
+check(whitePx(atlasCentre), 'uvRect draws the frame it names, not the whole sheet', atlasCentre);
+const atlasCorners = [atlasPx(8, 8), atlasPx(56, 8), atlasPx(8, 56), atlasPx(56, 56)];
+check(atlasCorners.every(darkPx), 'the sprite is one frame big, not one sheet big', atlasCorners);
+
+// Four tiles, one per frame, each pinned by pivot (0, 1) - the sprite's
+// bottom-left in image coordinates - at the corner of its screen quadrant. The
+// colour in each quadrant is then the frame that uvRect named: red top-left,
+// green top-right, blue bottom-left, white bottom-right.
+const atlasQuadShot = path.join(scratch, 'atlas_quad.png');
+const tiles = [
+    { name: 'Red', pos: [-1, 0, 0], rect: [0, 0, 0.5, 0.5] },
+    { name: 'Green', pos: [0, 0, 0], rect: [0.5, 0, 0.5, 0.5] },
+    { name: 'Blue', pos: [-1, -1, 0], rect: [0, 0.5, 0.5, 0.5] },
+    { name: 'White', pos: [0, -1, 0], rect: [0.5, 0.5, 0.5, 0.5] },
+];
+const atlasQuadRun = runProjectBatch(writeBatch('atlas_quad.jsonl', [
+    { command: 'scene.new', args: { name: 'AtlasQuad' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    ...atlasCam(1),
+    ...tiles.flatMap((tile, i) => ([
+        { command: 'entity.create', args: { name: tile.name, position: tile.pos }, id: `t${i}` },
+        { command: 'component.add', args: { id: `$ref:t${i}`, type: 'SpriteRenderer', props: {
+            texturePath: 'Assets/Sprites/sheet.png', pixelsPerUnit: 16, pixelPerfect: true,
+            uvRect: tile.rect, pivot: [0, 1] } } },
+    ])),
+    { command: 'runtime.play' },
+    { command: 'render.screenshot', args: { out: atlasQuadShot, mode: 'game', width: 64, height: 64 }, id: 'shot' },
+]));
+check(atlasQuadRun.lines.every(l => l.ok !== false), 'the atlas tiling batch runs clean', atlasQuadRun.stdout + atlasQuadRun.stderr);
+const atlasQuadStep = atlasQuadRun.step('shot');
+check(atlasQuadStep && atlasQuadStep.result.stats.drawCalls2D === 4,
+    'all four frames reach the 2D pass', atlasQuadStep && atlasQuadStep.result);
+const atlasQuadPx = (x, y) => expectOk(['--image', atlasQuadShot, 'image.pixel', '--x', String(x), '--y', String(y)]);
+const atlasRed = atlasQuadPx(16, 16);
+const atlasGreen = atlasQuadPx(48, 16);
+const atlasBlue = atlasQuadPx(16, 48);
+const atlasWhite = atlasQuadPx(48, 48);
+check(dominant(atlasRed, 0), "the top-left frame is the sheet's red top-left quadrant", atlasRed);
+check(dominant(atlasGreen, 1), "the top-right frame is the sheet's green top-right quadrant", atlasGreen);
+check(dominant(atlasBlue, 2), "the bottom-left frame is the sheet's blue bottom-left quadrant", atlasBlue);
+check(whitePx(atlasWhite), "the bottom-right frame is the sheet's white bottom-right quadrant", atlasWhite);
+
+// ---------------------------------------------------------------------------
 console.log('cli: export + preferences');
 // ---------------------------------------------------------------------------
 const prefs = expectOk(['project.preferences', '--set', '{"language":"en"}']);

@@ -913,7 +913,7 @@ Napi::FunctionReference EngineWrap::constructor;
 
 Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
     EngineWrap::Init(env, exports);
-    exports.Set("engineVersion", Napi::String::New(env, "0.1.24"));
+    exports.Set("engineVersion", Napi::String::New(env, "0.1.25"));
     return exports;
 }
 

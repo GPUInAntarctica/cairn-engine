@@ -153,6 +153,8 @@ const std::vector<PropertyDef>& MeshRendererDefs() {
 const std::vector<PropertyDef>& SpriteRendererDefs() {
     static const std::vector<PropertyDef> defs = {
         AssetField<SpriteRenderer, &SpriteRenderer::texturePath>("texturePath", "Texture", "texture"),
+        Field<SpriteRenderer, &SpriteRenderer::uvRect>("uvRect", "Uv Rect", EditorPropKind::Vec4),
+        Field<SpriteRenderer, &SpriteRenderer::pivot>("pivot", "Pivot", EditorPropKind::Vec2),
         Field<SpriteRenderer, &SpriteRenderer::color>("color", "Color", EditorPropKind::Color),
         Field<SpriteRenderer, &SpriteRenderer::pixelsPerUnit>("pixelsPerUnit", "Pixels Per Unit", EditorPropKind::Float),
         Field<SpriteRenderer, &SpriteRenderer::sortingLayer>("sortingLayer", "Sorting Layer", EditorPropKind::Int),

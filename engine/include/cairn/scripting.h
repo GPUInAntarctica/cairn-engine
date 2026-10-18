@@ -369,6 +369,18 @@ public:
 class SpriteRenderer : public Component {
 public:
     std::string texturePath;        // project-relative (png/jpg/bmp)
+    // Sub-rectangle of the texture to draw, in normalized image coordinates:
+    // (x, y) is the rectangle's top-left corner and (z, w) its size, both as
+    // fractions of the texture. The default {0, 0, 1, 1} is the whole texture;
+    // frame (col, row) of a sheet that is 4 columns by 2 rows wide is
+    // {col * 0.25f, row * 0.5f, 0.25f, 0.5f}. Rows count from the top, which is
+    // the order image.* uses and the order image.stamp lays frames out in.
+    Vec4 uvRect = Vec4(0, 0, 1, 1);
+    // Point of the sprite that lands on the entity's position, in the same image
+    // coordinates as uvRect: (0, 0) is the sprite's top-left corner, (1, 1) its
+    // bottom-right. The default centres it; (0.5f, 1.0f) puts the sprite's
+    // bottom-centre - its feet - on the position. flipX/flipY mirror about it.
+    Vec2 pivot = Vec2(0.5f, 0.5f);
     Color color = Color::White;
     float pixelsPerUnit = 100.0f;
     int sortingLayer = 0;     // coarse group, drawn low to high

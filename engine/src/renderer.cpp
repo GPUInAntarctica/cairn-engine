@@ -1599,8 +1599,12 @@ struct Renderer::Impl {
                 else tex = textures.GetBuiltin("checker");
                 if (!tex) continue;
                 list->liveTextures.push_back(tex);  // pin against LRU eviction mid-frame
-                float w = tex->width() / std::max(1.0f, sr->pixelsPerUnit);
-                float h = tex->height() / std::max(1.0f, sr->pixelsPerUnit);
+                // The drawn size is the atlas rect measured in texels, divided
+                // by the pixels-per-unit: a sprite cut out of a sheet is as big
+                // as its frame, not as the whole texture.
+                const Vec4& r = sr->uvRect;
+                float w = tex->width() * r.z / std::max(1.0f, sr->pixelsPerUnit);
+                float h = tex->height() * r.w / std::max(1.0f, sr->pixelsPerUnit);
                 if (sr->flipX) w = -w;
                 if (sr->flipY) h = -h;
                 MaterialGpu mat;
@@ -1622,14 +1626,29 @@ struct Renderer::Impl {
                 // top-left} and a texture's row 0 is v=0, so the two *top*
                 // corners must take v=0: image.* draws y-down (y=0 is the top
                 // row) and the world's +Y is up, so mapping v=0 to the bottom
-                // corners stands every sprite on its head.
-                Vec2 uv[4] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
+                // corners stands every sprite on its head. The same holds for
+                // the atlas rect: its top edge is v = r.y, its bottom edge
+                // v = r.y + r.w.
+                Vec2 uv[4] = {
+                    {r.x, r.y + r.w},           // bottom-left
+                    {r.x + r.z, r.y + r.w},     // bottom-right
+                    {r.x + r.z, r.y},           // top-right
+                    {r.x, r.y},                 // top-left
+                };
+                // The pivot is in image coordinates as well, so the image's top
+                // edge lands at +pivot.y * h and its bottom edge at
+                // (pivot.y - 1) * h; a negated w or h (flipX/flipY) mirrors the
+                // extents about the pivot.
+                const float x0 = -sr->pivot.x * w;
+                const float x1 = (1.0f - sr->pivot.x) * w;
+                const float y0 = (sr->pivot.y - 1.0f) * h;
+                const float y1 = sr->pivot.y * h;
                 Mat4 world = go->transform().WorldMatrix();
                 Vec3 q[4];
-                q[0] = world.TransformPoint(Vec3(-w * 0.5f, -h * 0.5f, 0));
-                q[1] = world.TransformPoint(Vec3(w * 0.5f, -h * 0.5f, 0));
-                q[2] = world.TransformPoint(Vec3(w * 0.5f, h * 0.5f, 0));
-                q[3] = world.TransformPoint(Vec3(-w * 0.5f, h * 0.5f, 0));
+                q[0] = world.TransformPoint(Vec3(x0, y0, 0));
+                q[1] = world.TransformPoint(Vec3(x1, y0, 0));
+                q[2] = world.TransformPoint(Vec3(x1, y1, 0));
+                q[3] = world.TransformPoint(Vec3(x0, y1, 0));
                 FrameDrawList::Item2D out;
                 out.mat = mat;
                 out.firstVert = AppendQuad(list, q, uv);

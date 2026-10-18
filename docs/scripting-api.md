@@ -217,9 +217,16 @@ sr->orderInLayer = -5;                       // fine order within the layer
 ```
 
 - **Size.** A sprite's world size is `texturePixels / pixelsPerUnit`; place the camera back (for example `z = 10`, looking down `-Z`) so the sprites are in front of it.
+- **`uvRect`** picks a sub-rectangle of the texture: `{x, y, w, h}` as fractions of the texture, where `(x, y)` is the rectangle's top-left corner. The default `{0, 0, 1, 1}` is the whole texture, and frame `(col, row)` of a sheet that is `cols` by `rows` frames wide is `{col / cols, row / rows, 1 / cols, 1 / rows}` — rows count from the top, which is the order `image.stamp` lays frames out in. The drawn size follows the frame (`frameTexels / pixelsPerUnit`), so one texture can hold a whole animation:
+
+```cpp
+sr->uvRect = Vec4(0.25f, 0.0f, 0.25f, 0.5f);  // column 1, row 0 of a 4x2 sheet
+```
+
+- **`pivot`** is the point of the sprite that lands on the entity's position, in the same image coordinates as `uvRect`: `(0, 0)` is the frame's top-left corner, `(1, 1)` its bottom-right. The default `(0.5, 0.5)` centres the sprite (what every sprite did before 0.1.25); `(0.5, 1)` puts the frame's bottom-centre — its feet — on the position. `flipX` / `flipY` mirror the geometry about this point.
 - **`pixelPerfect`** disables anti-aliasing in the software reference and selects a nearest-neighbour, mip-less sampler on the GPU, which is what keeps AI-drawn pixel art crisp. Both backends are held to the same picture (0.1.22).
 - **Sorting** is `sortingLayer` first, then `orderInLayer`, then distance along the view direction; text shares the same ordering.
-- **`normalMapPath`** adds tangent-space 2D lighting. The map is authored in the same y-down image space as the albedo: a green channel below 0.5 tilts the surface towards the top of the image (which is the world's up), which is exactly what `image.normalMap` writes (0.1.23). `flipX` / `flipY` mirror the geometry about the sprite's centre.
+- **`normalMapPath`** adds tangent-space 2D lighting. The map is authored in the same y-down image space as the albedo: a green channel below 0.5 tilts the surface towards the top of the image (which is the world's up), which is exactly what `image.normalMap` writes (0.1.23).
 - `TextRenderer` takes `text`, `fontSize` (glyph height in the same world units), `color` and `alignment` (`Left` / `Center` / `Right`).
 
 > **Orientation (0.1.23).** Image space is y-down everywhere in the engine: `image.*` draws `y = 0` at the top, and a texture's row 0 is `v = 0`. The 2D quad maps the image's top row to the **top** of the sprite, so what you draw is what you see — `flipY` is a plain "turn the picture upside down". Until 0.1.23 both the sprite and the glyph quad handed their top corners `v = 1`, which mirrored every sprite and every word (including the bundled `project-2d` template's title text).

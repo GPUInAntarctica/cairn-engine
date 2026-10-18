@@ -1143,6 +1143,39 @@ static void WriteTestBmpHalves(const std::string& path, int w, int h,
     }
 }
 
+// Minimal 24-bit BMP of a 2x2 sheet: four equal quadrants whose colours are
+// given in reading order (top-left, top-right, bottom-left, bottom-right) - the
+// layout image.stamp produces and uvRect addresses. BMP rows are stored
+// bottom-up, so the file's last rows are the visual top.
+static void WriteTestBmpSheet(const std::string& path,
+                              uint8_t r0, uint8_t g0, uint8_t b0,   // top-left
+                              uint8_t r1, uint8_t g1, uint8_t b1,   // top-right
+                              uint8_t r2, uint8_t g2, uint8_t b2,   // bottom-left
+                              uint8_t r3, uint8_t g3, uint8_t b3) { // bottom-right
+    const int w = 16, h = 16;
+    const int row = w * 3;
+    const uint32_t dataSize = (uint32_t)(row * h);
+    const uint32_t fileSize = 54 + dataSize;
+    std::ofstream out(path, std::ios::binary);
+    auto u16 = [&](uint16_t v) { out.put((char)(v & 0xff)); out.put((char)(v >> 8)); };
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; ++i) out.put((char)((v >> (8 * i)) & 0xff)); };
+    out.put('B'); out.put('M');
+    u32(fileSize); u16(0); u16(0); u32(54);
+    u32(40); u32((uint32_t)w); u32((uint32_t)h); u16(1); u16(24);
+    u32(0); u32(dataSize); u32(2835); u32(2835); u32(0); u32(0);
+    for (int fileRow = 0; fileRow < h; ++fileRow) {
+        const bool visualTop = fileRow >= h / 2;   // BMP rows run bottom-up
+        for (int x = 0; x < w; ++x) {
+            const bool right = x >= w / 2;
+            const int i = (visualTop ? 0 : 2) + (right ? 1 : 0);
+            const uint8_t c[4][3] = {{r0, g0, b0}, {r1, g1, b1}, {r2, g2, b2}, {r3, g3, b3}};
+            out.put((char)c[i][2]);
+            out.put((char)c[i][1]);
+            out.put((char)c[i][0]);
+        }
+    }
+}
+
 // Bindless texture arrays: a batched run shares one mesh and cull mode, so the
 // only thing keeping two draws' textures apart is the per-instance slot index
 // in the draw uniform. Three cubes with three albedo textures must render as
@@ -1503,6 +1536,139 @@ static void TestSpriteNormalOrientation() {
     if (VulkanBackendAvailable()) run(1);
 }
 
+// Sprite atlas: uvRect picks a sub-rectangle of the texture and pivot places it
+// relative to the entity. A four-quadrant sheet makes both wrong answers
+// visible - an ignored uvRect draws the whole sheet instead of one frame, and an
+// ignored pivot centres every sprite on the entity. The frame's world size is
+// the *frame's* texels over the pixels-per-unit, not the whole texture's, so a
+// 2-unit frame cannot cover a 4-unit view. Checked on both backends: the geometry
+// is shared vertex data, and the two must agree.
+static void TestSpriteAtlas() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-atlas").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/sheet.bmp";
+    // Reading order: red, green / blue, white.
+    WriteTestBmpSheet(dir + "/" + tex,
+                      255, 0, 0,   0, 255, 0,
+                      0, 0, 255,   255, 255, 255);
+
+    auto px = [](Engine& engine, int x, int y) {
+        const FrameTarget& t = engine.frame();
+        const uint8_t* p = &t.color[((size_t)y * (size_t)t.width + (size_t)x) * 4];
+        return std::array<int, 3>{(int)p[0], (int)p[1], (int)p[2]};
+    };
+    auto sum = [](const std::array<int, 3>& c) { return c[0] + c[1] + c[2]; };
+    auto close = [](const std::array<int, 3>& c, int r, int g, int b) {
+        return std::abs(c[0] - r) < 40 && std::abs(c[1] - g) < 40 && std::abs(c[2] - b) < 40;
+    };
+    auto isBlack = [&](const std::array<int, 3>& c) { return sum(c) < 24; };
+
+    auto makeScene = [&](Engine& engine, int backend) -> Scene& {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(128, 128);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        // White ambient and no tone mapping, so a texel's authored colour
+        // reaches the frame unchanged and the frame checks can be about which
+        // frame of the sheet was drawn rather than about the lighting curve.
+        scene.ambient = Color(1, 1, 1, 1);
+        scene.tonemap = 0;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 2.0f;   // 4x4 world units on screen: 32 px per unit
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        return scene;
+    };
+    auto addSprite = [&](Scene& scene, Vec4 rect, Vec2 pivot) -> SpriteRenderer* {
+        GameObject* go = scene.CreateEntity("Sprite");
+        auto* sr = go->AddComponent<SpriteRenderer>();
+        sr->texturePath = tex;
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = 4.0f;      // 8-texel frame -> 2 units; whole sheet -> 4
+        sr->uvRect = rect;
+        sr->pivot = pivot;
+        return sr;
+    };
+
+    // --- each frame draws its own quadrant, at the frame's size -----------
+    {
+        struct Case { Vec4 rect; int r, g, b; const char* what; };
+        const Case cases[] = {
+            {Vec4(0.0f, 0.0f, 0.5f, 0.5f), 255, 0, 0, "top-left frame is red"},
+            {Vec4(0.5f, 0.0f, 0.5f, 0.5f), 0, 255, 0, "top-right frame is green"},
+            {Vec4(0.0f, 0.5f, 0.5f, 0.5f), 0, 0, 255, "bottom-left frame is blue"},
+            {Vec4(0.5f, 0.5f, 0.5f, 0.5f), 255, 255, 255, "bottom-right frame is white"},
+        };
+        auto build = [&](Engine& engine, int backend) {
+            Scene& scene = makeScene(engine, backend);
+            // One sprite per frame, placed by an offscreen marker entity, so a
+            // single frame pins all four rects at once.
+            addSprite(scene, cases[0].rect, Vec2(0.5f, 0.5f));
+        };
+        auto check = [&](Engine& engine) {
+            // The sprite is centred and 2 units across, so it fills screen
+            // 32..96 in both axes; the view corners stay background. A whole-sheet
+            // sprite (4 units) would cover the corners too.
+            auto sr = engine.scene().FindByName("Sprite")->GetComponent<SpriteRenderer>();
+            for (const Case& c : cases) {
+                sr->uvRect = c.rect;
+                engine.RenderGameFrame();
+                CHECK(close(px(engine, 64, 64), c.r, c.g, c.b));
+                CHECK(isBlack(px(engine, 16, 16)));
+            }
+        };
+        Engine cpu;
+        build(cpu, 2);  // software
+        cpu.Play();
+        CHECK(std::string(cpu.RenderGameFrame().backend) == "software");
+        check(cpu);
+
+        if (VulkanBackendAvailable()) {
+            Engine gpu;
+            build(gpu, 1);
+            gpu.Play();
+            CHECK(std::string(gpu.RenderGameFrame().backend) == "vulkan");
+            check(gpu);
+        }
+    }
+
+    // --- the pivot moves the quad, it does not shrink it ------------------
+    {
+        auto build = [&](Engine& engine, int backend) {
+            Scene& scene = makeScene(engine, backend);
+            addSprite(scene, Vec4(0.0f, 0.0f, 0.5f, 0.5f), Vec2(0.0f, 1.0f));
+        };
+        auto check = [&](Engine& engine) {
+            // pivot (0, 1) is the sprite's bottom-left in image coordinates, so
+            // the 2x2-unit frame sits in world x 0..2, y 0..2 - the view's
+            // top-right quadrant (screen y grows downward).
+            CHECK(close(px(engine, 96, 32), 255, 0, 0));
+            CHECK(isBlack(px(engine, 32, 96)));
+            CHECK(isBlack(px(engine, 32, 32)));
+            CHECK(isBlack(px(engine, 96, 96)));
+        };
+        Engine cpu;
+        build(cpu, 2);  // software
+        cpu.Play();
+        CHECK(std::string(cpu.RenderGameFrame().backend) == "software");
+        check(cpu);
+
+        if (VulkanBackendAvailable()) {
+            Engine gpu;
+            build(gpu, 1);
+            gpu.Play();
+            CHECK(std::string(gpu.RenderGameFrame().backend) == "vulkan");
+            check(gpu);
+        }
+    }
+}
 // Texture cache: per-slot color space, byte-budgeted LRU eviction, and mtime
 // based reload.
 static void TestTextureCache() {
@@ -2864,6 +3030,7 @@ int main() {
     TestSpriteQuality();
     TestSpriteOrientation();
     TestSpriteNormalOrientation();
+    TestSpriteAtlas();
     TestTextureMips();
     TestParentedPhysics();
     TestTriggerAndEnabled();
