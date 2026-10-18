@@ -1151,8 +1151,8 @@ static void WriteTestBmpSheet(const std::string& path,
                               uint8_t r0, uint8_t g0, uint8_t b0,   // top-left
                               uint8_t r1, uint8_t g1, uint8_t b1,   // top-right
                               uint8_t r2, uint8_t g2, uint8_t b2,   // bottom-left
-                              uint8_t r3, uint8_t g3, uint8_t b3) { // bottom-right
-    const int w = 16, h = 16;
+                              uint8_t r3, uint8_t g3, uint8_t b3,   // bottom-right
+                              int w = 16, int h = 16) {
     const int row = w * 3;
     const uint32_t dataSize = (uint32_t)(row * h);
     const uint32_t fileSize = 54 + dataSize;
@@ -2765,6 +2765,131 @@ static void TestSpriteAnimationEvents() {
     });
 }
 
+// A clip can name its own texture: `texturePath` is a key on the clip entry and
+// a field on the component (the default for entries that leave it out), and the
+// sheet it names brings its own texel size with it. A character can therefore
+// swap sheets per animation without a second entity, and the cull and the draw
+// both resolve the sheet through one function, so they cannot disagree.
+static void TestSpriteClipTexture() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-cliptex").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    // Two sheets, drawn in reading order and deliberately different in size: the
+    // second one is 8x8 where the first is 16x16, so at the same pixels-per-unit
+    // its cells are half the size and a pixel the first sheet covers stays clear.
+    WriteTestBmpSheet(dir + "/Assets/Textures/a.bmp",
+                      255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255);
+    WriteTestBmpSheet(dir + "/Assets/Textures/b.bmp",
+                      255, 255, 0, 255, 0, 255, 0, 255, 255, 128, 128, 128, 8, 8);
+    const int aSheet[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};
+    const int bSheet[4][3] = {{255, 255, 0}, {255, 0, 255}, {0, 255, 255}, {128, 128, 128}};
+
+    auto px = [](Engine& engine, int x, int y) {
+        const FrameTarget& t = engine.frame();
+        const uint8_t* p = &t.color[((size_t)y * (size_t)t.width + (size_t)x) * 4];
+        return std::array<int, 3>{(int)p[0], (int)p[1], (int)p[2]};
+    };
+    auto closeTo = [](const std::array<int, 3>& c, int r, int g, int b) {
+        return std::abs(c[0] - r) < 40 && std::abs(c[1] - g) < 40 && std::abs(c[2] - b) < 40;
+    };
+    auto showsCell = [&](Engine& engine, const int sheet[4][3], int f) {
+        engine.RenderGameFrame();
+        const std::array<int, 3> c = px(engine, 64, 64);
+        return closeTo(c, sheet[f][0], sheet[f][1], sheet[f][2]);
+    };
+    // Whether anything at all was drawn there: the camera clears to black.
+    auto picked = [&](Engine& engine, int x, int y) {
+        engine.RenderGameFrame();
+        const std::array<int, 3> c = px(engine, x, y);
+        return c[0] > 40 || c[1] > 40 || c[2] > 40;
+    };
+    // Every clip here plays the same four cells; only the sheet differs.
+    auto clip = [](const char* name, const char* tex) {
+        Json e = Json::MakeObject();
+        e.set("name", Json(name));
+        e.set("firstFrame", Json(0));
+        e.set("lastFrame", Json(3));
+        e.set("fps", Json(4.0f));
+        if (tex) e.set("texturePath", Json(tex));   // nullptr leaves the key out
+        return e;
+    };
+    auto build = [&](Engine& engine, int backend) {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(128, 128);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        scene.ambient = Color(1, 1, 1, 1);
+        scene.tonemap = 0;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 2.0f;
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        GameObject* go = scene.CreateEntity("Sprite");
+        auto* sr = go->AddComponent<SpriteRenderer>();
+        sr->texturePath = "Assets/Textures/a.bmp";
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = 4.0f;
+        auto* anim = go->AddComponent<SpriteAnimator>();
+        anim->columns = 2;
+        anim->rows = 2;
+        anim->fps = 8.0f;
+        return anim;
+    };
+    auto bothBackends = [&](const std::function<void(int, const char*)>& one) {
+        one(2, "software");
+        if (VulkanBackendAvailable()) one(1, "vulkan");
+    };
+
+    // --- a clip's own sheet ------------------------------------------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        Json table = Json::MakeArray();
+        table.push(clip("own", "Assets/Textures/b.bmp"));
+        table.push(clip("plain", nullptr));
+        anim->clips = std::move(table);
+        anim->clip = "plain";
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(showsCell(engine, aSheet, 0));         // the sprite's own sheet
+        CHECK(picked(engine, 40, 40));               // its 8-texel cells over 4 ppu: 2 units each
+        engine.Update(0.25f);
+        CHECK(showsCell(engine, aSheet, 1));         // the same sheet while it animates
+        anim->clip = "own";
+        CHECK(showsCell(engine, bSheet, 0));         // the clip's own sheet, same cell index
+        CHECK(!picked(engine, 40, 40));              // its 4-texel cells: 1 unit, so that pixel is clear
+        engine.Update(0.25f);
+        CHECK(showsCell(engine, bSheet, 1));
+        anim->clip = "plain";
+        CHECK(showsCell(engine, aSheet, 0));         // and back to the sprite's
+    });
+
+    // --- the component's field, and "" going back to the sprite's ----------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        anim->texturePath = "Assets/Textures/b.bmp";
+        Json table = Json::MakeArray();
+        table.push(clip("plain", nullptr));          // no key: the component's field
+        table.push(clip("back", ""));                // names "" : the sprite's
+        anim->clips = std::move(table);
+        anim->clip = "plain";
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(showsCell(engine, bSheet, 0));
+        CHECK(!picked(engine, 40, 40));
+        anim->clip = "back";
+        CHECK(showsCell(engine, aSheet, 0));
+        CHECK(picked(engine, 40, 40));
+    });
+}
+
 // Texture cache: per-slot color space, byte-budgeted LRU eviction, and mtime
 // based reload.
 static void TestTextureCache() {
@@ -4133,6 +4258,7 @@ int main() {
     TestSpriteTransitions();
     TestSpriteFrameDurations();
     TestSpriteAnimationEvents();
+    TestSpriteClipTexture();
     TestTextureMips();
     TestParentedPhysics();
     TestTriggerAndEnabled();

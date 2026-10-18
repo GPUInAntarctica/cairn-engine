@@ -244,6 +244,7 @@ anim->loop = true;
 anim->durations = Json::MakeArray({0.5, 0.1, 0.1, 0.1});   // per-cell seconds
 anim->events = Json::ParseOr(
     R"([{"at": 1, "set": {"hit": true}}])", Json::MakeArray());   // cell 1 writes `hit`
+anim->texturePath = "Assets/Textures/hero.png";   // the animator's default sheet
 ```
 
 - **Clipping.** `firstFrame` / `lastFrame` select the cells that play, so a 4×3 character sheet animates its second row with `firstFrame = 4, lastFrame = 7` and a single cell is a still. Cells are cut out of the sprite's `uvRect` rather than the whole texture, so pointing the sprite at one row (`uvRect = {0, 1/3, 1, 1/3}`) with `rows = 1` says the same thing — both compose with 0.1.25. One definition decides the rect, and the cull and the vertex generation read the same cell (0.1.27).
@@ -253,7 +254,7 @@ anim->events = Json::ParseOr(
 
 ### Naming the animations
 
-A character is several animations on one sheet, so `clips` is a table of them and `clip` names the one playing. Each entry carries a `name` and any of `columns`, `rows`, `firstFrame`, `lastFrame`, `fps`, `loop`, `durations`; a key an entry leaves out comes from the matching field on the component, and `clip` naming no entry means those fields are the whole animation — so an animator with no table behaves exactly as the fields say.
+A character is several animations on one sheet, so `clips` is a table of them and `clip` names the one playing. Each entry carries a `name` and any of `columns`, `rows`, `texturePath`, `firstFrame`, `lastFrame`, `fps`, `loop`, `durations`, `events`; a key an entry leaves out comes from the matching field on the component, and `clip` naming no entry means those fields are the whole animation — so an animator with no table behaves exactly as the fields say.
 
 ```json
 "clips": [
@@ -273,6 +274,7 @@ anim->clip = "attack";                       // a script, the CLI or the inspect
 - **Switching draws the new clip's first cell immediately.** `DrawnCell` is the one answer to "which cell is on screen", and it is the new clip's first cell until the next tick has restarted the clip — so `component.setProps {"clip": "attack"}` followed by a screenshot is that clip's first frame, with no half-elapsed time carried over from the clip before it.
 - **A clip's own `fps` and `loop` win** over the component's, which is what makes `attack` play at 12 fps and hold its last cell while `walk` wraps at 10.
 - **The table is a `Json` property** (`EditorPropKind::Json`), so it travels through the scene file, `component.add` / `component.setProps` / `component.get` and the inspector's JSON field unchanged. `ClipCount()`, `ClipName(i)`, `FindClip(name)` and `ActiveClip()` read a resolved clip from a script; entries that are not objects, or have no name, are skipped rather than mistaken for clips.
+- **A clip can name its own texture.** `texturePath` on an entry points that animation at a sheet of its own — an attack effect, a different costume, a whole other character — while the entity keeps one `SpriteRenderer`. The sheet it names brings its own texel size with it (the cell is still cut out of the sprite's `uvRect`, but the texels-per-unit comes from the named texture), and the key follows the usual rule: the entry's own value wins, an entry that leaves it out uses the component's `texturePath`, and naming `""` goes back to the sprite's own texture. The cull and the draw resolve the sheet through one function, so they cannot disagree about which texture is on screen.
 - **A clip's `durations` and `events` win** over the component's, like every other key: an entry that names its own table plays at those times and fires its own events, while one that names `[]` clears the component's. The table becomes a state machine once the animator is given `params` and `transitions`, below, and `events` is what lets a clip talk back to it.
 
 ### Driving the animations

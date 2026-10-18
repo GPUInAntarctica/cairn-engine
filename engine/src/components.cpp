@@ -194,6 +194,7 @@ const std::vector<PropertyDef>& SpriteAnimatorDefs() {
     static const std::vector<PropertyDef> defs = {
         Field<SpriteAnimator, &SpriteAnimator::columns>("columns", "Columns", EditorPropKind::Int),
         Field<SpriteAnimator, &SpriteAnimator::rows>("rows", "Rows", EditorPropKind::Int),
+        Field<SpriteAnimator, &SpriteAnimator::texturePath>("texturePath", "Texture", EditorPropKind::String),
         Field<SpriteAnimator, &SpriteAnimator::firstFrame>("firstFrame", "First Frame", EditorPropKind::Int),
         Field<SpriteAnimator, &SpriteAnimator::lastFrame>("lastFrame", "Last Frame (-1 = end)", EditorPropKind::Int),
         Field<SpriteAnimator, &SpriteAnimator::fps>("fps", "FPS", EditorPropKind::Float),

@@ -2040,6 +2040,76 @@ check(dominant(ev1, 1), 'then the cell whose event fired', ev1);
 check(whitePx(ev2), 'and the clip walks on to the cell that carries a value', ev2);
 
 // ---------------------------------------------------------------------------
+console.log('cli: a clip can name its own texture');
+// ---------------------------------------------------------------------------
+// `texturePath` is a key on a clip entry (and a field on the animator, the
+// default for entries that leave it out), so an attack can live on a sheet of
+// its own without a second entity. The named sheet brings its own texel size:
+// the second sheet here has half-size cells, so a pixel that the sprite's own
+// sheet covers stays background under it.
+const texShot = i => path.join(scratch, `cliptex${i}.png`);
+const texSet = props => ({ command: 'component.setProps',
+    args: { id: '$ref:sp', type: 'SpriteAnimator', props } });
+const texRead = id => ({ command: 'component.get', args: { id: '$ref:sp', type: 'SpriteAnimator' }, id });
+const texRun = runProjectBatch(writeBatch('cliptex.jsonl', [
+    { command: 'image.new', args: { width: 32, height: 32, background: 'transparent' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 16, height: 16, filled: true, color: '#ff0000' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 0, width: 16, height: 16, filled: true, color: '#00ff00' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 16, width: 16, height: 16, filled: true, color: '#0000ff' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 16, width: 16, height: 16, filled: true, color: '#ffffff' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/hero.png' }, id: 'hero' },
+    { command: 'image.new', args: { width: 16, height: 16, background: 'transparent' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 8, height: 8, filled: true, color: '#ffff00' } },
+    { command: 'image.draw.rect', args: { x: 8, y: 0, width: 8, height: 8, filled: true, color: '#ff00ff' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 8, width: 8, height: 8, filled: true, color: '#00ffff' } },
+    { command: 'image.draw.rect', args: { x: 8, y: 8, width: 8, height: 8, filled: true, color: '#404040' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/fx.png' }, id: 'fx' },
+    { command: 'scene.new', args: { name: 'ClipTexture' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    ...atlasCam(1),
+    { command: 'entity.create', args: { name: 'Sprite' }, id: 'sp' },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteRenderer', props: {
+        texturePath: 'Assets/Sprites/hero.png', pixelsPerUnit: 16, pixelPerfect: true } } },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteAnimator', props: {
+        columns: 2, rows: 2, clip: 'plain', fps: 4,
+        clips: [{ name: 'plain', firstFrame: 0, lastFrame: 3 },
+                { name: 'own', firstFrame: 0, lastFrame: 3, texturePath: 'Assets/Sprites/fx.png' },
+                { name: 'back', firstFrame: 0, lastFrame: 3, texturePath: '' }] } }, id: 'anim' },
+    { command: 'runtime.play' },
+    { command: 'render.screenshot', args: { out: texShot(0), mode: 'game', width: 64, height: 64 }, id: 't0' },
+    texRead('plain'),
+    texSet({ clip: 'own' }),
+    { command: 'render.screenshot', args: { out: texShot(1), mode: 'game', width: 64, height: 64 }, id: 't1' },
+    texRead('own'),
+    texSet({ clip: 'plain' }),
+    { command: 'render.screenshot', args: { out: texShot(2), mode: 'game', width: 64, height: 64 }, id: 't2' },
+    texSet({ texturePath: 'Assets/Sprites/fx.png' }),
+    { command: 'render.screenshot', args: { out: texShot(3), mode: 'game', width: 64, height: 64 }, id: 't3' },
+    texRead('field'),
+    texSet({ clip: 'back' }),
+    { command: 'render.screenshot', args: { out: texShot(4), mode: 'game', width: 64, height: 64 }, id: 't4' },
+    texRead('back'),
+]));
+check(texRun.lines.every(l => l.ok !== false), 'the clip texture batch runs clean', texRun.stdout + texRun.stderr);
+const texPx = (i, x, y) => expectOk(['--image', texShot(i), 'image.pixel', '--x', String(x), '--y', String(y)]);
+const yellowPx = p => p.r > 40 && p.g > 40 && p.b * 3 < p.r;
+check(dominant(texPx(0, 32, 32), 0), 'a clip with no sheet of its own draws the sprite\'s', texPx(0, 32, 32));
+check(!darkPx(texPx(0, 20, 20)), 'and the sprite\'s sheet is what sizes the cell', texPx(0, 20, 20));
+check(yellowPx(texPx(1, 32, 32)), 'a clip that names a sheet draws that sheet', texPx(1, 32, 32));
+check(darkPx(texPx(1, 20, 20)), 'the sheet it names brings its own texel size', texPx(1, 20, 20));
+check(dominant(texPx(2, 32, 32), 0), 'and switching back draws the sprite\'s sheet again', texPx(2, 32, 32));
+check(yellowPx(texPx(3, 32, 32)), 'the animator\'s own texturePath is the entry default', texPx(3, 32, 32));
+check(dominant(texPx(4, 32, 32), 0), 'and an entry naming "" goes back to the sprite\'s', texPx(4, 32, 32));
+const texProps = texRun.step('own').result.props;
+check(texProps.clips.find(c => c.name === 'own').texturePath === 'Assets/Sprites/fx.png'
+    && texRun.step('field').result.props.texturePath === 'Assets/Sprites/fx.png'
+    && texRun.step('back').result.props.clips.find(c => c.name === 'back').texturePath === '',
+    'the clip key and the field round-trip through component.get', texProps);
+const texSchema = expectOk(['component.schema', 'SpriteAnimator']);
+const texSchemaProp = texSchema.components[0].schema.find(p => p.name === 'texturePath');
+check(texSchemaProp && texSchemaProp.kind === 'string', 'component.schema reports texturePath as a string prop', texSchemaProp);
+
+// ---------------------------------------------------------------------------
 console.log('cli: export + preferences');
 // ---------------------------------------------------------------------------
 const prefs = expectOk(['project.preferences', '--set', '{"language":"en"}']);

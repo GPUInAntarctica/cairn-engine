@@ -421,6 +421,12 @@ public:
 // without a positive number - is shown for the clip's own `1 / fps`, so an
 // empty table is exactly the animation `fps` alone describes.
 //
+// A clip can also name its own texture: `texturePath` is a key like any other,
+// so an attack can be a separate sheet from the walk without a second entity,
+// and the sheet's own texel size decides the cell size the way the sprite's
+// would. The key on the component is the default for entries that leave it
+// out, and naming "" goes back to the sprite's own texture.
+//
 // The table is also a state machine when it is given the other two: `params`
 // are the values it reads (a bool, a number, or a trigger) and `transitions`
 // says which state to enter for which parameters. `clip` is then the current
@@ -442,6 +448,7 @@ class SpriteAnimator : public Component {
 public:
     int columns = 1;         // cells across the sheet (or across the sprite's uvRect)
     int rows = 1;            // cells down the sheet
+    std::string texturePath; // the clip's own sheet; "" means the sprite's
     int firstFrame = 0;      // first cell of the clip; -1 means the last cell
     int lastFrame = -1;      // inclusive; -1 means the last cell
     float fps = 8.0f;        // frames per second of play time
@@ -482,6 +489,7 @@ public:
     struct Clip {
         int columns = 1;
         int rows = 1;
+        std::string texturePath;   // the clip's own sheet; "" means the sprite's
         int firstFrame = 0;
         int lastFrame = -1;
         float fps = 8.0f;
@@ -532,6 +540,7 @@ public:
         Clip c;
         c.columns = columns;
         c.rows = rows;
+        c.texturePath = texturePath;
         c.firstFrame = firstFrame;
         c.lastFrame = lastFrame;
         c.fps = fps;
@@ -544,6 +553,7 @@ public:
         // the resolved value as its default.
         c.columns = (*e)["columns"].asInt(c.columns);
         c.rows = (*e)["rows"].asInt(c.rows);
+        c.texturePath = (*e)["texturePath"].asString(c.texturePath.c_str());
         c.firstFrame = (*e)["firstFrame"].asInt(c.firstFrame);
         c.lastFrame = (*e)["lastFrame"].asInt(c.lastFrame);
         c.fps = (*e)["fps"].asFloat(c.fps);

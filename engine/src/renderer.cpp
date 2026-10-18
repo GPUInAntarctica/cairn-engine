@@ -1454,6 +1454,19 @@ struct Renderer::Impl {
         float x0, x1, y0, y1;
     };
 
+    // Which texture a sprite draws: the animator's current clip may name a sheet
+    // of its own (`texturePath`, on the component or on the clip entry), so a
+    // character can swap sheets per animation without a second entity. The cull
+    // and the draw path both come through here, so they cannot disagree about
+    // which texture - and therefore which texel size - is on screen.
+    std::string SpriteTexturePath(const SpriteRenderer& sp, const SpriteAnimator* anim) {
+        if (anim && anim->enabled) {
+            const std::string own = anim->ActiveClip().texturePath;
+            if (!own.empty()) return own;
+        }
+        return sp.texturePath;
+    }
+
     SpriteExtent SpriteLocalExtent(const SpriteRenderer& sp, const Vec4& rect, float texW, float texH) {
         // A pixels-per-unit of zero or less is meaningless and falls back to one;
         // any positive value is honoured, including below one, where the sprite
@@ -1600,7 +1613,8 @@ struct Renderer::Impl {
             std::shared_ptr<Texture> tex;
             if (sprite) {
                 auto* sp = go->GetComponent<SpriteRenderer>();
-                if (!sp->texturePath.empty()) tex = textures.Get(EngineResolvePath(sp->texturePath));
+                const std::string sheet = SpriteTexturePath(*sp, go->GetComponent<SpriteAnimator>());
+                if (!sheet.empty()) tex = textures.Get(EngineResolvePath(sheet));
                 else tex = textures.GetBuiltin("checker");
                 const float texW = tex ? (float)tex->width() : 0.0f;
                 const float texH = tex ? (float)tex->height() : 0.0f;
