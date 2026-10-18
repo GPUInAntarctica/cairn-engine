@@ -47,3 +47,29 @@ jobs:
         run: node scripts/run-engine-tests.js
       - name: CLI end-to-end
         run: node test/cli.js
+
+  # Visual Studio (the Windows generator) is a multi-config generator: without
+  # pinned output directories it writes the library into engine/build/Release/
+  # instead of engine/build/. Ninja Multi-Config reproduces that layout on Linux,
+  # so this job covers the staging path the Windows job depends on.
+  multi-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ ninja-build
+      - name: Install npm dependencies
+        run: npm ci
+      - name: Configure with a multi-config generator
+        run: cmake -S engine -B engine/build -G "Ninja Multi-Config" -DCMAKE_BUILD_TYPE=Release
+      - name: Build engine, addon and renderer
+        run: npm run build
+      - name: Build-script staging tests
+        run: node test/build.js
+      - name: Engine unit tests
+        run: npm run test:engine
+      - name: Addon loads the staged library
+        run: node cli/index.js engine.version

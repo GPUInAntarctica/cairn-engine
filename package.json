@@ -1,7 +1,7 @@
 {
   "name": "cairn-engine",
   "productName": "Cairn Engine",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "description": "A compact C++ game engine with a focused editor for 2D and 3D projects.",
   "license": "MIT",
   "author": "Cairn Engine Contributors",
@@ -37,7 +37,7 @@
     "test:engine": "node scripts/run-engine-tests.js",
     "rebuild": "node scripts/build.js --force",
     "prestart": "node scripts/build.js renderer",
-    "test": "npm run test:engine && node test/smoke.js && node test/cli.js",
+    "test": "npm run test:engine && node test/build.js && node test/smoke.js && node test/cli.js",
     "docs:cli": "node scripts/gen-cli-docs.js",
     "cairn": "node cli/index.js",
     "start": "electron .",

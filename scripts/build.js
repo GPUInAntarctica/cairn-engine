@@ -18,10 +18,70 @@ const root = path.resolve(__dirname, '..');
 const engineDir = path.join(root, 'engine');
 const buildDir = path.join(engineDir, 'build');
 const buildOut = path.join(root, 'build');
-const force = process.argv.includes('--force');
 
 function log(msg) { console.log(`[cairn] ${msg}`); }
 function fail(msg) { console.error(`[cairn] ${msg}`); process.exit(1); }
+
+// ---------------------------------------------------------------------------
+// Library discovery / staging.
+//
+// Multi-config generators (Visual Studio, Xcode, Ninja Multi-Config) write into
+// a per-configuration subdirectory unless the project pins its output
+// directories. engine/CMakeLists.txt pins them; searching the subdirectories as
+// well keeps the staging step working against a build tree configured by an
+// older revision or by another generator.
+// ---------------------------------------------------------------------------
+function engineOutputDirs(dir) {
+    return [
+        dir,
+        path.join(dir, 'Release'),
+        path.join(dir, 'RelWithDebInfo'),
+        path.join(dir, 'MinSizeRel'),
+        path.join(dir, 'Debug'),
+    ];
+}
+
+// First directory holding a built engine library, with the file chain to stage:
+// the symlink names plus the real versioned file they point at.
+function locateEngineLibrary(dirs) {
+    for (const dir of dirs) {
+        const soLink = path.join(dir, 'libcairn_engine.so');
+        const soMajor = path.join(dir, 'libcairn_engine.so.0');
+        if (fs.existsSync(soLink) && fs.existsSync(soMajor)) {
+            const real = path.basename(fs.realpathSync(soMajor));
+            return { dir, files: ['libcairn_engine.so', 'libcairn_engine.so.0', real] };
+        }
+        if (fs.existsSync(path.join(dir, 'libcairn_engine.dylib')))
+            return { dir, files: ['libcairn_engine.dylib'] };
+        if (fs.existsSync(path.join(dir, 'cairn_engine.dll')))
+            return { dir, files: ['cairn_engine.dll', 'cairn_engine.lib'] };
+    }
+    return null;
+}
+
+// Copies a located library chain into destDir, recreating symlink names so the
+// staged tree loads exactly like the build tree (the addon links against it).
+function stageLibrary(found, destDir) {
+    fs.mkdirSync(destDir, { recursive: true });
+    // Drop stale copies from previous versions before staging.
+    for (const f of fs.readdirSync(destDir)) {
+        if (f.startsWith('libcairn_engine.') || f === 'cairn_engine.dll' || f === 'cairn_engine.lib')
+            fs.rmSync(path.join(destDir, f), { force: true });
+    }
+    for (const f of found.files) {
+        // Resolve symlinks to their real file, then recreate the symlink name.
+        const src = path.join(found.dir, f);
+        const dest = path.join(destDir, f);
+        if (!fs.existsSync(src)) continue;
+        try {
+            if (fs.lstatSync(dest, { throwIfNoEntry: false })) fs.rmSync(dest, { force: true });
+            if (fs.lstatSync(src).isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(src), dest);
+            else fs.copyFileSync(src, dest);
+        } catch (err) {
+            fail(`could not stage ${f}: ${err.message}`);
+        }
+    }
+}
 
 function run(cmd, args, opts = {}) {
     const r = spawnSync(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', ...opts });
@@ -44,6 +104,7 @@ function nodeIncludeDir() {
 
 function buildEngine() {
     fs.mkdirSync(buildDir, { recursive: true });
+    const force = process.argv.includes('--force');
     // Extra -D flags from the command line reach CMake, so documented options
     // like `npm run build -- -DCAIRN_ENABLE_VULKAN=OFF` actually take effect.
     const defines = process.argv.slice(2).filter(a => a.startsWith('-D'));
@@ -53,43 +114,18 @@ function buildEngine() {
     }
     if (!fs.existsSync(path.join(buildDir, 'CMakeCache.txt')) || force || defines.length)
         run('cmake', cmakeArgs);
-    run('cmake', ['--build', buildDir, '-j', String(Math.max(2, require('os').cpus().length - 1))]);
+    // --config is ignored by single-config generators and required by
+    // multi-config ones (Visual Studio defaults to Debug, not CMAKE_BUILD_TYPE).
+    run('cmake', ['--build', buildDir, '--config', 'Release',
+        '-j', String(Math.max(2, require('os').cpus().length - 1))]);
 
     // Stage only the current library chain. CMake leaves older versioned files
     // in the build dir across version bumps, so match the symlink chain rather
     // than every libcairn_engine.* file.
-    const soLink = path.join(buildDir, 'libcairn_engine.so');
-    const soMajor = path.join(buildDir, 'libcairn_engine.so.0');
-    let toCopy;
-    if (fs.existsSync(soLink) && fs.existsSync(soMajor)) {
-        const real = path.basename(fs.realpathSync(soMajor));
-        toCopy = ['libcairn_engine.so', 'libcairn_engine.so.0', real];
-    } else if (fs.existsSync(path.join(buildDir, 'libcairn_engine.dylib'))) {
-        toCopy = ['libcairn_engine.dylib'];
-    } else if (fs.existsSync(path.join(buildDir, 'cairn_engine.dll'))) {
-        toCopy = ['cairn_engine.dll', 'cairn_engine.lib'];
-    } else {
-        fail('engine library output not found');
-    }
-    // Drop stale copies from previous versions before staging.
-    for (const f of fs.readdirSync(buildOut)) {
-        if (f.startsWith('libcairn_engine.') || f === 'cairn_engine.dll' || f === 'cairn_engine.lib')
-            fs.rmSync(path.join(buildOut, f), { force: true });
-    }
-    for (const f of toCopy) {
-        // Resolve symlinks to their real file, then recreate the symlink name.
-        const src = path.join(buildDir, f);
-        const dest = path.join(buildOut, f);
-        if (!fs.existsSync(src)) continue;
-        try {
-            if (fs.lstatSync(dest, { throwIfNoEntry: false })) fs.rmSync(dest, { force: true });
-            if (fs.lstatSync(src).isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(src), dest);
-            else fs.copyFileSync(src, dest);
-        } catch (err) {
-            fail(`could not stage ${f}: ${err.message}`);
-        }
-    }
-    const soName = toCopy.find(f => f.endsWith('.so') || f.endsWith('.dylib') || f.endsWith('.dll'));
+    const found = locateEngineLibrary(engineOutputDirs(buildDir));
+    if (!found) fail('engine library output not found');
+    stageLibrary(found, buildOut);
+    const soName = found.files.find(f => f.endsWith('.so') || f.endsWith('.dylib') || f.endsWith('.dll'));
     log(`engine -> build/${soName}`);
     return path.join(buildOut, soName);
 }
@@ -203,13 +239,21 @@ function buildRenderer() {
 
 // ---------------------------------------------------------------------------
 
-// `--force` re-runs cmake configure; it is a flag, not a target, so it must
-// not be mistaken for one (it silently built nothing before).
-const rest = process.argv.slice(2).filter(a => !a.startsWith('-'));
-const target = rest[0] || 'all';
-fs.mkdirSync(buildOut, { recursive: true });
+function main() {
+    // `--force` re-runs cmake configure; it is a flag, not a target, so it must
+    // not be mistaken for one (it silently built nothing before).
+    const rest = process.argv.slice(2).filter(a => !a.startsWith('-'));
+    const target = rest[0] || 'all';
+    fs.mkdirSync(buildOut, { recursive: true });
 
-if (target === 'engine' || target === 'all') buildEngine();
-if (target === 'addon' || target === 'all') buildAddon();
-if (target === 'engine' || target === 'addon' || target === 'all' || target === 'renderer') buildRenderer();
-log('done');
+    if (target === 'engine' || target === 'all') buildEngine();
+    if (target === 'addon' || target === 'all') buildAddon();
+    if (target === 'engine' || target === 'addon' || target === 'all' || target === 'renderer') buildRenderer();
+    log('done');
+}
+
+// Exported so test/build.js can exercise the staging logic, and so
+// run-engine-tests.js shares one definition of where CMake writes its output.
+module.exports = { engineOutputDirs, locateEngineLibrary, stageLibrary };
+
+if (require.main === module) main();

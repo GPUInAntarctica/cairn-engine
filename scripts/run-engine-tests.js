@@ -11,6 +11,10 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+// Shared with scripts/build.js: the same per-configuration fallback applies to
+// the test executable, which a multi-config generator would otherwise put in
+// engine/build/Release/ next to the library.
+const { engineOutputDirs } = require('./build.js');
 
 const root = path.resolve(__dirname, '..');
 
@@ -18,7 +22,7 @@ function findBinary() {
     const names = process.platform === 'win32'
         ? ['cairn_engine_test.exe']
         : ['cairn_engine_test'];
-    const dirs = [path.join(root, 'engine', 'build'), path.join(root, 'build')];
+    const dirs = [...engineOutputDirs(path.join(root, 'engine', 'build')), path.join(root, 'build')];
     for (const dir of dirs) {
         for (const name of names) {
             const p = path.join(dir, name);

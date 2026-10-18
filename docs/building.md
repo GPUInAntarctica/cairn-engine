@@ -30,6 +30,12 @@ npm run build:addon  # 插件 → build/cairn_engine_addon.node
 node scripts/build.js renderer  # 渲染端 → editor/renderer/dist/
 ```
 
+产物先落在 `engine/build/`，再由脚本暂存到仓库根的 `build/`（插件就链接这里的那份）。CMake 的
+**多配置**生成器（Visual Studio、Xcode、Ninja Multi-Config）默认会给输出目录再加一层配置子目录
+（`Release/`、`Debug/`…）并默认构建 Debug；`engine/CMakeLists.txt` 把输出目录连同逐配置变体一起
+钉平，`scripts/build.js` 也会用 `--config Release` 明确配置、并仍然在逐配置子目录里兜底搜索。
+所以手工配置出来的构建树（哪怕是旧版本配置的）也能被正确暂存——这套布局由 `node test/build.js` 钉住。
+
 ## GPU 渲染 / GPU rendering
 
 Vulkan 后端默认开启（`CAIRN_ENABLE_VULKAN=ON`），需要 Vulkan 头文件和 `glslc`。两者任一缺失时构建照常通过，只是 `VulkanBackendAvailable()` 返回 false，渲染固定走软件光栅化。
@@ -73,6 +79,11 @@ npm run build
 
 **`npm run test:engine` 提示找不到 `cairn_engine_test`**
 先 `npm run build`——引擎单测由 CMake 一并构建。
+
+**`npm run build` 报 `engine library output not found`**
+CMake 那一步成功了，但脚本在预期的目录里没找到库——典型原因是多配置生成器把产物放进了
+配置子目录（或构建树是旧版本配置的）。脚本会兜底搜索那些子目录；仍然报错就删掉 `engine/build/`
+从头配置一次。`node test/build.js` 单独检查这套发现与暂存逻辑。
 
 **`npm run rebuild` 好像什么都没做**
 它会重新跑 CMake 配置并全量编译；耗时取决于 CPU 核数。若想确认确实重编了，删掉 `engine/build/` 再 `npm run build`。

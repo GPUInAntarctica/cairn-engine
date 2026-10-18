@@ -8,12 +8,16 @@ from the command line.
 ```bash
 npm install
 npm run build     # CMake engine library + N-API addon + esbuild renderer bundle
-npm test          # engine unit tests + end-to-end smoke + CLI suite
+npm test          # engine unit tests + build staging + end-to-end smoke + CLI suite
 npm run test:engine   # just the C++ unit tests
 ```
 
 The native addon (`build/cairn_engine_addon.node`) must exist before anything that
 touches the engine runs; the CLI reports `engine_unavailable` if it is missing.
+`npm run build` stages the library out of `engine/build/` into `build/`; the
+staging logic also searches per-configuration subdirectories, because multi-config
+CMake generators (Visual Studio on Windows, Xcode, Ninja Multi-Config) add one.
+`node test/build.js` pins that layout handling.
 
 ## Using the engine from the command line
 
@@ -48,7 +52,7 @@ Contract every command follows:
 | `editor/main/` | main-process modules shared by the editor and the CLI |
 | `editor/main/imaging.js` | headless raster core (layers, drawing, PNG/BMP, normal maps) |
 | `editor/renderer/` | editor UI (ES modules, no framework) |
-| `test/` | `smoke.js` (engine end-to-end), `cli.js` (CLI end-to-end) |
+| `test/` | `smoke.js` (engine end-to-end), `cli.js` (CLI end-to-end), `build.js` (build-script staging logic) |
 | `docs/` | architecture, editor manual, scripting API, building, CLI |
 
 ## Rules when changing the engine or the CLI

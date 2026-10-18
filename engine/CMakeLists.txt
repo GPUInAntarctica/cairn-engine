@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cairn-engine VERSION 0.1.23 LANGUAGES CXX)
+project(cairn-engine VERSION 0.1.24 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,6 +10,25 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O2")
+
+# --------------------------------------------------------------------------
+# Flat output directory for every generator.
+#
+# Multi-config generators (Visual Studio, Xcode, Ninja Multi-Config) append a
+# per-configuration subdirectory to the output directory, so the library ends up
+# in engine/build/Release/ instead of engine/build/ and scripts/build.js cannot
+# stage it. Setting the per-configuration variables as well as the plain ones
+# suppresses that subdirectory and keeps one layout everywhere.
+# --------------------------------------------------------------------------
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+foreach(_cairn_cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_cairn_cfg} ${CMAKE_BINARY_DIR})
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${_cairn_cfg} ${CMAKE_BINARY_DIR})
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${_cairn_cfg} ${CMAKE_BINARY_DIR})
+endforeach()
+unset(_cairn_cfg)
 
 # --------------------------------------------------------------------------
 # Vulkan backend.

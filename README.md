@@ -234,7 +234,7 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.1.23** — an early but usable foundation. The GPU backend is the default but young; the software rasterizer remains the reference implementation and is what the test suite pins, so any rendering difference between the two is a bug in the GPU path rather than an intentional difference. See the [CHANGELOG](CHANGELOG.md) for the milestone history, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+Cairn is at version **0.1.24** — an early but usable foundation. The GPU backend is the default but young; the software rasterizer remains the reference implementation and is what the test suite pins, so any rendering difference between the two is a bug in the GPU path rather than an intentional difference. See the [CHANGELOG](CHANGELOG.md) for the milestone history, and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 

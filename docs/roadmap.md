@@ -19,7 +19,7 @@
 
 | 层 | 主题 | 状态 |
 | --- | --- | --- |
-| 0.1 | 基础与正确性：资产数据库、实体身份、反射、预制体、物理基础、Windows 构建 | 已交付（0.1.1–0.1.5、0.1.17） |
+| 0.1 | 基础与正确性：资产数据库、实体身份、反射、预制体、物理基础、Windows 构建 | 已交付（0.1.1–0.1.5、0.1.17、0.1.24） |
 | 0.2 | **渲染质量与 2D 管线**：几何完整性、像素完美采样、上下朝向、精灵图切分 | 进行中（0.1.22–0.1.23） |
 | 0.3 | **性能与物理**：批处理、并行、剖析、碰撞体、约束 | 进行中（0.1.6–0.1.13、0.1.16、0.1.19、0.1.20） |
 | 0.5 | **工具链与素材创作**：Agent 原生的绘画 / 素材工具 | 已交付（0.1.14–0.1.15、0.1.18、0.1.21） |
@@ -52,12 +52,13 @@
 | 0.1.21 | 绘图：闭环教程 + 不透明度修复 | `docs/drawing.md` 把"画 → 自检 → 修正"走两遍（32×32 金币精灵、32×32 无缝草地瓦片），两份配方由 `test/cli.js` 逐步重放（教程不会漂）；顺带修掉 `blendPixel` 在透明底上把颜色按 alpha 预乘的 bug（50% 白填到空图层曾存成 50% 的灰，合成后又暗一次，黑底上 50% 白变成 25% 灰）|
 | 0.1.22 | 渲染质量：2D 四边形与像素完美采样 | 软件光栅器每帧丢掉每个 2D 四边形的第二个三角形（精灵和文字各少一半），修 `EmitQuadVerts` 的分块；`pixelPerfect` 精灵在 GPU 上走的是线性 + mipmap 的 clamp 采样器（AI 像素画被糊掉），新增无 mip 的最近邻 `pixelClamp`；两条路径如今逐位一致（64×64 四象限精灵：修前 2500/4096 像素不同且有渐变，修后 0/4096、恰好 4 种纯色）|
 | 0.1.23 | 渲染质量：2D 上下朝向 | 精灵与字形 quad 把 `v=0`（贴图第 0 行＝图的上边）配到了世界下方，每个精灵、每个字形都上下镜像；两处 uv 改过来（`templates/project-2d` 的标题文字此前一直是反的）。顺带把法线图绿通道的约定定了：`image.normalMap` 按图像空间编码，朝向修好后 `-(绿通道)` 正好正确，并用"只差绿通道的两张法线图 + 一盏顶光"钉成测试；`TestSpriteOrientation` 与 CLI 的朝向断言在软件与 GPU 两条路径上都反向验证过 |
+| 0.1.24 | 构建：多配置生成器（Visual Studio）产物布局 | 多配置生成器把库写进 `Release/`（并默认构建 Debug），暂存只找 build 根目录，Windows 任务于是在 `npm run build` 报 "engine library output not found"；修 CMake 输出目录固定、`--config Release`、暂存搜索逐配置子目录，并让测试可执行文件共用同一套搜索。暂存逻辑导出成可测函数，新增 `test/build.js`（12 项，接进 `npm test`）与一个在 Linux 上用 `Ninja Multi-Config` 跑的 CI 任务 |
 
 每个版本的细节与验证记录见 [CHANGELOG](../CHANGELOG.md)。
 
-## 当前优先级（0.1.23 之后）
+## 当前优先级（0.1.24 之后）
 
-用户定的三条主线，按此排序：
+定的三条主线，按此排序：
 
 1. **渲染质量。** 2D 这条线在补完（见下文 0.2 阶段）：几何、像素完美采样、上下朝向都已收口，
    剩下精灵图切分（uv 矩形 / 轴心）与精灵剔除盒。
@@ -107,6 +108,38 @@
 2. **嵌套预制体与变体。** 预制体里的子树自己也是实例；以及"基于某预制体派生的变体"。
 3. **结构增删的对等传播。** 资产删掉的节点目前不会从别的实例上消失（`@removed*` 只抑制
    实例自己的删除），要靠 `prefab.revert` 收敛。
+
+## 阶段：构建与 CI（0.1）
+
+**已做（0.1.24）**
+
+- **多配置生成器把产物藏进子目录。** Visual Studio 是 Windows 上的默认 CMake 生成器，也是
+  "多配置"生成器：它忽略 `CMAKE_BUILD_TYPE`，给每个输出目录追加一层配置子目录，并且
+  `cmake --build` 默认构建 **Debug**。于是 DLL 与导入库落在 `engine/build/Debug/`，而暂存
+  只找 `engine/build/`：CMake 那一步是成功的，失败发生在暂存这一步。用
+  `-G "Ninja Multi-Config"` 在本机可以复现同一类布局（库落在 `Release/` 里），因此这次修复
+  有一个能在本机跑的验证面。
+- **三处改动。** `engine/CMakeLists.txt` 把
+  `CMAKE_{RUNTIME,LIBRARY,ARCHIVE}_OUTPUT_DIRECTORY` 连同逐配置变体
+  （`…_RELEASE`、`…_DEBUG`、`…_RELWITHDEBINFO`、`…_MINSIZEREL`）都钉到 `CMAKE_BINARY_DIR`
+  ——这是"多配置不再加子目录"的官方做法，单配置布局一行不改；`scripts/build.js` 给
+  `cmake --build` 加 `--config Release`（单配置生成器忽略，多配置生成器必须给，否则钉住的
+  目录里会是一个 Debug 构建）；暂存搜索同时看 build 根目录与逐配置子目录，于是用旧版本
+  配置出来的构建树也照样暂存。同一套搜索也给了测试可执行文件：`scripts/run-engine-tests.js`
+  此前在 Windows 上会因为同一原因找不到 `cairn_engine_test.exe`。
+- **暂存逻辑变成可测函数。** `engineOutputDirs` / `locateEngineLibrary` / `stageLibrary` 从
+  `scripts/build.js` 导出（只有 `require.main === module` 时才真的去构建），新增
+  `test/build.js` 用合成构建树驱动它们：Visual Studio 的 `Release/`、根目录优先于陈旧的
+  `Release/`、macOS `.dylib`、空目录、以及 Linux 的符号链接链（暂存必须重建 `.so` 链、
+  经它解析到真实版本文件、并清掉上一版本的残留）。12 项，接进 `npm test`；把逐配置子目录
+  从搜索里删掉会失败 4 项。
+- **新增一个能在 Linux 上跑的多配置 CI 任务。** `multi-config` 用
+  `-G "Ninja Multi-Config"` 配置 `engine/build`，然后跑普通的 `npm run build`、暂存测试、
+  `npm run test:engine` 与 `engine.version`——最后一条会加载原生插件，所以它证明暂存出来的
+  库**能链接**，而不只是"文件在那儿"。
+- **仍未解决。** MSVC 工具链本身在本机（Linux）无法验证，所以 `windows` 任务保留
+  `continue-on-error: true`，该限制继续留在"已知限制"里。修好的是 CMake 之后的一切：产物
+  写到哪里、以及怎么找到它、暂存它、加载它。
 
 ## 阶段：渲染质量与 2D 管线（0.2）
 
@@ -398,7 +431,10 @@
 
 ## 已知限制
 
-- **0.1.5 的 Windows/MSVC 路径无法在本机（Linux）验证**，只能靠代码审查和 CI 覆盖。
+- **0.1.5 的 Windows/MSVC 路径无法在本机（Linux）验证**，只能靠代码审查和 CI 覆盖。0.1.24
+  把 CMake 之后的产物布局、暂存与加载修好，并用 `-G "Ninja Multi-Config"` 在 Linux 上守住
+  同一类多配置布局（`test/build.js` 与 `multi-config` 任务），但 MSVC 的编译与链接本身仍只能
+  在 CI 上验证，因此 `windows` 任务保留 `continue-on-error: true`。
 - **bindless 表是软上限。** 场景路径的贴图数组各 512 槽；一帧里引用的
   `(贴图, 采样器)` 对超过这个数量时会抢占最近最少使用的槽位（画面退化为槽位抖动），
   单帧真的超过 512 对时多出的绘制会取到白色贴图。这是刻意选择的降级方式：不崩溃、
