@@ -45,12 +45,13 @@ function registerIpc() {
         return (prefs.recentProjects || []).filter(p => fs.existsSync(p.path));
     });
 
-    ipcMain.handle('build:scripts', async (_e, projectDir) => {
+    ipcMain.handle('build:scripts', async (_e, projectDir, options) => {
         const prefs = preferences.load();
         const compiler = prefs.compiler || 'g++';
-        const result = await buildPipeline.buildScripts(projectDir, compiler);
+        const result = await buildPipeline.buildScripts(projectDir, compiler, options || {});
         return result;
     });
+    ipcMain.handle('build:scriptStatus', (_e, projectDir) => buildPipeline.scriptStatus(projectDir));
     ipcMain.handle('build:detectCompiler', async () => {
         const prefs = preferences.load();
         const found = await buildPipeline.detectCompiler(prefs.compiler);

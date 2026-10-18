@@ -120,21 +120,21 @@ export function mountEditor(root, prefs) {
 
     const status = msg => statusbar.setMessage(msg);
 
+    // Compiles the gameplay scripts and hands the built library to the engine.
+    // An explicit rebuild always invokes the compiler; the automatic paths
+    // (project open, Ctrl+B, a saved .cpp) skip it when nothing changed.
     async function buildScripts(rebuild) {
         if (buildRunning) return;
         if (!editor.project) return;
         buildRunning = true;
         status(t('status.compiling'));
-        const r = await ipc.buildScripts(editor.project.path);
+        const r = await ipc.buildScripts(editor.project.path, { ifStale: !rebuild });
         buildRunning = false;
         if (r.noSources) { status(t('status.noSources')); return; }
-        if (r.ok) {
+        if (r.ok && r.skipped) {
+            status(t('status.scriptsCurrent'));
+        } else if (r.ok) {
             status(t('status.buildOk', { ms: r.durationMs }));
-            const loaded = engineInstance().loadScriptLibrary(r.output);
-            if (loaded.ok) setScriptClasses(loaded.classes);
-            for (const [, page] of tabHost.pages) {
-                if (page.codeEditor) page.codeEditor.applyDiagnostics([]);
-            }
         } else {
             status(t('status.buildFailed'));
             for (const [, page] of tabHost.pages) {
@@ -144,12 +144,61 @@ export function mountEditor(root, prefs) {
                 .filter(d => d.severity === 'error')
                 .map(d => ({ level: 'error', text: `${d.file}:${d.line}: ${d.message}`, time: new Date() })));
             consolePanel.render();
+            return;
         }
+        // A script class only exists in the process once the library that
+        // registers it is loaded, so a successful build always loads.
+        const loaded = engineInstance().loadScriptLibrary(r.output);
+        if (loaded.ok) setScriptClasses(loaded.classes);
+        for (const [, page] of tabHost.pages) {
+            if (page.codeEditor) page.codeEditor.applyDiagnostics([]);
+        }
+    }
+
+    // Brings the gameplay library in line with Assets/Scripts when a project is
+    // opened, so a Script component can resolve its class on the first play
+    // instead of failing with "script class not found".
+    async function syncScripts() {
+        if (!editor.project) return;
+        const st = await ipc.scriptStatus(editor.project.path);
+        if (st.status === 'nosources') return;
+        if (st.status === 'current') {
+            const loaded = engineInstance().loadScriptLibrary(st.output);
+            if (loaded.ok) setScriptClasses(loaded.classes);
+            status(t('status.scriptsCurrent'));
+            return;
+        }
+        await buildScripts();
+    }
+
+    // Script component classes referenced by the scene but not loaded. The
+    // engine reports the same thing at play time, but only as a log line buried
+    // among the runtime output.
+    function unloadedScriptClasses() {
+        const known = new Set(editor.scriptClasses.map(c => c.name));
+        const missing = new Set();
+        try {
+            for (const e of engineInstance().getSceneTree().entities) {
+                for (const c of e.components) {
+                    if (c.type === 'Script' && c.props && c.props.class && !known.has(c.props.class)) {
+                        missing.add(c.props.class);
+                    }
+                }
+            }
+        } catch { /* engine not loaded yet */ }
+        return [...missing];
     }
 
     function playControl(which) {
         const eng = engineInstance();
         if (which === 'play' && !editor.playing) {
+            const missing = unloadedScriptClasses();
+            if (missing.length) {
+                const text = t('status.scriptClassMissing', { name: missing.join(', ') });
+                status(text);
+                consolePanel.entries.push({ level: 'warning', text, time: new Date() });
+                consolePanel.render();
+            }
             if (prefs.autosave && editor.sceneDirty) saveScene();
             eng.play();
             editor.playing = true;
@@ -482,6 +531,8 @@ export function mountEditor(root, prefs) {
         openCode: abs => openCodeTab(abs),
         openImage: abs => openImageTab(abs),
         build: () => buildScripts(),
+        rebuild: () => buildScripts(true),
+        sync: () => syncScripts(),
         play: which => playControl(which || 'play'),
         selectFirst: () => {
             const list = entityList();
@@ -511,7 +562,11 @@ export function mountEditor(root, prefs) {
     }
     requestAnimationFrame(frame);
 
-    return { viewport, tabHost, buildScripts, playControl };
+    // After the first frame, so the viewport exists and a compile that fails
+    // can post its diagnostics into the console panel.
+    syncScripts();
+
+    return { viewport, tabHost, buildScripts, syncScripts, playControl };
 }
 
 function escapeHtml(s) {

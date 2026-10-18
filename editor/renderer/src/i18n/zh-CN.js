@@ -192,6 +192,8 @@ export const dict = {
     'status.compiling': '正在构建脚本...',
     'status.buildOk': '脚本构建完成（{ms} ms）',
     'status.buildFailed': '脚本构建失败',
+    'status.scriptsCurrent': '游戏脚本已是最新',
+    'status.scriptClassMissing': '脚本类未加载：{name} —— 请构建脚本（Ctrl+B）',
     'status.noSources': 'Assets/Scripts 中没有脚本',
     'status.playing': '运行中',
     'status.paused': '已暂停',

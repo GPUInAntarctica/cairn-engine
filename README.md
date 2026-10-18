@@ -76,7 +76,7 @@ public:
 CAIRN_SCRIPT(Rotator)
 ```
 
-Compile it with **Ctrl+B** in the editor, or `cairn script.build` from the command line.
+Compile it with **Ctrl+B** in the editor, or `cairn script.build` from the command line. Opening a project compiles only when a source or a header moved on, and loads the library either way, so a `Script` component resolves its class the first time the game is played; `cairn script.status` reports that staleness as `missing`, `stale`, `current` or `nosources`, and `cairn script.build --ifStale` turns "is it current?" into the build itself (0.1.34).
 
 ### Rendering backends
 

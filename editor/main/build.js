@@ -12,25 +12,84 @@ const path = require('path');
 const ENGINE_INCLUDE = path.join(__dirname, '..', '..', 'engine', 'include');
 const ENGINE_LIB_DIR = path.join(__dirname, '..', '..', 'build');
 
+const SOURCE_RE = /\.(cpp|cc|cxx)$/i;
+// Headers are inputs too: editing one invalidates every translation unit that
+// includes it, and a timestamp check cannot know which ones those are.
+const HEADER_RE = /\.(h|hpp|hxx)$/i;
+
 function scriptOutputPath(projectDir) {
     const ext = process.platform === 'win32' ? '.dll' : process.platform === 'darwin' ? '.dylib' : '.so';
     return path.join(projectDir, 'Library', 'GameScripts' + ext);
 }
 
+function walkScripts(dir, re, out) {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) walkScripts(full, re, out);
+        else if (re.test(e.name)) out.push(full);
+    }
+}
+
 function collectSources(projectDir) {
-    const root = path.join(projectDir, 'Assets', 'Scripts');
     const out = [];
-    const walk = dir => {
-        let entries;
-        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-        for (const e of entries) {
-            const full = path.join(dir, e.name);
-            if (e.isDirectory()) walk(full);
-            else if (/\.(cpp|cc|cxx)$/i.test(e.name)) out.push(full);
-        }
-    };
-    walk(root);
+    walkScripts(path.join(projectDir, 'Assets', 'Scripts'), SOURCE_RE, out);
     return out.sort();
+}
+
+function collectHeaders(projectDir) {
+    const out = [];
+    walkScripts(path.join(projectDir, 'Assets', 'Scripts'), HEADER_RE, out);
+    return out.sort();
+}
+
+function toProjectRelative(projectDir, file) {
+    return path.relative(projectDir, file).split(path.sep).join('/');
+}
+
+function mtimeOf(file) {
+    try { return fs.statSync(file).mtimeMs; } catch { return 0; }
+}
+
+// Whether Library/GameScripts.<ext> still matches Assets/Scripts.
+//
+// A timestamp comparison is the only signal available without a dependency
+// scanner, and it is deliberately conservative: if any source or header is
+// newer than the library the library is stale, whether or not that file is
+// actually part of it. status is one of:
+//   'nosources' - nothing under Assets/Scripts to compile
+//   'missing'   - sources exist but no library has been built
+//   'stale'     - the library predates its newest input
+//   'current'   - the library is up to date and can be loaded as it is
+function scriptStatus(projectDir) {
+    const output = scriptOutputPath(projectDir);
+    const sources = collectSources(projectDir);
+    const headers = collectHeaders(projectDir);
+    const exists = fs.existsSync(output);
+    const outputMtime = exists ? mtimeOf(output) : 0;
+    let newestInput = '';
+    let newestInputMtime = 0;
+    for (const file of sources.concat(headers)) {
+        const m = mtimeOf(file);
+        if (m > newestInputMtime) { newestInputMtime = m; newestInput = file; }
+    }
+    let status;
+    if (sources.length === 0) status = 'nosources';
+    else if (!exists) status = 'missing';
+    else if (newestInputMtime > outputMtime) status = 'stale';
+    else status = 'current';
+    return {
+        status,
+        output,
+        exists,
+        bytes: exists ? fs.statSync(output).size : 0,
+        sources: sources.length,
+        headers: headers.length,
+        outputMtime,
+        newestInput: newestInput ? toProjectRelative(projectDir, newestInput) : '',
+        newestInputMtime,
+    };
 }
 
 // Parses "file:line:col: severity: message" (GCC/Clang) and
@@ -71,13 +130,34 @@ function detectCompiler(explicit) {
     return Promise.resolve(null);
 }
 
-// Returns {ok, diagnostics, output, durationMs}.
-function buildScripts(projectDir, compiler) {
+// Returns {ok, skipped, diagnostics, output, durationMs}.
+//
+// `options.ifStale` makes an up-to-date library a no-op, which is what the
+// editor and `script.build --ifStale` want on open: they are after a loadable
+// library, not after a recompile.
+function buildScripts(projectDir, compiler, options) {
+    const opts = options || {};
     return new Promise(resolve => {
         const sources = collectSources(projectDir);
         const output = scriptOutputPath(projectDir);
         if (sources.length === 0) {
-            resolve({ ok: false, diagnostics: [], output: '', durationMs: 0, noSources: true });
+            resolve({ ok: false, skipped: false, diagnostics: [], output: '', durationMs: 0, noSources: true });
+            return;
+        }
+        if (opts.ifStale && scriptStatus(projectDir).status === 'current') {
+            resolve({ ok: true, skipped: true, diagnostics: [], output, durationMs: 0 });
+            return;
+        }
+        if (!compiler) {
+            resolve({
+                ok: false,
+                skipped: false,
+                diagnostics: [{
+                    file: '', line: 0, column: 0, severity: 'error',
+                    message: 'no C++ compiler found (tried g++, clang++)',
+                }],
+                output: '', durationMs: 0,
+            });
             return;
         }
         fs.mkdirSync(path.dirname(output), { recursive: true });
@@ -118,11 +198,12 @@ function buildScripts(projectDir, compiler) {
         let stderr = '';
         child.stderr.on('data', d => { stderr += d; });
         child.stdout.on('data', d => { stderr += d; });
-        child.on('error', err => resolve({ ok: false, diagnostics: [{ file: '', line: 0, column: 0, severity: 'error', message: `compiler launch failed: ${err.message}` }], output, durationMs: 0 }));
+        child.on('error', err => resolve({ ok: false, skipped: false, diagnostics: [{ file: '', line: 0, column: 0, severity: 'error', message: `compiler launch failed: ${err.message}` }], output, durationMs: 0 }));
         child.on('exit', code => {
             const diagnostics = parseDiagnostics(stderr, projectDir);
             resolve({
                 ok: code === 0,
+                skipped: false,
                 diagnostics,
                 output: code === 0 ? output : '',
                 durationMs: Date.now() - started,
@@ -131,4 +212,7 @@ function buildScripts(projectDir, compiler) {
     });
 }
 
-module.exports = { buildScripts, collectSources, scriptOutputPath, detectCompiler, parseDiagnostics };
+module.exports = {
+    buildScripts, collectSources, collectHeaders, scriptStatus,
+    scriptOutputPath, detectCompiler, parseDiagnostics,
+};

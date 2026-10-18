@@ -17,7 +17,8 @@ export const ipc = {
     createProject: opts => ipcRenderer.invoke('project:create', opts),
     recentProjects: () => ipcRenderer.invoke('project:recent'),
 
-    buildScripts: projectDir => ipcRenderer.invoke('build:scripts', projectDir),
+    buildScripts: (projectDir, options) => ipcRenderer.invoke('build:scripts', projectDir, options),
+    scriptStatus: projectDir => ipcRenderer.invoke('build:scriptStatus', projectDir),
     detectCompiler: () => ipcRenderer.invoke('build:detectCompiler'),
 
     exportPlayer: (projectDir, targetDir) => ipcRenderer.invoke('export:player', { projectDir, targetDir }),

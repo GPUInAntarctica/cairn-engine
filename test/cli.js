@@ -691,6 +691,66 @@ check(build && build.ok === true && build.output.endsWith('.so'),
 check(build && build.classes.some(c => c.name === 'Rotator' && c.props.some(p => p.name === 'speed')),
     'script.build reports script classes with inspector props', build && build.classes);
 
+// ---------------------------------------------------------------------------
+console.log('cli: script staleness (script.status + script.build --ifStale)');
+// ---------------------------------------------------------------------------
+// The editor asks the same two questions when a project is opened: is the
+// library still good, and if not, compile it. Both answers have to end in a
+// library the engine can load.
+const libPath = path.join(projectDir, 'Library', 'GameScripts.so');
+const hoursAgo = new Date(Date.now() - 3600 * 1000);
+const statusCurrent = expectOk(['--project', projectDir, 'script.status']);
+check(statusCurrent && statusCurrent.status === 'current' && statusCurrent.exists === true,
+    'script.status reports a freshly built library as current', statusCurrent);
+
+const skipped = expectOk(['--project', projectDir, 'script.build', '--ifStale']);
+check(skipped && skipped.skipped === true && skipped.durationMs === 0 && skipped.output === build.output,
+    'script.build --ifStale skips a current library', skipped);
+check(skipped && skipped.classes && skipped.classes.length > 0,
+    'a skipped build still reports the loadable library', skipped && skipped.classes);
+
+// Backdating the library is enough to make it older than every input, and it
+// leaves the sources themselves alone for the compile below.
+fs.utimesSync(libPath, hoursAgo, hoursAgo);
+const statusStale = expectOk(['--project', projectDir, 'script.status']);
+check(statusStale && statusStale.status === 'stale' && /\.cpp$/.test(statusStale.newestInput || ''),
+    'script.status calls a library older than its sources stale', statusStale);
+
+// A header counts as an input even when nothing includes it: with no dependency
+// scanner, the newest file under Assets/Scripts always wins.
+const headerPath = path.join(projectDir, 'Assets', 'Scripts', 'Status_Probe.h');
+fs.writeFileSync(headerPath, '#pragma once\n');
+const statusHeader = expectOk(['--project', projectDir, 'script.status']);
+check(statusHeader && statusHeader.status === 'stale' && statusHeader.headers === 1
+    && statusHeader.newestInput === 'Assets/Scripts/Status_Probe.h',
+    'script.status counts headers as inputs', statusHeader);
+
+const rebuilt = expectOk(['--project', projectDir, 'script.build', '--ifStale']);
+check(rebuilt && rebuilt.ok === true && rebuilt.skipped === false,
+    'script.build --ifStale compiles a stale library', rebuilt);
+const statusRebuilt = expectOk(['--project', projectDir, 'script.status']);
+check(statusRebuilt && statusRebuilt.status === 'current',
+    'the library is current again after the stale rebuild', statusRebuilt);
+
+// `missing` is what a freshly cloned project looks like: sources, no library.
+fs.rmSync(headerPath);
+fs.rmSync(libPath);
+const statusMissing = expectOk(['--project', projectDir, 'script.status']);
+check(statusMissing && statusMissing.status === 'missing' && statusMissing.exists === false,
+    'script.status reports a missing library', statusMissing);
+const firstBuild = expectOk(['--project', projectDir, 'script.build', '--ifStale', '--no-load']);
+check(firstBuild && firstBuild.ok === true && firstBuild.skipped === false,
+    'script.build --ifStale builds a missing library', firstBuild);
+
+// Nothing to compile is reported without consulting a compiler.
+const scriptless = path.join(scratch, 'Scriptless');
+expectOk(['project.create', '--name', 'Scriptless', '--parent', scratch, '--template', 'project-3d']);
+fs.rmSync(path.join(scriptless, 'Assets', 'Scripts'), { recursive: true, force: true });
+const statusNone = expectOk(['--project', scriptless, 'script.status']);
+check(statusNone && statusNone.status === 'nosources' && statusNone.sources === 0,
+    'script.status reports nosources when Assets/Scripts is empty', statusNone);
+expectFail(['--project', scriptless, 'script.build', '--ifStale'], 'not_found');
+
 const playBatch = path.join(scratch, 'play.jsonl');
 fs.writeFileSync(playBatch, [
     { command: 'scene.load', args: { file: 'Assets/Scenes/Agent.cscene' } },

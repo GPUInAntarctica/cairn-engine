@@ -192,6 +192,8 @@ export const dict = {
     'status.compiling': 'Building scripts...',
     'status.buildOk': 'Scripts built in {ms} ms',
     'status.buildFailed': 'Script build failed',
+    'status.scriptsCurrent': 'Gameplay scripts are up to date',
+    'status.scriptClassMissing': 'Script class not loaded: {name} — build scripts (Ctrl+B)',
     'status.noSources': 'No scripts found in Assets/Scripts',
     'status.playing': 'Playing',
     'status.paused': 'Paused',

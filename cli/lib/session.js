@@ -180,10 +180,13 @@ class Session {
     }
 
     // ---------------------------------------------------------------- scripts
-    async buildScripts(projectDir, compiler) {
+    async buildScripts(projectDir, compiler, options) {
+        const opts = options || {};
         const cxx = compiler || await detectCompiler();
-        if (!cxx) throw failed('compiler_missing', 'no C++ compiler found (tried g++, clang++)');
-        return Object.assign({ compiler: cxx }, await buildTools.buildScripts(projectDir, cxx));
+        // With ifStale an up-to-date library needs no compiler, so the missing
+        // compiler error is left to the build path itself.
+        if (!cxx && !opts.ifStale) throw failed('compiler_missing', 'no C++ compiler found (tried g++, clang++)');
+        return Object.assign({ compiler: cxx || '' }, await buildTools.buildScripts(projectDir, cxx, opts));
     }
 }
 

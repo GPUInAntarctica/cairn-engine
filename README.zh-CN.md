@@ -76,7 +76,7 @@ public:
 CAIRN_SCRIPT(Rotator)
 ```
 
-在编辑器里按 **Ctrl+B** 编译，或用 `cairn script.build` 从命令行编译。
+在编辑器里按 **Ctrl+B** 编译，或用 `cairn script.build` 从命令行编译。打开项目时只在源文件或头文件有改动时才重新编译，并且无论是否重新编译都会加载该库，于是 `Script` 组件在第一次运行游戏时就能解析到自己的类；`cairn script.status` 用 `missing` / `stale` / `current` / `nosources` 报告这一状态，`cairn script.build --ifStale` 则把"是否最新"直接变成一次构建（0.1.34）。
 
 ### 渲染后端
 

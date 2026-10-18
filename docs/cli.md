@@ -547,12 +547,13 @@ read what a sprite is actually made of.
 
 | Command | Arguments | Description |
 | --- | --- | --- |
-| `script.build` | `--compiler` (string)<br>`--load` (bool, default true) | Compile Assets/Scripts into the gameplay shared library and return compiler diagnostics. |
+| `script.build` | `--compiler` (string)<br>`--load` (bool, default true)<br>`--ifStale` (bool, default false) | Compile Assets/Scripts into the gameplay shared library and return compiler diagnostics. |
 | `script.classes` | — | List the script classes currently loaded in the engine session. |
 | `script.compileCheck` | `--compiler` (string) | Syntax-check gameplay scripts without producing a loadable library. |
 | `script.load` | `--path` (path) | Load a compiled gameplay library into the engine and list its script classes. |
 | `script.output` | — | Report the path of the compiled gameplay library. |
 | `script.sources` | — | List the C++ sources that script.build will compile. |
+| `script.status` | — | Report whether the compiled gameplay library is current with Assets/Scripts. |
 
 ### `sprite`
 

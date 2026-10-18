@@ -39,25 +39,43 @@ def('script.output', {
     },
 });
 
+def('script.status', {
+    summary: 'Report whether the compiled gameplay library is current with Assets/Scripts.',
+    args: {},
+    returns: '{status, output, exists, bytes, sources, headers, outputMtime, newestInput, newestInputMtime}',
+    needsProject: true,
+    notes: "status is 'missing' (no library built yet), 'stale' (a source or header is newer than " +
+        "the library), 'current', or 'nosources' (nothing under Assets/Scripts to compile).",
+    examples: ['cairn --project ./game script.status'],
+    run(ctx) {
+        return buildTools.scriptStatus(ctx.session.requireProject());
+    },
+});
+
 def('script.build', {
     summary: 'Compile Assets/Scripts into the gameplay shared library and return compiler diagnostics.',
     args: {
         compiler: { type: 'string', desc: 'Compiler to use (default: preferences, then g++/clang++).' },
         load: { type: 'bool', default: true, desc: 'Load the freshly built library into the engine session.' },
+        ifStale: { type: 'bool', default: false, desc: 'Skip the compile when script.status reports the library is current.' },
     },
-    returns: '{ok, compiler, output, durationMs, diagnostics:[{file, line, column, severity, message}], classes?}',
+    returns: '{ok, skipped, compiler, output, durationMs, diagnostics:[{file, line, column, severity, message}], classes?}',
     needsProject: true,
     notes: 'Scripts must be built before they can be attached to Script components. The engine copies the ' +
-        'library to a unique file name before dlopen, so rebuilding while a scene is loaded works.',
-    examples: ['cairn --project ./game script.build', 'cairn --project ./game script.build --no-load'],
+        'library to a unique file name before dlopen, so rebuilding while a scene is loaded works. ' +
+        'With --ifStale the command is a no-op when the library is already newer than every source and ' +
+        'header; the skipped result still names the library so it can be loaded.',
+    examples: ['cairn --project ./game script.build', 'cairn --project ./game script.build --no-load',
+        'cairn --project ./game script.build --ifStale'],
     async run(ctx, args) {
         const projectDir = ctx.session.requireProject();
-        const result = await ctx.session.buildScripts(projectDir, args.compiler);
+        const result = await ctx.session.buildScripts(projectDir, args.compiler, { ifStale: args.ifStale });
         if (!result.ok && result.noSources) {
             throw notFound('no gameplay scripts found in Assets/Scripts', { output: result.output });
         }
         const payload = {
             ok: result.ok,
+            skipped: result.skipped === true,
             compiler: result.compiler,
             output: result.output,
             durationMs: result.durationMs,
