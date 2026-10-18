@@ -11,7 +11,7 @@
 import path from 'path';
 import fs from 'fs';
 
-import { editor, engineInstance, selectedEntity, markDirty, pushUndo, scriptClassMeta } from '../state.js';
+import { editor, engineInstance, entityList, selectedEntity, markDirty, pushUndo, scriptClassMeta } from '../state.js';
 import { on, emit } from '../events.js';
 import { t } from '../i18n.js';
 import { icon } from '../icons.js';
@@ -57,8 +57,13 @@ export class Inspector {
     // the caret out of any focused field and re-run every control factory, so
     // rows that can be driven externally register a _refresh closure instead.
     renderLight() {
-        for (const row of this.bodyEl.querySelectorAll('.prop-row')) {
-            if (row._refresh) row._refresh();
+        beginRefresh();
+        try {
+            for (const row of this.bodyEl.querySelectorAll('.prop-row')) {
+                if (row._refresh) row._refresh();
+            }
+        } finally {
+            endRefresh();
         }
     }
 
@@ -186,7 +191,10 @@ export class Inspector {
         });
 
         if (isTransform) {
-            const read = key => () => ent.transform[key];
+            const read = key => () => {
+                const live = liveEntity(ent.id) || ent;
+                return live.transform[key];
+            };
             body.appendChild(vectorRow(t('insp.position'), read('position'), v => eng.setComponentProp(ent.id, 'Transform', 'position', v), true, 3));
             body.appendChild(vectorRow(t('insp.rotation'), read('rotation'), v => eng.setComponentProp(ent.id, 'Transform', 'rotation', v), true, 3));
             body.appendChild(vectorRow(t('insp.scale'), read('scale'), v => eng.setComponentProp(ent.id, 'Transform', 'scale', v), true, 3));
@@ -198,12 +206,30 @@ export class Inspector {
                     eng.setComponentProp(ent.id, comp.type, md.name, v);
                     markDirty();
                 };
-                body.appendChild(this.propControl(md, () => comp.props[md.name], commit));
+                body.appendChild(this.propControl(md, () => {
+                    const live = liveComponent(ent.id, comp.type);
+                    return live && live.props ? live.props[md.name] : comp.props[md.name];
+                }, commit));
             }
-            body.appendChild(boolRow(t('insp.enabled'), () => comp.enabled, v => {
+            body.appendChild(boolRow(t('insp.enabled'), () => {
+                const live = liveComponent(ent.id, comp.type);
+                return live ? live.enabled : comp.enabled;
+            }, v => {
                 eng.setComponentProp(ent.id, comp.type, 'enabled', v);
                 markDirty();
             }));
+        }
+        // The 2D panel is where a sheet is sliced and a clip walked, so both of
+        // the components that describe one open it.
+        if (comp.type === 'SpriteRenderer' || comp.type === 'SpriteAnimator') {
+            const row = document.createElement('div');
+            row.className = 'prop-row prop-row-full';
+            const button = document.createElement('button');
+            button.className = 'btn';
+            button.textContent = t('insp.open2d');
+            button.addEventListener('click', () => emit('open-2d-panel'));
+            row.appendChild(button);
+            body.appendChild(row);
         }
         return block;
     }
@@ -304,6 +330,25 @@ function section(title, key) {
 // Labels carry a title unconditionally. The label column is fixed, so a long
 // prop name is going to be ellipsised at some panel width; a truncated label
 // with no tooltip is a dead end.
+// Values are read back from the engine, not from the snapshot the block was
+// built with. Another panel can change a prop between two renders (the 2D panel
+// writes `frame`, the running game writes everything), and a value-only refresh
+// has to show what is there now rather than what was there when the row was
+// made. One refresh pass reuses a single scene tree, so the cost is one fetch
+// per pass instead of one per row.
+let refreshTree = null;
+
+function beginRefresh() { refreshTree = null; }
+function endRefresh() { refreshTree = null; }
+function liveEntity(id) {
+    const tree = refreshTree || (refreshTree = entityList());
+    return tree.find(e => e.id === id) || null;
+}
+function liveComponent(id, type) {
+    const ent = liveEntity(id);
+    return ent ? (ent.components || []).find(c => c.type === type) || null : null;
+}
+
 function labelEl(text, draggable) {
     const l = document.createElement('label');
     l.textContent = text;

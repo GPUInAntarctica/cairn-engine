@@ -554,6 +554,12 @@ read what a sprite is actually made of.
 | `script.output` | — | Report the path of the compiled gameplay library. |
 | `script.sources` | — | List the C++ sources that script.build will compile. |
 
+### `sprite`
+
+| Command | Arguments | Description |
+| --- | --- | --- |
+| `sprite.sheet` | `--id` (int, required)<br>`--clip` (string)<br>`--frame` (int)<br>`--scale` (int, default 0)<br>`--output` (path)<br>`--grid` (bool, default true) | Describe a sprite sheet the way a SpriteAnimator slices it: every cell in texels, the cells a clip plays with their times, and optionally a preview PNG. |
+
 <!-- END GENERATED COMMANDS -->
 
 Regenerate the table above with `npm run docs:cli` after adding commands.

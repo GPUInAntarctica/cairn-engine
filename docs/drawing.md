@@ -248,7 +248,61 @@ changed — and the alpha channel still uses `max()` rather than source-over, so
 repeated stroke or a mirrored draw cannot build up coverage. See the
 [CHANGELOG](../CHANGELOG.md) for the entry; the loop is what surfaced it.
 
+## Checking a slice before it ships
+
+A sheet is a claim about a grid — this strip is two 32×32 frames, this character sheet
+is 4×2 — and the drawing tools know nothing about that claim. Opening the PNG in a
+viewer answers neither "did the grid land where I meant" nor "which cells does this
+clip play", and until 0.1.33 the only way to answer either was to put the sprite in a
+scene and screenshot it.
+
+`sprite.sheet` answers both from the command line, through the same model the editor's
+2D panel draws. A two-frame 64×32 strip, sliced 2×1 and animated at half a second a
+frame:
+
+```jsonl
+{"command":"image.new","args":{"width":64,"height":32,"background":"transparent"}}
+{"command":"image.draw.rect","args":{"x":2,"y":2,"width":28,"height":28,"filled":true,"color":"#d24b4b"}}
+{"command":"image.draw.rect","args":{"x":34,"y":2,"width":28,"height":28,"filled":true,"color":"#4b7fd2"}}
+{"command":"image.save","args":{"out":"Assets/Textures/blink.png"}}
+{"command":"component.set","args":{"id":4,"type":"SpriteRenderer","prop":"texturePath","value":"Assets/Textures/blink.png"}}
+{"command":"component.set","args":{"id":4,"type":"SpriteAnimator","prop":"columns","value":2}}
+{"command":"component.set","args":{"id":4,"type":"SpriteAnimator","prop":"rows","value":1}}
+{"command":"component.set","args":{"id":4,"type":"SpriteAnimator","prop":"durations","value":[0.5,0.5]}}
+{"command":"component.set","args":{"id":4,"type":"SpriteAnimator","prop":"clips","value":[{"name":"blink","firstFrame":0,"lastFrame":1}]}}
+{"command":"component.set","args":{"id":4,"type":"SpriteAnimator","prop":"clip","value":"blink"}}
+{"command":"scene.save","args":{"file":"Assets/Scenes/Main.cscene"}}
+```
+
+```bash
+cairn --project ./game --scene Assets/Scenes/Main.cscene exec.run --file slice.jsonl
+cairn --project ./game --scene Assets/Scenes/Main.cscene sprite.sheet --id 4 --clip blink --frame 1 --output /tmp/blink.png
+```
+
+The second command is the check: it reports the grid as numbers — `region`, `cell`,
+`count`, and every cell's `frame`, `x`, `y`, `w`, `h` and `seconds` — and writes a
+preview PNG with the same marks the panel draws: cyan slicing, magenta for the cells
+the clip plays, the `--frame` cell lit. The reply says `cell: {"width":32,"height":32}`,
+`count: 2`, `columns: 2`, `rows: 1` and two cells of `0.5 s`; the preview then shows
+the boundary at x=32 and the lit right-hand cell. Pixels out of that preview read with
+`image.pixel` are what a test or a batch can assert on, which is how the CLI suite pins
+slicing without a scene render.
+
+Two things the command cannot check for you: whether the drawing inside a cell is
+centred or on its own pixel grid (that is still a look at the sheet), and whether the
+grid is the one you *want* — `columns` and `rows` are equal slices, so an artist's
+sheet with uneven cells has to be cut with `image.crop` first, or given a `uvRect` per
+animation.
+
 ## Gotchas
+
+- **`image.draw.line` needs `--brush 2` or more.** `strokeLine` stamps discs of radius
+  `width / 2` and `stampDisc` skips any pixel whose centre is farther than that radius
+  from the stamp centre, so the default 1 px brush covers a pixel only when a stamp
+  lands exactly on its centre: a horizontal or vertical line between integer
+  coordinates paints *nothing*, and a 45° line comes out dotted and misses its last
+  pixel. Draw 1 px geometry with `image.draw.rect` (`--height 1`) instead. The coverage
+  model is recorded as a candidate in [docs/roadmap.md](roadmap.md).
 
 - **Coordinates are pixels, `(0,0)` is top-left.** `image.pixel` reports exactly
   the `x, y` you asked for; `--cx/--cy` of a shape is in the same space.

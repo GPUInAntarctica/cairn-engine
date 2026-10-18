@@ -593,6 +593,9 @@ button.tab { font-family: var(--ui); background: transparent; border: 0; border-
    actually scrub; no-drag rows get the default arrow so the cursor is a
    truthful signal. */
 .prop-row > label.no-drag { cursor: default; }
+/* A row whose control is the whole width: nothing to align to, so no label
+   column, and the button stretches instead of wrapping inside half a row. */
+.prop-row-full { grid-template-columns: minmax(0, 1fr); }
 .prop-vector { display: flex; gap: var(--sp-1); min-width: 0; }
 .prop-vector .num-field { flex: 1; min-width: 0; }
 /* Colour is a fixed-width swatch plus a fluid alpha slider, so a colour row
@@ -1165,6 +1168,100 @@ button.btn:disabled { opacity: 0.4; pointer-events: none; }
 .swatch-row { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
 .swatch { width: var(--w-swatch); height: var(--w-swatch); border-radius: var(--r-1); border: 1px solid var(--bd-line); cursor: pointer; padding: 0; font-size: inherit; }
 .swatch:hover { border-color: var(--tx); }
+
+/* ---- 2D panel ------------------------------------------------------------
+   One sheet and one strip. The sheet is the picture the slicing is drawn over;
+   the strip is the clip the animator plays, each cell as wide as its own time
+   so a held frame reads as a held frame. The canvas marks match the preview
+   PNG sprite.sheet writes: cyan slicing, magenta clip, a lit current cell. */
+.p2d-root { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.p2d-bar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    height: var(--h-btn-lg);
+    padding: 0 var(--sp-2-5);
+    background: var(--sf-header);
+    border-bottom: 1px solid var(--bd-subtle);
+}
+.p2d-title { font-size: var(--fs-12); font-weight: 600; color: var(--tx); }
+.p2d-sub {
+    font-size: var(--fs-11);
+    color: var(--tx-faint);
+    font-family: var(--mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.p2d-spacer { flex: 1; }
+.p2d-group { display: flex; align-items: center; gap: var(--sp-1); }
+.p2d-btn {
+    height: var(--h-row);
+    min-width: var(--h-row);
+    padding: 0 var(--sp-2);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--ui);
+    font-size: var(--fs-11);
+    color: var(--tx-dim);
+    background: var(--sf-raise);
+    border: 1px solid var(--bd-line);
+    border-radius: var(--r-2);
+}
+.p2d-btn:hover { color: var(--tx); border-color: var(--bd-strong); }
+.p2d-btn.toggled { background: var(--ac-soft); color: var(--ac); border-color: var(--ac-dim); }
+.p2d-zoom {
+    min-width: 30px;
+    text-align: center;
+    font-size: var(--fs-11);
+    color: var(--tx-dim);
+    font-variant-numeric: tabular-nums;
+}
+.p2d-stage { flex: 1; min-height: 0; position: relative; overflow: hidden; background: var(--sf-well); }
+.p2d-stage canvas.p2d-sheet {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    image-rendering: pixelated;
+    cursor: crosshair;
+}
+.p2d-hint {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--sp-4);
+    text-align: center;
+    color: var(--tx-faint);
+    font-size: var(--fs-12);
+    pointer-events: none;
+}
+.p2d-strip { flex: none; background: var(--sf-panel); border-top: 1px solid var(--bd-subtle); padding-bottom: var(--sp-1); }
+.p2d-strip-head { display: flex; align-items: center; gap: var(--sp-2); height: var(--h-btn); padding: 0 var(--sp-2-5); }
+.p2d-label { font-size: var(--fs-11); color: var(--tx-dim); }
+.p2d-len { font-size: var(--fs-11); color: var(--tx-dim); font-variant-numeric: tabular-nums; }
+.p2d-read {
+    font-family: var(--mono);
+    font-size: var(--fs-11);
+    color: var(--tx-faint);
+    font-variant-numeric: tabular-nums;
+}
+.p2d-clip {
+    height: var(--h-row);
+    padding: 0 var(--sp-1);
+    font-family: var(--ui);
+    font-size: var(--fs-11);
+    color: var(--tx);
+    background: var(--sf-inset);
+    border: 1px solid var(--bd-line);
+    border-radius: var(--r-2);
+}
+.p2d-clip.off { visibility: hidden; }
+.p2d-track { display: block; width: 100%; height: 48px; cursor: pointer; }
 
 /* ---- project browser -----------------------------------------------------
    A startup screen, not a landing page: one rail, one list, one empty line.

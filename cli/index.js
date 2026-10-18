@@ -27,6 +27,7 @@ require('./commands/runtime');
 require('./commands/render');
 require('./commands/script');
 require('./commands/image');
+require('./commands/sprite');
 
 const GLOBAL_USAGE = `cairn <command> [args] [global options]
 

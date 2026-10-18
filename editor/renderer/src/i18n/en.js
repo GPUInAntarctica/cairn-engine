@@ -31,6 +31,7 @@ export const dict = {
     'menu.build.rebuild': 'Rebuild Scripts',
     'menu.build.exportPlayer': 'Export Player...',
     'menu.window': 'Window',
+    'menu.window.panel2d': '2D Panel',
     'menu.window.console': 'Console',
     'menu.window.content': 'Content Browser',
     'menu.window.stats': 'Viewport Statistics',
@@ -58,6 +59,7 @@ export const dict = {
     'panel.content': 'Content Browser',
     'panel.scene': 'Scene',
     'panel.output': 'Build Output',
+    'panel.panel2d': '2D Panel',
     'hierarchy.search': 'Search entities',
     'hierarchy.empty': 'Scene is empty. Right-click to create.',
     'console.clear': 'Clear',
@@ -129,6 +131,7 @@ export const dict = {
     'insp.active': 'Active',
     'insp.name': 'Entity Name',
     'insp.removeComponent': 'Remove Component',
+    'insp.open2d': 'Open 2D Panel',
     'insp.alpha': 'Alpha',
 
     // dialogs
@@ -279,6 +282,28 @@ export const dict = {
     'imged.fit': 'Fit',
     'imged.grid': 'Grid',
     'imged.pixelArt': 'Pixel Sampling',
+
+    // 2D panel
+    'p2d.sec': 's',
+    'p2d.clip': 'Clip',
+    'p2d.noClip': '(none)',
+    'p2d.length': 'Length',
+    'p2d.frames': '{count} frames',
+    'p2d.frame': 'Frame',
+    'p2d.fit': 'Fit',
+    'p2d.cells': 'Cells',
+    'p2d.pixelGrid': 'Pixel Grid',
+    'p2d.zoomIn': 'Zoom In',
+    'p2d.zoomOut': 'Zoom Out',
+    'p2d.play': 'Play Clip',
+    'p2d.pause': 'Pause Clip',
+    'p2d.prevFrame': 'Previous Frame',
+    'p2d.nextFrame': 'Next Frame',
+    'p2d.summary': '{name} · {size} · {cells} cells ({grid})',
+    'p2d.cellAt': 'cell {frame} · {w}×{h} at {x},{y}',
+    'p2d.noSprite': 'Select an entity with a SpriteRenderer to slice its sheet.',
+    'p2d.noTexture': 'The sprite names no texture.',
+    'p2d.missing': 'Cannot read {file}.',
 
     // code editor
     'code.title': 'Code Editor',

@@ -31,6 +31,7 @@ export const dict = {
     'menu.build.rebuild': '重新构建脚本',
     'menu.build.exportPlayer': '导出 Player...',
     'menu.window': '窗口',
+    'menu.window.panel2d': '2D 面板',
     'menu.window.console': '控制台',
     'menu.window.content': '内容浏览器',
     'menu.window.stats': '视口统计',
@@ -58,6 +59,7 @@ export const dict = {
     'panel.content': '内容浏览器',
     'panel.scene': '场景',
     'panel.output': '构建输出',
+    'panel.panel2d': '2D 面板',
     'hierarchy.search': '搜索实体',
     'hierarchy.empty': '场景为空。右键新建。',
     'console.clear': '清空',
@@ -129,6 +131,7 @@ export const dict = {
     'insp.active': '激活',
     'insp.name': '实体名称',
     'insp.removeComponent': '移除组件',
+    'insp.open2d': '打开 2D 面板',
     'insp.alpha': 'Alpha',
 
     // dialogs
@@ -279,6 +282,28 @@ export const dict = {
     'imged.fit': '适应窗口',
     'imged.grid': '网格',
     'imged.pixelArt': '像素采样',
+
+    // 2D panel
+    'p2d.sec': ' 秒',
+    'p2d.clip': '动画',
+    'p2d.noClip': '（无）',
+    'p2d.length': '时长',
+    'p2d.frames': '{count} 帧',
+    'p2d.frame': '帧',
+    'p2d.fit': '适应',
+    'p2d.cells': '切分格',
+    'p2d.pixelGrid': '像素网格',
+    'p2d.zoomIn': '放大',
+    'p2d.zoomOut': '缩小',
+    'p2d.play': '播放动画',
+    'p2d.pause': '暂停动画',
+    'p2d.prevFrame': '上一帧',
+    'p2d.nextFrame': '下一帧',
+    'p2d.summary': '{name} · {size} · {cells} 格（{grid}）',
+    'p2d.cellAt': '第 {frame} 格 · {w}×{h} @ {x},{y}',
+    'p2d.noSprite': '选择一个带 SpriteRenderer 的实体以切分它的图集。',
+    'p2d.noTexture': '该精灵没有指定贴图。',
+    'p2d.missing': '无法读取 {file}。',
 
     // code editor
     'code.title': '代码编辑器',

@@ -69,7 +69,13 @@ export function mountEditor(root, prefs) {
         closeable: false,
     });
     const viewport = new Viewport(viewportPage.pageEl);
-    tabHost.onActivate = () => viewport.resize();
+    let spritePanel = null;
+    tabHost.onActivate = id => {
+        viewport.resize();
+        // The 2D panel repaints its playhead while a clip plays, so it only
+        // needs to know when it is the page on screen.
+        if (spritePanel) spritePanel.setActive(id === '2d');
+    };
 
     const contentBrowser = new ContentBrowser(document.getElementById('page-content'), absPath => {
         const ext = path.extname(absPath).toLowerCase();
@@ -213,7 +219,34 @@ export function mountEditor(root, prefs) {
         });
     }
 
+    // The 2D panel follows the selection rather than a file, so there is one of
+    // it: opening it again brings the same page forward.
+    function open2DPanel() {
+        if (tabHost.pages.has('2d')) {
+            tabHost.activate('2d');
+            spritePanel?.paint();
+            return;
+        }
+        tabHost.addPage('2d', {
+            label: t('panel.panel2d'),
+            icon: 'sprite',
+            build: pageEl => {
+                import('./spritePanel.js').then(({ SpritePanel }) => {
+                    if (!tabHost.pages.has('2d')) return;
+                    spritePanel = new SpritePanel(pageEl);
+                    spritePanel.setActive(tabHost.active === '2d');
+                });
+            },
+            onClose: () => {
+                spritePanel?.dispose();
+                spritePanel = null;
+                return true;
+            },
+        });
+    }
+
     on('open-code', absPath => openCodeTab(absPath));
+    on('open-2d-panel', () => open2DPanel());
     on('open-image', absPath => openImageTab(absPath));
     on('file-saved', async filePath => {
         if (/\.cpp$|\.h$|\.hpp$/i.test(filePath) && prefs.autosave !== false) {
@@ -316,6 +349,8 @@ export function mountEditor(root, prefs) {
         {
             label: 'menu.window',
             items: [
+                { label: 'menu.window.panel2d', run: () => open2DPanel() },
+                '-',
                 { label: 'menu.window.content', run: () => activateBottom('content') },
                 { label: 'menu.window.console', run: () => activateBottom('console') },
                 { label: 'menu.window.stats', run: () => { viewport.showStats = !viewport.showStats; viewport.drawOverlay(); toolbar.refresh(); } },
@@ -454,6 +489,7 @@ export function mountEditor(root, prefs) {
         },
         tabs: tabHost,
         focusScene: () => tabHost.activate('scene'),
+        open2D: () => open2DPanel(),
     };
 
     function frame(now) {

@@ -284,8 +284,8 @@ console.log('cli: prefab per-property overrides');
 // Two instances: one tweaked, one left alone. The .prefab is then edited from
 // outside and the scene reloaded: the tweaked instance keeps its change and
 // picks up everything else, the untouched one follows the asset exactly.
-function runProjectBatch(file) {
-    const r = spawnSync(process.execPath, [cli, '--project', projectDir, 'exec.run', '--file', file],
+function runProjectBatch(file, extra = []) {
+    const r = spawnSync(process.execPath, [cli, '--project', projectDir, 'exec.run', '--file', file, ...extra],
         { encoding: 'utf8', cwd: scratch, env: batchEnv() });
     const lines = r.stdout.trim().split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
     return { stdout: r.stdout, stderr: r.stderr, lines, step: name => lines.find(l => l.id === name) };
@@ -2108,6 +2108,147 @@ check(texProps.clips.find(c => c.name === 'own').texturePath === 'Assets/Sprites
 const texSchema = expectOk(['component.schema', 'SpriteAnimator']);
 const texSchemaProp = texSchema.components[0].schema.find(p => p.name === 'texturePath');
 check(texSchemaProp && texSchemaProp.kind === 'string', 'component.schema reports texturePath as a string prop', texSchemaProp);
+
+// ---------------------------------------------------------------------------
+console.log('cli: 2D panel (sheet slicing and the frame timeline)');
+// ---------------------------------------------------------------------------
+// The editor's 2D panel draws a sheet's slicing and the time each cell of a clip
+// gets; an agent asks the same questions without a window. sprite.sheet reads
+// the engine's own animator, reports the cells in texels and writes a preview
+// PNG carrying the marks the panel draws: the slicing, the cells the clip
+// plays, and the cell about to be drawn. The sheet is the four-quadrant 32x32
+// PNG and the clip entry carries its own times, its own grid and its own sheet,
+// so the numbers below can only come from the entry.
+const panShot = path.join(scratch, 'panel_preview.png');
+const panAuto = path.join(scratch, 'panel_auto.png');
+const panRect = path.join(scratch, 'panel_rect.png');
+const panRun = runProjectBatch(writeBatch('panel.jsonl', [
+    { command: 'image.new', args: { width: 32, height: 32, background: 'transparent' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 16, height: 16, filled: true, color: '#ff0000' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 0, width: 16, height: 16, filled: true, color: '#00ff00' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 16, width: 16, height: 16, filled: true, color: '#0000ff' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 16, width: 16, height: 16, filled: true, color: '#ffffff' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/dash.png' }, id: 'sheet' },
+    { command: 'image.new', args: { width: 16, height: 16, background: 'transparent' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 8, height: 8, filled: true, color: '#ffff00' } },
+    { command: 'image.draw.rect', args: { x: 8, y: 0, width: 8, height: 8, filled: true, color: '#ff00ff' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 8, width: 8, height: 8, filled: true, color: '#00ffff' } },
+    { command: 'image.draw.rect', args: { x: 8, y: 8, width: 8, height: 8, filled: true, color: '#404040' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/fx.png' }, id: 'fxsheet' },
+    { command: 'scene.new', args: { name: 'Panel' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    ...atlasCam(1),
+    { command: 'entity.create', args: { name: 'Sprite' }, id: 'sp' },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteRenderer', props: {
+        texturePath: 'Assets/Sprites/dash.png', pixelsPerUnit: 16, pixelPerfect: true } } },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteAnimator', props: {
+        columns: 2, rows: 2, clip: 'walk', fps: 4,
+        durations: [0.2, 0.2, 0.2, 0.2],           // the component's own table
+        clips: [{ name: 'walk', firstFrame: 0, lastFrame: 1, durations: [0.5, 0.1] },
+                { name: 'plain', firstFrame: 0, lastFrame: 3 },
+                { name: 'fx', firstFrame: 0, lastFrame: 0, columns: 1, rows: 1, fps: 8, durations: [],
+                  texturePath: 'Assets/Sprites/fx.png' }] } }, id: 'anim' },
+    { command: 'sprite.sheet', args: { id: '$ref:sp' }, id: 'plain' },
+    { command: 'sprite.sheet', args: { id: '$ref:sp', clip: 'fx' }, id: 'fxclip' },
+    { command: 'sprite.sheet', args: { id: '$ref:sp', clip: 'plain' }, id: 'plainclip' },
+    { command: 'sprite.sheet', args: { id: '$ref:sp', frame: 2, scale: 4, output: panShot }, id: 'lit' },
+    { command: 'sprite.sheet', args: { id: '$ref:sp', frame: 99 }, id: 'clamped' },
+    { command: 'sprite.sheet', args: { id: '$ref:sp', frame: -5 }, id: 'negative' },
+    { command: 'sprite.sheet', args: { id: '$ref:sp', output: panAuto }, id: 'auto' },
+    { command: 'image.open', args: { file: panShot } },
+    { command: 'image.info', id: 'pinfo' },
+    { command: 'image.open', args: { file: panAuto } },
+    { command: 'image.info', id: 'ainfo' },
+    { command: 'component.set', args: { id: '$ref:sp', type: 'SpriteRenderer', prop: 'uvRect', value: [0, 0.5, 1, 0.5] } },
+    { command: 'sprite.sheet', args: { id: '$ref:sp', scale: 4, output: panRect }, id: 'rect' },
+    { command: 'scene.save', args: { file: 'Assets/Scenes/Panel.cscene' }, id: 'saved' },
+]));
+check(panRun.lines.every(l => l.ok !== false), 'the 2D panel batch runs clean', panRun.stdout + panRun.stderr);
+
+const panPlain = panRun.step('plain').result;
+check(panPlain.width === 32 && panPlain.height === 32 && panPlain.count === 4,
+    'sprite.sheet reads the sheet size and the cell count', panPlain);
+check(panPlain.texture === 'Assets/Sprites/dash.png' && panPlain.textureSource === 'sprite',
+    'and the texture the sprite names', panPlain.texture);
+check(JSON.stringify(panPlain.cells.map(c => [c.x, c.y, c.w, c.h])) ===
+    JSON.stringify([[0, 0, 16, 16], [16, 0, 16, 16], [0, 16, 16, 16], [16, 16, 16, 16]]),
+    'cells are texel rects, row-major from the top-left', panPlain.cells);
+check(panPlain.clip.name === 'walk' && panPlain.clip.first === 0 && panPlain.clip.last === 1 && panPlain.clip.count === 2,
+    'the animator\'s own clip is the one described', panPlain.clip);
+check(JSON.stringify(panPlain.clip.cells.map(c => [c.frame, c.seconds])) === JSON.stringify([[0, 0.5], [1, 0.1]]),
+    'a clip entry\'s own times are the ones reported', panPlain.clip.cells);
+check(Math.abs(panPlain.clip.length - 0.6) < 1e-6 && panPlain.clip.cells[1].start === 0.5,
+    'and each cell says when it starts', panPlain.clip);
+check(panPlain.clips.join(',') === 'walk,plain,fx' && panPlain.frame === 0,
+    'the animator\'s clip names and its current cell come back too', panPlain.clips);
+check(panPlain.clip.step === 0.25, 'the rate is reported even when every cell has a time of its own', panPlain.clip.step);
+
+const panFx = panRun.step('fxclip').result;
+check(panFx.texture === 'Assets/Sprites/fx.png' && panFx.textureSource === 'animator',
+    'a clip that names its own sheet is sliced from that sheet', panFx.texture);
+check(panFx.width === 16 && panFx.count === 1 && panFx.cell.width === 16,
+    'and its own grid is the one laid over it', panFx);
+check(Math.abs(panFx.clip.cells[0].seconds - 0.125) < 1e-6,
+    'a clip that clears its times falls back to the rate', panFx.clip.cells[0]);
+const panInherit = panRun.step('plainclip').result.clip;
+check(panInherit.count === 4 && Math.abs(panInherit.cells[0].seconds - 0.2) < 1e-6 && panInherit.step === 0.25,
+    'and a clip that names no times keeps the component\'s table over its rate', panInherit.cells[0]);
+
+check(panRun.step('lit').result.frame === 2, '--frame decides which cell is reported', panRun.step('lit').result.frame);
+check(panRun.step('clamped').result.frame === 3, 'a frame past the end clamps to the last cell', panRun.step('clamped').result.frame);
+check(panRun.step('negative').result.frame === 0, 'and one before the start clamps to the first', panRun.step('negative').result.frame);
+
+const panPx = (file, x, y) => expectOk(['--image', file, 'image.pixel', '--x', String(x), '--y', String(y)]);
+const magentaPx = p => p.r > 200 && p.b > 200 && p.g < 60;
+const cyanPx = p => p.g > 200 && p.b > 200 && p.r < 60;
+check(magentaPx(panPx(panShot, 64, 5)), 'the preview boxes the cells the clip plays', panPx(panShot, 64, 5));
+check(magentaPx(panPx(panShot, 127, 5)), 'including the sheet\'s own edge', panPx(panShot, 127, 5));
+check(cyanPx(panPx(panShot, 5, 127)), 'a cell the clip does not play keeps the plain slicing', panPx(panShot, 5, 127));
+const panLit = panPx(panShot, 32, 96);
+check(panLit.r > 60 && panLit.g > 60 && panLit.b > 200 && Math.abs(panLit.r - panLit.g) <= 8,
+    'and the cell about to be drawn is lit over its own color', panLit);
+const panPlainPx = panPx(panShot, 32, 32);
+check(panPlainPx.r > 200 && panPlainPx.g < 60 && panPlainPx.b < 60,
+    'the other cells are left as they are', panPlainPx);
+check(panRun.step('pinfo').result.width === 128 && panRun.step('pinfo').result.height === 128,
+    '--scale zooms the preview by whole pixels', panRun.step('pinfo').result);
+check(panRun.step('ainfo').result.width === 256,
+    'and the automatic zoom fits the sheet in about 256 pixels', panRun.step('ainfo').result);
+
+const panRectClip = panRun.step('rect').result;
+check(JSON.stringify(panRectClip.region) === JSON.stringify({ x: 0, y: 16, w: 32, h: 16 }),
+    'a uvRect becomes the region the cells are laid in', panRectClip.region);
+check(JSON.stringify(panRectClip.cells.map(c => [c.x, c.y, c.w, c.h])) ===
+    JSON.stringify([[0, 16, 16, 8], [16, 16, 16, 8], [0, 24, 16, 8], [16, 24, 16, 8]]),
+    'and the grid is sliced inside it', panRectClip.cells);
+const loosePx = panPx(panRect, 32, 32);
+check(loosePx.r > 200 && loosePx.g < 60, 'the preview leaves the texels outside the region alone', loosePx);
+check(magentaPx(panPx(panRect, 32, 64)), 'and marks the region\'s first line', panPx(panRect, 32, 64));
+
+// A command that has to report a failure is a two-part contract: the CLI
+// envelope carries the code, and so does a batch step. The three ways a sheet
+// cannot be described are all errors rather than empty results.
+const panErrRun = runProjectBatch(writeBatch('panel_err.jsonl', [
+    { command: 'scene.new', args: { name: 'PanelErr' } },
+    { command: 'entity.create', args: { name: 'Bare' }, id: 'bare' },
+    { command: 'component.add', args: { id: '$ref:bare', type: 'SpriteRenderer' } },
+    { command: 'entity.create', args: { name: 'NoRender' }, id: 'none' },
+    { command: 'sprite.sheet', args: { id: 4242 } },
+    { command: 'sprite.sheet', args: { id: '$ref:none' } },
+    { command: 'sprite.sheet', args: { id: '$ref:bare' } },
+]), ['--no-stopOnError']);
+const panErrors = panErrRun.lines.filter(l => l.ok === false);
+check(panErrors.length === 3 && panErrors.map(e => e.error.code).join(',') === 'not_found,not_found,invalid_arg',
+    'sprite.sheet reports an entity that is not there, one with no SpriteRenderer, and a sprite with no texture',
+    panErrors);
+check(panErrors[1] && /SpriteRenderer/.test(panErrors[1].error.message)
+    && panErrors[2] && /texture/.test(panErrors[2].error.message),
+    'each failure says what was missing', panErrors.map(e => e.error.message));
+
+const panText = run(['--project', projectDir, '--scene', 'Assets/Scenes/Panel.cscene', '--format', 'text',
+    'sprite.sheet', '--id', String(panPlain.id), '--clip', 'walk']);
+check(panText.code === 0 && /seconds/.test(panText.stdout) && /frame/.test(panText.stdout),
+    'sprite.sheet --format text lays the clip\'s cells out as a table', panText.stdout);
 
 // ---------------------------------------------------------------------------
 console.log('cli: export + preferences');
