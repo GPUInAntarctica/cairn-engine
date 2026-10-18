@@ -2080,6 +2080,219 @@ static void TestSpriteClips() {
     });
 }
 
+// Sprite animation state machine: `params` are the values the transitions read
+// and `transitions` says which state to enter for which of them, evaluated in
+// table order once per tick after the frame has advanced. The checks below read
+// the state back as the colour of the cell it draws, so a state is pinned by
+// what is on screen rather than by a field.
+static void TestSpriteTransitions() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-machine").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/frames.bmp";
+    // Reading order: red, green / blue, white - one distinct colour per cell.
+    WriteTestBmpSheet(dir + "/" + tex, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255);
+    const int sheet[4][3] = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}, {255, 255, 255}};
+
+    auto px = [](Engine& engine, int x, int y) {
+        const FrameTarget& t = engine.frame();
+        const uint8_t* p = &t.color[((size_t)y * (size_t)t.width + (size_t)x) * 4];
+        return std::array<int, 3>{(int)p[0], (int)p[1], (int)p[2]};
+    };
+    auto closeTo = [](const std::array<int, 3>& c, int r, int g, int b) {
+        return std::abs(c[0] - r) < 40 && std::abs(c[1] - g) < 40 && std::abs(c[2] - b) < 40;
+    };
+    auto shows = [&](Engine& engine, int f) {
+        engine.RenderGameFrame();
+        return closeTo(px(engine, 64, 64), sheet[f][0], sheet[f][1], sheet[f][2]);
+    };
+    auto clipEntry = [](const char* name, int first, int last, float fps, bool loop) {
+        Json e = Json::MakeObject();
+        e.set("name", Json(name));
+        e.set("firstFrame", Json(first));
+        e.set("lastFrame", Json(last));
+        e.set("fps", Json(fps));
+        e.set("loop", Json(loop));
+        return e;
+    };
+    auto cond = [](const char* param, const char* op) {
+        Json c = Json::MakeObject();
+        c.set("param", Json(param));
+        c.set("op", Json(op));
+        return c;
+    };
+    auto condValue = [&](const char* param, const char* op, Json value) {
+        Json c = cond(param, op);
+        c.set("value", std::move(value));
+        return c;
+    };
+    auto trans = [](const char* from, const char* to, Json when, bool waitForExit) {
+        Json t = Json::MakeObject();
+        t.set("from", Json(from));
+        t.set("to", Json(to));
+        if (!when.isNull()) t.set("when", std::move(when));
+        if (waitForExit) t.set("waitForExit", Json(true));
+        return t;
+    };
+    // Three states on the sheet and the machine that moves between them: idle is
+    // one cell at 4 fps, walk two at 2, attack one at 2 and does not loop.
+    auto build = [&](Engine& engine, int backend) {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(128, 128);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        scene.ambient = Color(1, 1, 1, 1);
+        scene.tonemap = 0;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 2.0f;
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        GameObject* go = scene.CreateEntity("Sprite");
+        auto* sr = go->AddComponent<SpriteRenderer>();
+        sr->texturePath = tex;
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = 4.0f;
+        auto* anim = go->AddComponent<SpriteAnimator>();
+        anim->columns = 2;
+        anim->rows = 2;
+        Json table = Json::MakeArray();
+        table.push(clipEntry("idle", 0, 0, 4.0f, true));
+        table.push(clipEntry("walk", 1, 2, 2.0f, true));
+        table.push(clipEntry("attack", 3, 3, 2.0f, false));
+        anim->clips = std::move(table);
+        anim->params = Json::MakeObject();
+        anim->params.set("moving", Json(false));
+        anim->params.set("speed", Json(0.0f));
+        anim->params.set("attack", Json(false));
+        anim->clip = "idle";
+        return anim;
+    };
+    auto bothBackends = [&](const std::function<void(int, const char*)>& one) {
+        one(2, "software");
+        if (VulkanBackendAvailable()) one(1, "vulkan");
+    };
+
+    // --- idle -> walk -> attack -> idle, driven by the parameters ----------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        Json table = Json::MakeArray();
+        table.push(trans("idle", "walk", condValue("moving", "is", Json(true)), false));
+        // Two conditions on one transition: both have to hold.
+        Json both = Json::MakeArray();
+        both.push(condValue("moving", "is", Json(false)));
+        both.push(condValue("speed", "lt", Json(0.5f)));
+        table.push(trans("walk", "idle", std::move(both), false));
+        table.push(trans("*", "attack", cond("attack", "trigger"), false));
+        table.push(trans("attack", "idle", Json(), true));   // waits for the clip
+        anim->transitions = std::move(table);
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        CHECK(shows(engine, 0));          // idle
+        engine.Update(0.25f);             // `moving` is still false
+        CHECK(shows(engine, 0));
+        anim->params.set("moving", Json(true));
+        engine.Update(0.25f);
+        CHECK(shows(engine, 1));          // walk's first cell
+        engine.Update(0.5f);
+        CHECK(shows(engine, 2));          // its second
+        // `moving` false but `speed` too high: the second condition blocks it.
+        anim->params.set("moving", Json(false));
+        anim->params.set("speed", Json(1.0f));
+        engine.Update(0.5f);
+        CHECK(shows(engine, 1));
+        anim->params.set("speed", Json(0.1f));
+        engine.Update(0.25f);
+        CHECK(shows(engine, 0));          // both hold, back to idle
+        // A trigger fires from any state, and is spent when it does.
+        anim->params.set("attack", Json(true));
+        engine.Update(0.25f);
+        CHECK(shows(engine, 3));          // attack
+        const Json* spent = anim->Param("attack");
+        CHECK(spent && !spent->asBool());
+        engine.Update(0.25f);             // half of the attack's one-cell clip
+        CHECK(shows(engine, 3));          // the exit time is not reached yet
+        engine.Update(0.25f);
+        CHECK(shows(engine, 0));          // and now it is
+        CHECK(anim->clip == "idle");
+    });
+
+    // --- table order is the priority, and an op has to exist ----------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        Json table = Json::MakeArray();
+        table.push(trans("idle", "walk", condValue("speed", "gt", Json(1.0f)), false));
+        table.push(trans("idle", "attack", condValue("speed", "gt", Json(0.5f)), false));
+        table.push(Json(42));                                     // not a transition
+        table.push(trans("idle", "walk", cond("speed", "bogus"), false));   // no such op
+        table.push(trans("walk", "idle", condValue("speed", "lt", Json(0.1f)), false));
+        table.push(trans("*", "attack", cond("nowhere", "is"), false));     // unset param
+        anim->transitions = std::move(table);
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        anim->params.set("speed", Json(2.0f));
+        // Both of the first two match, so the earlier entry is the one that runs.
+        CHECK(anim->EvaluateTransitions() == "walk");
+        CHECK(anim->EvaluateTransitions().empty());   // and nothing matches twice
+        CHECK(shows(engine, 1));
+        // The second entry is next in line when the first does not match.
+        anim->clip = "idle";
+        anim->params.set("speed", Json(0.7f));
+        engine.Update(0.25f);
+        CHECK(shows(engine, 3));          // attack, not walk
+        // Nothing matches when the value is below both thresholds.
+        anim->clip = "idle";
+        anim->params.set("speed", Json(0.2f));
+        engine.Update(0.25f);
+        CHECK(shows(engine, 0));
+        // `lt` the other way round fires, and stops firing once above it.
+        anim->clip = "walk";
+        anim->params.set("speed", Json(0.05f));
+        engine.Update(0.25f);
+        CHECK(shows(engine, 0));
+        anim->clip = "walk";
+        anim->params.set("speed", Json(0.5f));
+        engine.Update(0.5f);
+        CHECK(shows(engine, 2));
+    });
+
+    // --- the exit time, self-transitions and a manual override --------------
+    bothBackends([&](int backend, const char* name) {
+        Engine engine;
+        SpriteAnimator* anim = build(engine, backend);
+        Json table = Json::MakeArray();
+        table.push(trans("walk", "idle", Json(), false));   // no condition, no exit time
+        anim->transitions = std::move(table);
+        anim->clip = "walk";
+        engine.Play();
+        CHECK(std::string(engine.RenderGameFrame().backend) == name);
+        engine.Update(0.25f);
+        CHECK(shows(engine, 0));          // fires on the first tick
+        // A self-transition replays the state: fired from `walk` on a trigger it
+        // restarts the animation rather than leaving it where it was.
+        Json replay = Json::MakeArray();
+        replay.push(trans("walk", "walk", cond("attack", "trigger"), false));
+        anim->transitions = std::move(replay);
+        anim->clip = "walk";
+        engine.Update(0.5f);
+        CHECK(shows(engine, 2));          // one step in
+        anim->params.set("attack", Json(true));
+        engine.Update(0.25f);
+        CHECK(shows(engine, 1));          // back to the first cell
+        // Writing `clip` is still a manual override of the machine.
+        anim->clip = "attack";
+        engine.Update(0.25f);
+        CHECK(shows(engine, 3));
+    });
+}
+
 // Texture cache: per-slot color space, byte-budgeted LRU eviction, and mtime
 // based reload.
 static void TestTextureCache() {
@@ -3445,6 +3658,7 @@ int main() {
     TestSpriteCullBounds();
     TestSpriteAnimation();
     TestSpriteClips();
+    TestSpriteTransitions();
     TestTextureMips();
     TestParentedPhysics();
     TestTriggerAndEnabled();

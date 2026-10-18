@@ -658,7 +658,10 @@ void Engine::Update(float dt) {
             for (const auto& go : scene_->objects) {
                 if (!go->ActiveInHierarchy()) continue;
                 auto* anim = go->GetComponent<SpriteAnimator>();
-                if (anim && anim->enabled) anim->AdvanceAnimation(scaled);
+                if (anim && anim->enabled) {
+                    anim->AdvanceAnimation(scaled);
+                    anim->EvaluateTransitions();
+                }
             }
         }
         scene_->ProcessDeferred();

@@ -1835,6 +1835,89 @@ check(clipProp && clipProp.kind === 'json',
     'component.schema reports the clip table as a json prop', clipProp);
 
 // ---------------------------------------------------------------------------
+console.log('cli: sprite animation states (parameters drive the clips)');
+// ---------------------------------------------------------------------------
+// A state machine instead of a script: `params` are the values the animator
+// reads, `transitions` says which named clip to enter for which of them. Each
+// `runtime.step` advances one frame and then runs the table in order, so the
+// same parameters across the same steps produce the same frames every run.
+// `idle` is one cell, `walk` two at 60 fps, `attack` one at 30 fps that does
+// not loop - the exit time therefore holds it for two steps before moving on.
+const stateShot = i => path.join(scratch, `state${i}.png`);
+const stateParams = over => ({ moving: false, speed: 0.25, attack: false, ...over });
+const setParams = over => ({ command: 'component.setProps',
+    args: { id: '$ref:sp', type: 'SpriteAnimator', props: { params: stateParams(over) } } });
+const stateSteps = [{ command: 'runtime.play' }];
+const stateShotStep = i => ({ command: 'render.screenshot',
+    args: { out: stateShot(i), mode: 'game', width: 64, height: 64 }, id: `s${i}` });
+const stateSeq = [
+    [stateShotStep(0)],
+    [setParams({ moving: true }), { command: 'runtime.step' }, stateShotStep(1)],
+    [{ command: 'runtime.step' }, stateShotStep(2)],
+    [setParams({ speed: 1 }), { command: 'runtime.step' }, stateShotStep(3)],
+    [setParams({}), { command: 'runtime.step' }, stateShotStep(4)],
+    [setParams({ attack: true }), { command: 'runtime.step' }, stateShotStep(5)],
+    [{ command: 'runtime.step' }, stateShotStep(6)],
+    [{ command: 'runtime.step' }, stateShotStep(7)],
+];
+for (const batch of stateSeq) stateSteps.push(...batch);
+const stateRun = runProjectBatch(writeBatch('states.jsonl', [
+    { command: 'image.new', args: { width: 32, height: 32, background: 'transparent' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 16, height: 16, filled: true, color: '#ff0000' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 0, width: 16, height: 16, filled: true, color: '#00ff00' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 16, width: 16, height: 16, filled: true, color: '#0000ff' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 16, width: 16, height: 16, filled: true, color: '#ffffff' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/states.png' }, id: 'sheet' },
+    { command: 'scene.new', args: { name: 'States' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    ...atlasCam(1),
+    { command: 'entity.create', args: { name: 'Sprite' }, id: 'sp' },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteRenderer', props: {
+        texturePath: 'Assets/Sprites/states.png', pixelsPerUnit: 16, pixelPerfect: true } } },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteAnimator', props: {
+        columns: 2, rows: 2, clip: 'idle',
+        clips: [
+            { name: 'idle', firstFrame: 0, lastFrame: 0, fps: 60 },
+            { name: 'walk', firstFrame: 1, lastFrame: 2, fps: 60 },
+            { name: 'attack', firstFrame: 3, lastFrame: 3, fps: 30, loop: false },
+        ],
+        params: stateParams({}),
+        transitions: [
+            { from: 'idle', to: 'walk', when: [{ param: 'moving', op: 'is', value: true }] },
+            { from: 'walk', to: 'idle', when: [
+                { param: 'moving', op: 'is', value: false },
+                { param: 'speed', op: 'lt', value: 0.5 }] },
+            { from: '*', to: 'attack', when: [{ param: 'attack', op: 'trigger' }] },
+            { from: 'attack', to: 'idle', waitForExit: true },
+        ] } }, id: 'anim' },
+    ...stateSteps,
+    { command: 'component.get', args: { id: '$ref:sp', type: 'SpriteAnimator' }, id: 'read' },
+]));
+check(stateRun.lines.every(l => l.ok !== false), 'the state machine batch runs clean', stateRun.stdout + stateRun.stderr);
+const statePx = (i, x, y) => expectOk(['--image', stateShot(i), 'image.pixel', '--x', String(x), '--y', String(y)]);
+check(dominant(statePx(0, 32, 32), 0), 'the animator starts in the clip it names', statePx(0, 32, 32));
+check(dominant(statePx(1, 32, 32), 1), 'a parameter that holds moves it to that state', statePx(1, 32, 32));
+check(dominant(statePx(2, 32, 32), 2), 'and the state plays its own clip from there', statePx(2, 32, 32));
+check(dominant(statePx(3, 32, 32), 1), 'one of two conditions holding is not enough', statePx(3, 32, 32));
+check(dominant(statePx(4, 32, 32), 0), 'both of them take the machine back', statePx(4, 32, 32));
+check(whitePx(statePx(5, 32, 32)), 'a trigger moves it from any state', statePx(5, 32, 32));
+check(whitePx(statePx(6, 32, 32)), 'the exit time holds that state while its clip runs', statePx(6, 32, 32));
+check(dominant(statePx(7, 32, 32), 0), 'and lets it go once the clip is done', statePx(7, 32, 32));
+const stateRead = stateRun.step('read').result.props;
+check(stateRead.clip === 'idle', 'the state it ended in is the one it is playing', stateRead.clip);
+check(stateRead.params && stateRead.params.attack === false,
+    'the trigger is spent by the transition that fired', stateRead.params);
+check(stateRead.params.moving === false && stateRead.params.speed === 0.25,
+    'and the parameters it did not touch are left alone', stateRead.params);
+check(Array.isArray(stateRead.transitions) && stateRead.transitions.length === 4
+    && stateRead.transitions[3].waitForExit === true && stateRead.transitions[3].to === 'idle',
+    'the transition table round-trips through component.get', stateRead.transitions);
+const stateSchema = expectOk(['component.schema', 'SpriteAnimator']);
+const jsonProps = stateSchema.components[0].schema.filter(p => p.kind === 'json').map(p => p.name);
+check(jsonProps.includes('params') && jsonProps.includes('transitions'),
+    'component.schema reports the parameters and the table as json props', jsonProps);
+
+// ---------------------------------------------------------------------------
 console.log('cli: export + preferences');
 // ---------------------------------------------------------------------------
 const prefs = expectOk(['project.preferences', '--set', '{"language":"en"}']);

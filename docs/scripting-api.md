@@ -269,7 +269,37 @@ anim->clip = "attack";                       // a script, the CLI or the inspect
 - **Switching draws the new clip's first cell immediately.** `DrawnCell` is the one answer to "which cell is on screen", and it is the new clip's first cell until the next tick has restarted the clip — so `component.setProps {"clip": "attack"}` followed by a screenshot is that clip's first frame, with no half-elapsed time carried over from the clip before it.
 - **A clip's own `fps` and `loop` win** over the component's, which is what makes `attack` play at 12 fps and hold its last cell while `walk` wraps at 10.
 - **The table is a `Json` property** (`EditorPropKind::Json`), so it travels through the scene file, `component.add` / `component.setProps` / `component.get` and the inspector's JSON field unchanged. `ClipCount()`, `ClipName(i)`, `FindClip(name)` and `ActiveClip()` read a resolved clip from a script; entries that are not objects, or have no name, are skipped rather than mistaken for clips.
-- **Not yet a state machine.** Transitions, conditions and parameters do not exist: a script decides when to write `clip`, and there is no per-frame duration or animation event inside a clip.
+- **The table becomes a state machine** once the animator is given `params` and `transitions`, below. There is still no per-frame duration or animation event inside a clip.
+
+### Driving the animations
+
+`params` are the values the animator reads and `transitions` says which clip to enter for which of them, so "walk while moving, attack when it is pressed, back to idle when the attack ends" is written on the component instead of in a script — and it replays identically from a scene file, a batch or a test.
+
+```json
+"params": { "moving": true, "speed": 2.5, "attack": false },
+"transitions": [
+  { "from": "idle", "to": "walk", "when": { "param": "moving", "op": "is" } },
+  { "from": "walk", "to": "idle", "when": [
+      { "param": "moving", "op": "is", "value": false },
+      { "param": "speed",  "op": "lt", "value": 0.5 } ] },
+  { "from": "*", "to": "attack", "when": { "param": "attack", "op": "trigger" } },
+  { "from": "attack", "to": "idle", "waitForExit": true }
+]
+```
+
+```cpp
+anim->params.set("moving", Json(true));      // a script, the inspector, or:
+// cairn component.setProps --id 5 --type SpriteAnimator --props \
+//   '{"params":{"moving":true,"speed":2.5,"attack":false}}'
+```
+
+- **A condition is `{"param", "op", "value"}`.** `is` and `not` compare the value as a bool — a bare `"op": "is"` means "is true", so `value` is only needed for `false` — `gt` and `lt` compare it as a number, and `trigger` is a one-shot bool. `when` is either one condition or a list of them that all have to hold. A parameter the animator does not have holds nothing, and an `op` that does not exist never matches, so a half-edited table stays inert instead of firing.
+- **A trigger is spent by the transition it fires.** Every `trigger` the entry watched is cleared when it runs, so one press moves the machine once and `params.attack` reads `false` afterwards — which is also how a batch confirms the press was consumed.
+- **Table order is priority.** The first entry whose `from` is the state being played (or `"*"`, the default, so a `from`-less entry fires from anywhere) and whose conditions hold is the one that runs.
+- **`waitForExit` waits for the clip.** The entry only fires once the state's clip has played for a whole length — its cells over its own `fps` — which is what sends `attack` back to `idle` when it finishes. Without it the entry fires as soon as its conditions hold; a clip with no frame rate has no length, so such an entry never fires.
+- **A transition to the state already playing replays it** from its first cell, which is how a trigger restarts a one-shot clip.
+- **Each tick advances the frame and then runs the table**, so an exit time sees the clip that just finished, and the state that tick enters is the cell the frame shows — its first. Writing `clip` by hand is still a manual override, and a state entered by the machine is drawn before any of its own ticks have run.
+- **`params` is replaced wholesale** by `component.setProps`, like the clip table: send the whole bag, not one key.
 
 > **Orientation (0.1.23).** Image space is y-down everywhere in the engine: `image.*` draws `y = 0` at the top, and a texture's row 0 is `v = 0`. The 2D quad maps the image's top row to the **top** of the sprite, so what you draw is what you see — `flipY` is a plain "turn the picture upside down". Until 0.1.23 both the sprite and the glyph quad handed their top corners `v = 1`, which mirrored every sprite and every word (including the bundled `project-2d` template's title text).
 
@@ -293,4 +323,4 @@ void DescribeProps(ScriptMeta& meta) override {
 }
 ```
 
-A script's properties stop there. Engine components have one kind a script cannot declare — `EditorPropKind::Json`, a structured value the engine stores and passes through without interpreting it (`SpriteAnimator::clips` is one) — so it appears in `component.schema` for an engine component while `PropType` has no matching value.
+A script's properties stop there. Engine components have one kind a script cannot declare — `EditorPropKind::Json`, a structured value the engine stores and passes through without interpreting it (the animator's `clips`, `params` and `transitions` are three) — so it appears in `component.schema` for an engine component while `PropType` has no matching value.

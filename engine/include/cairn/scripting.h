@@ -414,6 +414,11 @@ public:
 // falls back to the matching field above, and `clip` naming nothing - or naming
 // no entry in the table - means those fields are the whole animation.
 //
+// The table is also a state machine when it is given the other two: `params`
+// are the values it reads (a bool, a number, or a trigger) and `transitions`
+// says which state to enter for which parameters. `clip` is then the current
+// state, and writing it by hand is a manual override.
+//
 // Play time is accumulated from the engine's Update(dt), and a frame is a pure
 // function of the accumulated dt sequence: the same series of Update calls
 // always shows the same frame, which is what makes an animation pinnable by a
@@ -436,9 +441,18 @@ public:
     Json clips = Json::MakeArray();
     std::string clip;        // the clip playing; "" means the fields above
 
+    // The state machine, on top of the table: named values the transitions read
+    // ({"moving": true, "speed": 1.5, "attack": false}) and the transitions
+    // themselves ([{"from", "to", "when", "waitForExit"}]). Both are structured
+    // values the engine reads but does not interpret beyond these rules.
+    Json params = Json::MakeObject();
+    Json transitions = Json::MakeArray();
+
     // Runtime state, not reflected fields: how far into the current frame the
-    // accumulated play time sits, and which clip that state belongs to.
+    // accumulated play time sits, how long the current state has been playing,
+    // and which clip that state belongs to.
     float frameTime = 0.0f;
+    float stateTime = 0.0f;   // since the state was entered; drives the exit time
     std::string activeClip;
 
     // One animation, resolved: a clip's own keys with the fields above filling
@@ -573,6 +587,7 @@ public:
         activeClip = clip;
         frame = FirstCell();
         frameTime = 0.0f;
+        stateTime = 0.0f;
     }
 
     // Advance by `dt` seconds of play time. A stall longer than one full cycle
@@ -582,8 +597,12 @@ public:
         if (clip != activeClip) Restart();   // a new clip starts at its own first cell
         const Clip c = ActiveClip();
         const int count = FrameCountOf(c);
-        if (!playing || count <= 1 || c.fps <= 0.0f) return;
+        if (!playing || c.fps <= 0.0f) return;
         const float step = 1.0f / c.fps;
+        // A one-cell state has no frames to step but still spends time, and the
+        // exit time below counts that time like any other state's.
+        stateTime += dt;
+        if (count <= 1) return;
         frameTime += dt;
         if (frameTime > step * (float)count) frameTime = step * (float)count;
         int n = 0;
@@ -602,6 +621,92 @@ public:
         if (c.loop) f = ((f % count) + count) % count;
         else f = f < 0 ? 0 : (f > count - 1 ? count - 1 : f);
         frame = first + f;
+    }
+
+    // --- parameters and transitions ----------------------------------------
+    // The value a parameter holds, or nullptr when it is not set.
+    const Json* Param(const std::string& name) const {
+        return params.isObject() ? params.find(name) : nullptr;
+    }
+
+    // How long one whole play of the current state takes (its cells at its
+    // rate), which is what the exit time is measured against.
+    float ClipLength() const {
+        const Clip c = ActiveClip();
+        const float step = c.fps > 0.0f ? 1.0f / c.fps : 0.0f;
+        return (float)FrameCountOf(c) * step;
+    }
+
+    // True once the state has played for a whole clip length. A state with no
+    // frame rate never finishes, because there is nothing to measure with.
+    bool Finished() const {
+        const float length = ClipLength();
+        return length > 0.0f && stateTime >= length;
+    }
+
+    // One condition: {"param", "op", "value"}. `is` and `not` compare the
+    // parameter as a bool (a bare `is` means "is true"), `gt` and `lt` compare
+    // it as a number, and `trigger` is a bool a fired transition clears, which
+    // is what makes it one-shot. A parameter that is not set holds nothing.
+    bool ConditionHolds(const Json& when) const {
+        if (!when.isObject()) return false;
+        const Json* p = Param(when["param"].asString(""));
+        if (!p) return false;
+        const std::string op = when["op"].asString("is");
+        if (op == "is") return p->asBool() == when["value"].asBool(true);
+        if (op == "not") return p->asBool() != when["value"].asBool(true);
+        if (op == "trigger") return p->asBool();
+        if (op == "gt") return p->asNumber() > when["value"].asNumber();
+        if (op == "lt") return p->asNumber() < when["value"].asNumber();
+        return false;   // an op that does not exist never matches
+    }
+
+    // Every condition of a transition: a `when` is either one condition or a
+    // list of them, and a transition with no `when` has none to hold.
+    bool ConditionsHold(const Json& when) const {
+        if (when.isNull()) return true;
+        if (when.isArray()) {
+            for (const Json& one : when.arrayItems()) {
+                if (!ConditionHolds(one)) return false;
+            }
+            return true;
+        }
+        return ConditionHolds(when);
+    }
+
+    // Clear the triggers a fired transition was watching: a trigger is an event,
+    // so it is spent the moment it moves the machine.
+    void ConsumeTriggers(const Json& when) {
+        if (when.isArray()) {
+            for (const Json& one : when.arrayItems()) ConsumeTriggers(one);
+            return;
+        }
+        if (when.isObject() && when["op"].asString("is") == "trigger") {
+            params.set(when["param"].asString(""), Json(false));
+        }
+    }
+
+    // Run the transition table on the state being played: the first entry whose
+    // `from` is that state (or "*", the default, so a missing `from` fires from
+    // anywhere), whose conditions hold and whose exit time has passed moves to
+    // its `to`. Returns the state entered, or "" when nothing fired. The order
+    // of the table is the priority, which is what makes it deterministic.
+    std::string EvaluateTransitions() {
+        if (!transitions.isArray()) return std::string();
+        for (const Json& t : transitions.arrayItems()) {
+            if (!t.isObject()) continue;
+            const std::string from = t["from"].asString("*");
+            if (from != "*" && from != clip) continue;
+            const std::string to = t["to"].asString("");
+            if (to.empty()) continue;
+            if (!ConditionsHold(t["when"])) continue;
+            if (t["waitForExit"].asBool(false) && !Finished()) continue;
+            clip = to;
+            Restart();
+            ConsumeTriggers(t["when"]);
+            return to;
+        }
+        return std::string();
     }
 
     const char* TypeName() const override { return "SpriteAnimator"; }
