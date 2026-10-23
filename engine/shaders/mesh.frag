@@ -217,33 +217,41 @@ void main() {
     bool wantsSpecular = metallic > 0.0 || draw.tilingSpec.z > 0.0;
     vec3 diffuseAlbedo = albedo * (1.0 - metallic);
 
-    vec3 Lo = diffuseAlbedo * frame.ambient.rgb;
-    for (int i = 0; i < lightCount; ++i) {
-        vec3 L;
-        float atten;
-        if (!lightFalloff(i, P, L, atten)) continue;
-        float NdotL = dot(N, L);
-        if (NdotL <= 0.0) continue;
-        float shadowTerm = lights[i].posType.w < 0.5 ? shadowFactor : 1.0;
-        float s = lights[i].dirInten.w * atten * shadowTerm * NdotL;
-        vec3 H = L + V;
-        float hl = length(H);
-        if (hl > 1e-5) H /= hl;
-        float LdotH = clamp(dot(L, H), 0.0, 1.0);
-        vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - LdotH, 5.0);
-        Lo += lights[i].colorRange.rgb * s * diffuseAlbedo * (1.0 - F);
-        if (wantsSpecular) {
-            float NdotH = clamp(dot(N, H), 0.0, 1.0);
-            float dd = NdotH * NdotH * (alpha2 - 1.0) + 1.0;
-            float D = alpha2 / (kPi * dd * dd);
-            float gv = NdotL * sqrt(NdotV * NdotV * (1.0 - alpha2) + alpha2);
-            float gl = NdotV * sqrt(NdotL * NdotL * (1.0 - alpha2) + alpha2);
-            float Vis = 0.5 / max(gv + gl, 1e-7);
-            float spec = D * Vis * kPi;
-            Lo += lights[i].colorRange.rgb * s * F * spec;
+    vec3 Lo;
+    if (draw.flags.x > 0.5) {
+        // Unlit materials hand their albedo straight to the shared tonemap:
+        // no ambient, no lights, no emissive. This mirrors the software path's
+        // unlit branch in Renderer::ShadeAndStore.
+        Lo = albedo;
+    } else {
+        Lo = diffuseAlbedo * frame.ambient.rgb;
+        for (int i = 0; i < lightCount; ++i) {
+            vec3 L;
+            float atten;
+            if (!lightFalloff(i, P, L, atten)) continue;
+            float NdotL = dot(N, L);
+            if (NdotL <= 0.0) continue;
+            float shadowTerm = lights[i].posType.w < 0.5 ? shadowFactor : 1.0;
+            float s = lights[i].dirInten.w * atten * shadowTerm * NdotL;
+            vec3 H = L + V;
+            float hl = length(H);
+            if (hl > 1e-5) H /= hl;
+            float LdotH = clamp(dot(L, H), 0.0, 1.0);
+            vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - LdotH, 5.0);
+            Lo += lights[i].colorRange.rgb * s * diffuseAlbedo * (1.0 - F);
+            if (wantsSpecular) {
+                float NdotH = clamp(dot(N, H), 0.0, 1.0);
+                float dd = NdotH * NdotH * (alpha2 - 1.0) + 1.0;
+                float D = alpha2 / (kPi * dd * dd);
+                float gv = NdotL * sqrt(NdotV * NdotV * (1.0 - alpha2) + alpha2);
+                float gl = NdotV * sqrt(NdotL * NdotL * (1.0 - alpha2) + alpha2);
+                float Vis = 0.5 / max(gv + gl, 1e-7);
+                float spec = D * Vis * kPi;
+                Lo += lights[i].colorRange.rgb * s * F * spec;
+            }
         }
+        Lo += draw.emissive.rgb;
     }
-    Lo += draw.emissive.rgb;
 
     if (frame.misc.x > 0.5) {
         float f = 1.0 - exp(-frame.fogColorDensity.a * viewDist);

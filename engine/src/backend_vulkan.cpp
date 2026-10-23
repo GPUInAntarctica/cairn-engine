@@ -950,8 +950,12 @@ bool VulkanBackend::Impl::CreatePipelines(uint32_t sampleCount, Pipelines* out) 
         p->viewport.scissorCount = 1;
         p->raster.polygonMode = VK_POLYGON_MODE_FILL;
         p->raster.cullMode = dynamicCull ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE;
-        // The shaders flip y for Vulkan, which reverses the winding.
-        p->raster.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        // Every vertex stage negates clip-space y so +y stays up in a y-down
+        // framebuffer. That reversal flips the winding Vulkan sees, so an
+        // engine-side counter-clockwise front face is counter-clockwise here
+        // too; declaring CLOCKWISE culls the near faces and renders meshes
+        // inside-out (a cube shows its interior).
+        p->raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         p->raster.lineWidth = 1.0f;
         p->multisample.rasterizationSamples = static_cast<VkSampleCountFlagBits>(sampleCount);
         p->blendAttachment = blend;

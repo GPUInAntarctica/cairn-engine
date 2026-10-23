@@ -254,6 +254,57 @@ static void TestRenderBackendsAgree() {
         CHECK(gpuLit * 2 > cpuLit && cpuLit * 2 > gpuLit);
 }
 
+// Which side of a triangle counts as front is a pipeline setting, and getting
+// it backwards renders every mesh inside-out: a cube shows its interior and a
+// single-sided quad vanishes. Pin both directions, and pin that an unlit
+// material reaches the frame without lighting, on either backend. The quad is
+// green so its pixels cannot be confused with the grid or the sky.
+static void TestRenderFrontFace() {
+    auto greenPixels = [](int backend, MeshRenderer::CullMode cull, bool unlit,
+                          Color albedo, Color emissive) {
+        Engine engine;
+        engine.SetViewportSize(160, 120);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.ambient = Color(0.1f, 0.1f, 0.1f, 1.0f);
+        GameObject* quad = scene.CreateEntity("Quad");
+        quad->transform().position = Vec3(0, 0, 1);
+        quad->transform().rotation = Quat::FromEulerDegrees(Vec3(0, 180, 0));  // Mesh::Quad() faces -Z
+        auto* mr = quad->AddComponent<MeshRenderer>();
+        CHECK(mr != nullptr);
+        mr->mesh = MeshRenderer::MeshSource::Quad;
+        mr->cullMode = cull;
+        mr->unlit = unlit;
+        mr->albedoColor = albedo;
+        mr->emissiveColor = emissive;
+        engine.viewCamera().position = Vec3(0, 0, 5);
+        engine.viewCamera().yaw = 0.0f;
+        engine.viewCamera().pitch = 0.0f;
+        engine.RenderEditorFrame();
+        const FrameTarget& t = engine.frame();
+        size_t green = 0;
+        for (size_t i = 0; i < t.color.size(); i += 4)
+            if (t.color[i + 1] > 180 && t.color[i] < 100 && t.color[i + 2] < 100) green++;
+        return green;
+    };
+    const Color green(0, 1, 0, 1), black(0, 0, 0, 1);
+
+    for (int backend : {1, 2}) {  // forced Vulkan, then software
+        // The quad faces the camera, so culling back faces keeps it and culling
+        // front faces drops it. Emissive keeps this independent of the unlit flag.
+        const size_t drawn = greenPixels(backend, MeshRenderer::CullMode::Back, false, black, green);
+        const size_t culled = greenPixels(backend, MeshRenderer::CullMode::Front, false, black, green);
+        CHECK(drawn > 200);
+        CHECK(culled < 20);
+        // Unlit hands the albedo straight to the tonemap: bright green here,
+        // dim green (ambient 0.1) for the same quad that is lit.
+        const size_t unlitPixels = greenPixels(backend, MeshRenderer::CullMode::Off, true, green, black);
+        const size_t litPixels = greenPixels(backend, MeshRenderer::CullMode::Off, false, green, black);
+        CHECK(unlitPixels > 200);
+        CHECK(litPixels < 20);
+    }
+}
+
 static void TestPhysics() {
     Engine engine;
     Scene& scene = engine.scene();
@@ -4239,6 +4290,7 @@ int main() {
     TestRender();
     TestRenderBackendSelection();
     TestRenderBackendsAgree();
+    TestRenderFrontFace();
     TestBindlessTextureSlots();
     TestShadows();
     TestPostProcessing();
