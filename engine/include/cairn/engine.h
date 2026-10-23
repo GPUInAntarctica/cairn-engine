@@ -209,8 +209,10 @@ public:
 
     Renderer& renderer() { return renderer_; }
 
-    // Camera used for rendering right now (game camera during play).
-    bool BuildCameraView(CameraView* out) const;
+    // Camera used for rendering right now. `useSceneCamera` picks the scene's
+    // MainCamera; callers pass `playing_` for the editor view (which follows
+    // the game camera while playing) and true for a game frame.
+    bool BuildCameraView(CameraView* out, bool useSceneCamera) const;
 
 private:
     void BuildOverlayLines(std::vector<DebugLine>* out);

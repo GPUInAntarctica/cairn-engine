@@ -96,6 +96,9 @@ struct RenderStats {
     int shadowedPixels = 0; // pixels darkened by the shadow map (software only)
     int postPasses = 0;     // post-processing effects applied this frame (0-4)
     const char* backend = "software";  // backend that actually ran this frame
+    // Which camera produced the frame: "scene" (the scene's MainCamera),
+    // "editor-fallback" (a game frame in a scene with no camera) or "editor".
+    const char* camera = "editor";
 };
 
 // The six planes of a view frustum, extracted from a view-projection matrix.

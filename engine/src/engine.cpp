@@ -696,8 +696,8 @@ static RenderBackend EnvRenderBackend(RenderBackend fromScene) {
     return (RenderBackend)override;
 }
 
-bool Engine::BuildCameraView(CameraView* out) const {
-    CameraComponent* cam = playing_ ? scene_->MainCamera() : nullptr;
+bool Engine::BuildCameraView(CameraView* out, bool useSceneCamera) const {
+    CameraComponent* cam = useSceneCamera ? scene_->MainCamera() : nullptr;
     float aspect = (float)renderer_.target().width / std::max(1, renderer_.target().height);
     if (cam && cam->m_go && cam->m_go->ActiveInHierarchy()) {
         Transform& t = cam->m_go->transform();
@@ -768,7 +768,7 @@ void Engine::BuildOverlayLines(std::vector<DebugLine>* out) {
 
 RenderStats Engine::RenderEditorFrame() {
     CameraView cam;
-    BuildCameraView(&cam);
+    BuildCameraView(&cam, playing_);
     std::vector<DebugLine> lines;
     BuildOverlayLines(&lines);
 
@@ -829,12 +829,17 @@ RenderStats Engine::RenderEditorFrame() {
 }
 
 RenderStats Engine::RenderGameFrame() {
+    // A game frame is the scene through its own MainCamera whether or not the
+    // simulation is running: `render.screenshot --mode game` and the editor's
+    // play view both want that, and the editor grid has no place in it. A
+    // scene without a camera falls back to the editor pose, and the stats say
+    // so rather than passing one for the other.
     CameraView cam;
-    bool usingGameCam = BuildCameraView(&cam);
-    if (!usingGameCam) return RenderEditorFrame();
+    const bool usingGameCam = BuildCameraView(&cam, true);
     std::vector<DebugLine> lines;
     BuildOverlayLines(&lines);
     lastStats_ = renderer_.RenderScene(*scene_, cam, lines);
+    lastStats_.camera = usingGameCam ? "scene" : "editor-fallback";
     return lastStats_;
 }
 
@@ -1004,7 +1009,7 @@ bool Engine::SaveFramePNG(const std::string& path) const {    const FrameTarget&
 }
 
 EntityId Engine::Pick(int pixelX, int pixelY) {    CameraView cam;
-    BuildCameraView(&cam);
+    BuildCameraView(&cam, playing_);
     Vec3 dir = ScreenRayDir(pixelX, pixelY);
     Vec3 origin = ScreenRayOrigin(pixelX, pixelY);
     float best = 1e30f;
@@ -1042,7 +1047,7 @@ EntityId Engine::Pick(int pixelX, int pixelY) {    CameraView cam;
 
 Vec2 Engine::WorldToScreen(const Vec3& world, bool* ok) {
     CameraView cam;
-    BuildCameraView(&cam);
+    BuildCameraView(&cam, playing_);
     Mat4 vp = cam.projection * cam.view;
     Vec4 c = vp * Vec4(world, 1.0f);
     if (ok) *ok = c.w > 1e-6f;
@@ -1054,7 +1059,7 @@ Vec2 Engine::WorldToScreen(const Vec3& world, bool* ok) {
 
 Vec3 Engine::ScreenRayDir(int pixelX, int pixelY) {
     CameraView cam;
-    BuildCameraView(&cam);
+    BuildCameraView(&cam, playing_);
     float ndcX = 2.0f * ((pixelX + 0.5f) / renderer_.target().width) - 1.0f;
     float ndcY = 1.0f - 2.0f * ((pixelY + 0.5f) / renderer_.target().height);
     float aspect = (float)renderer_.target().width / std::max(1, renderer_.target().height);
@@ -1070,7 +1075,7 @@ Vec3 Engine::ScreenRayDir(int pixelX, int pixelY) {
 
 Vec3 Engine::ScreenRayOrigin(int pixelX, int pixelY) {
     CameraView cam;
-    BuildCameraView(&cam);
+    BuildCameraView(&cam, playing_);
     if (!cam.orthographic) return cam.position;
     float ndcX = 2.0f * ((pixelX + 0.5f) / renderer_.target().width) - 1.0f;
     float ndcY = 1.0f - 2.0f * ((pixelY + 0.5f) / renderer_.target().height);

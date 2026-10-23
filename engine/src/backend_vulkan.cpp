@@ -163,7 +163,10 @@ struct VulkanBackend::Impl {
     BindlessTable bindless[2];
 
     Buffer frameUbo, lightsUbo, shadowUbo, drawUbo, sceneVerts, sceneIndices;
-    Buffer lineVerts, readback;
+    // Sprites/text and debug lines are separate vertex streams: they have
+    // different strides (48 vs 28 bytes), so sharing one buffer let a frame
+    // with editor lines overwrite the quad vertices at the same offset.
+    Buffer verts2D, debugVerts, readback;
     Image colorMS, colorResolve, depthMS, depthResolve;
     Image postA, postB, bloomA, bloomB;
     Image shadowMap;
@@ -450,7 +453,8 @@ struct VulkanBackend::Impl {
         DestroyBuffer(&drawUbo);
         DestroyBuffer(&sceneVerts);
         DestroyBuffer(&sceneIndices);
-        DestroyBuffer(&lineVerts);
+        DestroyBuffer(&verts2D);
+        DestroyBuffer(&debugVerts);
         DestroyBuffer(&readback);
         if (descPool) fn.DestroyDescriptorPool(device, descPool, nullptr);
         if (frameLayout) fn.DestroyDescriptorSetLayout(device, frameLayout, nullptr);
@@ -654,7 +658,8 @@ bool VulkanBackend::Initialize(std::string* error) {
         {&I.lightsUbo, sizeof(LightsUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT},
         {&I.shadowUbo, sizeof(ShadowUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT},
         {&I.drawUbo, 65536ull * 8, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT},
-        {&I.lineVerts, 256 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT},
+        {&I.verts2D, 256 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT},
+        {&I.debugVerts, 256 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT},
         {&I.readback, 64, VK_BUFFER_USAGE_TRANSFER_DST_BIT},
     };
     for (const BufSpec& s : specs) {
@@ -1524,14 +1529,18 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
                     sizeof(DrawUbo));
 
     // ---- 2D + line vertex staging -----------------------------------------
+    // Two streams, because a frame carries both: the editor grid arrives as
+    // debug lines beside the same frame's sprites and text. They used to share
+    // one buffer at offset zero, so every editor frame overwrote the sprite
+    // vertices with line vertices and the 2D pass drew line data as quads.
     size_t vert2DBytes = 0;
     for (const auto& item : list.items2D) vert2DBytes += item.vertCount * sizeof(Vertex2D);
     if (!list.verts2D.empty() &&
         !I.EnsureBuffer(std::max<size_t>(vert2DBytes, 4096), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                        &I.lineVerts))
+                        &I.verts2D))
         return;
     if (!list.verts2D.empty())
-        std::memcpy(I.lineVerts.mapped, list.verts2D.data(), vert2DBytes);
+        std::memcpy(I.verts2D.mapped, list.verts2D.data(), vert2DBytes);
 
     std::vector<LineVert> lineData;
     lineData.reserve(list.lines.size() * 2);
@@ -1539,10 +1548,12 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         lineData.push_back({{l.a.x, l.a.y, l.a.z}, {l.color.r, l.color.g, l.color.b, 1.0f}});
         lineData.push_back({{l.b.x, l.b.y, l.b.z}, {l.color.r, l.color.g, l.color.b, 1.0f}});
     }
-    if (!lineData.empty() &&
-        !I.EnsureBuffer(std::max<size_t>(lineData.size() * sizeof(LineVert), 4096),
-                        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &I.lineVerts))
-        return;
+    if (!lineData.empty()) {
+        if (!I.EnsureBuffer(std::max<size_t>(lineData.size() * sizeof(LineVert), 4096),
+                            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &I.debugVerts))
+            return;
+        std::memcpy(I.debugVerts.mapped, lineData.data(), lineData.size() * sizeof(LineVert));
+    }
 
     // ---- record ------------------------------------------------------------
     fn.ResetCommandPool(device, pool, 0);
@@ -1988,7 +1999,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         fn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines->second.sprite);
         {
             const VkDeviceSize vBase = 0;
-            fn.CmdBindVertexBuffers(cmd, 0, 1, &I.lineVerts.handle, &vBase);
+            fn.CmdBindVertexBuffers(cmd, 0, 1, &I.verts2D.handle, &vBase);
             size_t itemIndex = 0;
             for (size_t i = 0; i < list.items2D.size() && i < item2DCount; ++i) {
                 const auto& item = list.items2D[i];
@@ -2000,9 +2011,8 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             }
         }
 
-        // Debug / editor lines.
+        // Debug / editor lines, from their own vertex stream.
         if (!lineData.empty()) {
-            std::memcpy(I.lineVerts.mapped, lineData.data(), lineData.size() * sizeof(LineVert));
             fn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines->second.line);
             {
                 const VkDescriptorSet sets[2] = {I.frameSet, I.bindlessSet};
@@ -2010,7 +2020,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
                                          2, sets, 1, &zero);
             }
             const VkDeviceSize vBase = 0;
-            fn.CmdBindVertexBuffers(cmd, 0, 1, &I.lineVerts.handle, &vBase);
+            fn.CmdBindVertexBuffers(cmd, 0, 1, &I.debugVerts.handle, &vBase);
             fn.CmdDraw(cmd, (uint32_t)lineData.size(), 1, 0, 0);
         }
         fn.CmdEndRendering(cmd);

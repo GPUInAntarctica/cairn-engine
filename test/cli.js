@@ -1572,6 +1572,72 @@ check(fs.existsSync(grassPng) && fs.readFileSync(grassPng).slice(0, 8)
     'image.save writes the tile', grassPng);
 
 // ---------------------------------------------------------------------------
+console.log('cli: game frames use the scene camera');
+// ---------------------------------------------------------------------------
+// `render.screenshot --mode game` outside play used to render through the
+// *editor* camera and keep the editor grid: the scene's MainCamera only took
+// effect while the simulation ran, so a game frame was the viewport with a
+// camera that never moved. A red sprite on black pins it end to end: the game
+// frame follows the MainCamera, the editor frame ignores it, and the stats name
+// the camera that produced the frame.
+const camShot = tag => path.join(scratch, `cam-${tag}.png`);
+const camRun = runProjectBatch(writeBatch('cam.jsonl', [
+    { command: 'image.new', args: { width: 8, height: 8, background: '#ff0000' } },
+    { command: 'image.save', args: { out: 'Assets/Textures/red8.png' } },
+    { command: 'scene.new', args: { name: 'CamFrame' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    { command: 'entity.create', args: { name: 'Main', position: [0, 0, 10] }, id: 'cam' },
+    { command: 'component.add', args: { id: '$ref:cam', type: 'Camera',
+        props: { orthographic: true, orthoSize: 0.5, clearColor: [0, 0, 0, 1], skyEnabled: false } } },
+    { command: 'entity.create', args: { name: 'Sprite' }, id: 'sp' },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteRenderer',
+        props: { texturePath: 'Assets/Textures/red8.png', pixelsPerUnit: 6, pixelPerfect: true } } },
+    { command: 'render.screenshot',
+        args: { out: camShot('game-there'), mode: 'game', width: 64, height: 64 }, id: 'gameThere' },
+    { command: 'render.screenshot',
+        args: { out: camShot('editor-there'), mode: 'editor', width: 64, height: 64 }, id: 'editorThere' },
+    // Turn the MainCamera away from the sprite. Only a frame that used it may
+    // notice; the editor view still looks at the origin from its own pose.
+    { command: 'entity.transform', args: { id: '$ref:cam', position: [0, 0, -10] } },
+    { command: 'render.screenshot',
+        args: { out: camShot('game-away'), mode: 'game', width: 64, height: 64 }, id: 'gameAway' },
+    { command: 'render.screenshot',
+        args: { out: camShot('editor-away'), mode: 'editor', width: 64, height: 64 }, id: 'editorAway' },
+    // A scene with no camera still renders a game frame, and says it fell back.
+    { command: 'entity.destroy', args: { id: '$ref:cam' } },
+    { command: 'render.screenshot',
+        args: { out: camShot('game-nocam'), mode: 'game', width: 64, height: 64 }, id: 'gameNoCam' },
+]));
+check(camRun.lines.every(l => l.ok !== false), 'the game camera batch runs clean',
+    camRun.stdout + camRun.stderr);
+const camStep = name => camRun.step(name);
+check(camStep('gameThere') && camStep('gameThere').result.stats.camera === 'scene',
+    'a game frame reports the scene camera', camStep('gameThere') && camStep('gameThere').result.stats);
+check(camStep('editorThere') && camStep('editorThere').result.stats.camera === 'editor',
+    'an editor frame reports the editor camera', camStep('editorThere') && camStep('editorThere').result.stats);
+check(camStep('gameNoCam') && camStep('gameNoCam').result.stats.camera === 'editor-fallback',
+    'a game frame without a MainCamera reports its fallback',
+    camStep('gameNoCam') && camStep('gameNoCam').result.stats);
+
+const camPixel = (file, x, y) => expectOk(['--image', file, 'image.pixel',
+    '--x', String(x), '--y', String(y)]);
+const isRed = p => p.r > 60 && p.g < 40 && p.b < 40;
+const camThere = camPixel(camShot('game-there'), 32, 32);
+const camPalette = expectOk(['--image', camShot('game-there'), 'image.palette', '--list']);
+check(isRed(camThere) && camPalette && camPalette.colors === 1,
+    'the game frame looks through the MainCamera (the sprite fills it)',
+    { pixel: camThere, palette: camPalette && camPalette.palette });
+check(!isRed(camPixel(camShot('game-away'), 32, 32)),
+    'turning the MainCamera away changes the game frame',
+    camPixel(camShot('game-away'), 32, 32));
+const camEditorThere = fs.readFileSync(camShot('editor-there'));
+const camEditorAway = fs.readFileSync(camShot('editor-away'));
+check(camEditorThere.equals(camEditorAway),
+    'moving the MainCamera leaves the editor frame untouched');
+check(!camEditorThere.equals(fs.readFileSync(camShot('game-there'))),
+    'the game frame is not the editor frame');
+
+// ---------------------------------------------------------------------------
 console.log('cli: sprite 2D rendering quality');
 // ---------------------------------------------------------------------------
 // The loop the project is built around: the agent draws an asset and then sees

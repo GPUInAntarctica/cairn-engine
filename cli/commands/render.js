@@ -30,7 +30,7 @@ def('render.setViewport', {
 def('render.editorFrame', {
     summary: 'Render one frame through the editor camera and return draw statistics.',
     args: {},
-    returns: '{drawCalls, triangles, meshesSeen, clipRejected, frustumCulled, drawCalls2D, lightCount, shadowedPixels}',
+    returns: '{drawCalls, triangles, meshesSeen, clipRejected, frustumCulled, drawCalls2D, lightCount, shadowedPixels, camera}',
     needsEngine: true,
     examples: ['cairn render.editorFrame'],
     run(ctx) {
@@ -39,9 +39,9 @@ def('render.editorFrame', {
 });
 
 def('render.gameFrame', {
-    summary: 'Render one frame through the scene MainCamera (falls back to the editor view when playing without one).',
+    summary: 'Render one frame through the scene MainCamera, playing or not; falls back to the editor pose when the scene has none.',
     args: {},
-    returns: '{drawCalls, triangles, meshesSeen, clipRejected, frustumCulled, drawCalls2D, lightCount, shadowedPixels}',
+    returns: '{drawCalls, triangles, meshesSeen, clipRejected, frustumCulled, drawCalls2D, lightCount, shadowedPixels, camera}',
     needsEngine: true,
     examples: ['cairn render.gameFrame'],
     run(ctx) {
@@ -53,7 +53,7 @@ def('render.screenshot', {
     summary: 'Render a frame and write it to a PNG file.',
     args: {
         out: { type: 'path', required: true, desc: 'Output PNG path.' },
-        mode: { type: 'enum', enum: ['editor', 'game'], default: 'editor', desc: 'Which camera to render from.' },
+        mode: { type: 'enum', enum: ['editor', 'game'], default: 'editor', desc: 'Which camera to render from: editor is the viewport camera, game is the scene MainCamera (does not need play mode).' },
         width: { type: 'int', desc: 'Viewport width override.' },
         height: { type: 'int', desc: 'Viewport height override.' },
     },

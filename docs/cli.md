@@ -497,7 +497,7 @@ read what a sprite is actually made of.
 | Command | Arguments | Description |
 | --- | --- | --- |
 | `render.editorFrame` | — | Render one frame through the editor camera and return draw statistics. |
-| `render.gameFrame` | — | Render one frame through the scene MainCamera (falls back to the editor view when playing without one). |
+| `render.gameFrame` | — | Render one frame through the scene MainCamera, playing or not; falls back to the editor pose when the scene has none. |
 | `render.pick` | `--x` (int, required)<br>`--y` (int, required) | Pick the entity under a viewport pixel (origin bottom-left). |
 | `render.preview` | `--out` (path, required)<br>`--width` (int, default 960)<br>`--height` (int, default 540)<br>`--frames` (int, default 1) | Set the viewport, render N editor frames and save the last one (one-shot preview render). |
 | `render.screenshot` | `--out` (path, required)<br>`--mode` (enum, default "editor", one of editor \| game)<br>`--width` (int)<br>`--height` (int) | Render a frame and write it to a PNG file. |

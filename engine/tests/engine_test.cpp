@@ -254,6 +254,97 @@ static void TestRenderBackendsAgree() {
         CHECK(gpuLit * 2 > cpuLit && cpuLit * 2 > gpuLit);
 }
 
+// A game frame shows the scene's own MainCamera whether or not the simulation
+// is running: `render.screenshot --mode game` outside play used to fall back to
+// the editor camera and draw the editor grid, so a game screenshot was the
+// viewport with a camera that never moved. Pin the contract from both sides —
+// the game frame follows the scene camera, the editor frame ignores it, and a
+// game frame never carries the editor grid, not even in the no-camera fallback.
+static void TestRenderGameCamera() {
+    auto build = [](Engine& engine, int backend, bool withCamera, float camX) {
+        engine.SetViewportSize(160, 120);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        GameObject* quad = scene.CreateEntity("Quad");
+        quad->transform().rotation = Quat::FromEulerDegrees(Vec3(0, 180, 0));  // Mesh::Quad() faces -Z
+        auto* mr = quad->AddComponent<MeshRenderer>();
+        mr->mesh = MeshRenderer::MeshSource::Quad;
+        mr->unlit = true;
+        mr->albedoColor = Color(0, 1, 0, 1);
+        if (withCamera) {
+            GameObject* cam = scene.CreateEntity("Main");
+            cam->tag = "MainCamera";
+            cam->transform().position = Vec3(camX, 0, 5);
+            cam->AddComponent<CameraComponent>();
+            // The editor view keeps framing the quad from the origin, so any
+            // frame that shows it is not the scene camera's doing.
+            engine.viewCamera().position = Vec3(0, 0, 5);
+            engine.viewCamera().yaw = 0.0f;
+            engine.viewCamera().pitch = 0.0f;
+        }
+    };
+    auto greenPixels = [](Engine& engine) {
+        const FrameTarget& t = engine.frame();
+        size_t green = 0;
+        for (size_t i = 0; i < t.color.size(); i += 4)
+            if (t.color[i + 1] > 180 && t.color[i] < 100 && t.color[i + 2] < 100) ++green;
+        return green;
+    };
+    // The editor grid's two neutral line colours; the swatch tolerance absorbs
+    // rasteriser rounding but nothing in a sky or a quad comes close.
+    auto gridPixels = [](Engine& engine) {
+        const FrameTarget& t = engine.frame();
+        auto near = [](int r, int g, int b, int R, int G, int B) {
+            return std::abs(r - R) <= 4 && std::abs(g - G) <= 4 && std::abs(b - B) <= 4;
+        };
+        size_t n = 0;
+        for (size_t i = 0; i < t.color.size(); i += 4) {
+            const int r = t.color[i], g = t.color[i + 1], b = t.color[i + 2];
+            if (near(r, g, b, 0x33, 0x36, 0x3e) || near(r, g, b, 0x46, 0x4a, 0x55)) ++n;
+        }
+        return n;
+    };
+
+    for (int backend : {1, 2}) {  // forced Vulkan, then software
+        // Centred camera: the quad fills the middle of the game frame.
+        Engine centred;
+        build(centred, backend, true, 0.0f);
+        const RenderStats game = centred.RenderGameFrame();
+        CHECK(std::string(game.camera) == "scene");
+        CHECK(greenPixels(centred) > 200);
+
+        // Camera moved aside: the game frame must lose the quad while the
+        // editor frame, still looking at it, keeps it.
+        Engine moved;
+        build(moved, backend, true, 60.0f);
+        CHECK(std::string(moved.RenderGameFrame().camera) == "scene");
+        CHECK(greenPixels(moved) < 20);
+        const RenderStats editor = moved.RenderEditorFrame();
+        CHECK(std::string(editor.camera) == "editor");
+        CHECK(greenPixels(moved) > 200);
+    }
+
+    // No MainCamera at all: the game frame falls back to the editor pose, says
+    // so, and still leaves the grid out — a game frame is scene content only.
+    for (int backend : {1, 2}) {
+        Engine engine;
+        build(engine, backend, false, 0.0f);
+        engine.viewCamera().position = Vec3(6, 5, 8);
+        engine.viewCamera().yaw = 35.0f;
+        engine.viewCamera().pitch = -30.0f;
+        const RenderStats editor = engine.RenderEditorFrame();
+        CHECK(std::string(editor.camera) == "editor");
+        const size_t editorGrid = gridPixels(engine);
+        CHECK(editorGrid > 100);
+        const RenderStats game = engine.RenderGameFrame();
+        CHECK(std::string(game.camera) == "editor-fallback");
+        CHECK(gridPixels(engine) < 5);
+    }
+}
+
 // Which side of a triangle counts as front is a pipeline setting, and getting
 // it backwards renders every mesh inside-out: a cube shows its interior and a
 // single-sided quad vanishes. Pin both directions, and pin that an unlit
@@ -1396,6 +1487,93 @@ static void TestSpriteQuality() {
     gpu.Play();
     const RenderStats gpuStats = gpu.RenderGameFrame();
     CHECK(std::string(gpuStats.backend) == "vulkan");
+    checkSprite(gpu);
+}
+
+// Sprites in a frame that also carries lines. The editor grid arrives as debug
+// lines beside the same frame's 2D items, and both used to be staged into one
+// vertex buffer at offset zero: every editor frame overwrote the sprite
+// vertices with line vertices, so the 2D pass drew lines as quads — sprites
+// came out as thin slivers or vanished, while the game view (no grid) was
+// correct. Render an editor frame with a checker sprite and require the quad
+// where the sprite actually is.
+static void TestEditorFrameSprites() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-editor2d").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/checker.bmp";
+    WriteTestBmpChecker(dir + "/" + tex, 16, 16, 255, 0, 0, 0, 0, 255);
+
+    auto build = [&](Engine& engine, int backend) {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(128, 128);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        scene.background = Color(0.2f, 0.2f, 0.2f, 1.0f);
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 2.0f;
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        GameObject* sprite = scene.CreateEntity("Sprite");
+        auto* sr = sprite->AddComponent<SpriteRenderer>();
+        sr->texturePath = tex;
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = 3.0f;  // 16 texels -> 5.33 units: overfills the 4-unit view
+        // Frame the editor view exactly like the game camera would, so the grid
+        // (a line across the middle) is the only difference from a game frame.
+        engine.viewCamera().position = Vec3(0, 0, 8);
+        engine.viewCamera().yaw = 0.0f;
+        engine.viewCamera().pitch = 0.0f;
+        engine.viewCamera().orthographic = true;
+        engine.viewCamera().orthoSize = 2.0f;
+    };
+    auto rgb = [](Engine& engine, int x, int y) {
+        const FrameTarget& t = engine.frame();
+        const uint8_t* p = &t.color[((size_t)y * (size_t)t.width + (size_t)x) * 4];
+        return std::array<int, 3>{(int)p[0], (int)p[1], (int)p[2]};
+    };
+    auto checkSprite = [&](Engine& engine) {
+        // All four quadrants of the quad must show texel colour: line vertices
+        // in place of quad vertices leave the sprite lying elsewhere.
+        for (const auto& q : {std::pair<int, int>{32, 32}, {96, 32}, {32, 96}, {96, 96}}) {
+            const auto c = rgb(engine, q.first, q.second);
+            CHECK(c[0] + c[1] + c[2] > 60);
+        }
+        // ...and the interior must be the two source colours only: nearest
+        // sampling never blends a red texel into a blue one.
+        std::set<int> colours;
+        int lit = 0;
+        for (int y = 16; y < 112; ++y) {
+            if (y >= 60 && y <= 68) continue;  // the grid line crosses the middle
+            for (int x = 16; x < 112; ++x) {
+                const auto c = rgb(engine, x, y);
+                colours.insert((c[0] << 16) | (c[1] << 8) | c[2]);
+                if (c[0] + c[1] + c[2] > 60) ++lit;
+            }
+        }
+        CHECK(lit > 4000);
+        CHECK(colours.size() <= 3);
+    };
+
+    Engine cpu;
+    build(cpu, 2);
+    const RenderStats cpuStats = cpu.RenderEditorFrame();
+    CHECK(std::string(cpuStats.backend) == "software");
+    CHECK(cpuStats.drawCalls2D == 1);
+    checkSprite(cpu);
+
+    if (!VulkanBackendAvailable()) return;
+    Engine gpu;
+    build(gpu, 1);
+    const RenderStats gpuStats = gpu.RenderEditorFrame();
+    CHECK(std::string(gpuStats.backend) == "vulkan");
+    CHECK(gpuStats.drawCalls2D == 1);
     checkSprite(gpu);
 }
 
@@ -4291,6 +4469,7 @@ int main() {
     TestRenderBackendSelection();
     TestRenderBackendsAgree();
     TestRenderFrontFace();
+    TestRenderGameCamera();
     TestBindlessTextureSlots();
     TestShadows();
     TestPostProcessing();
@@ -4301,6 +4480,7 @@ int main() {
     TestCullingAndAA();
     TestSortingOrder();
     TestSpriteQuality();
+    TestEditorFrameSprites();
     TestSpriteOrientation();
     TestSpriteNormalOrientation();
     TestSpriteAtlas();
