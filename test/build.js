@@ -15,7 +15,8 @@ const os = require('os');
 const path = require('path');
 
 const root = path.resolve(__dirname, '..');
-const { engineOutputDirs, locateEngineLibrary, stageLibrary } = require(path.join(root, 'scripts', 'build.js'));
+const { engineOutputDirs, locateEngineLibrary, stageLibrary, nodeInstallRoots, findNodeDevInstall }
+    = require(path.join(root, 'scripts', 'build.js'));
 
 let failures = 0;
 let checks = 0;
@@ -106,6 +107,67 @@ if (foundVs) {
 } else {
     check(false, 'staging a Windows layout copies the DLL and its import library',
         'no library located to stage');
+}
+
+// ---------------------------------------------------------------------------
+console.log('build: node development install discovery');
+// ---------------------------------------------------------------------------
+// A Node installation puts node_api.h and node.lib in one of three shapes, and
+// which shape a machine has decides whether the addon compiles. The old script
+// checked exactly two paths next to the interpreter, which is why a Windows CI
+// run reported "node headers not found" on a Node that had them elsewhere.
+// The discovery is a pure function over a fake tree, so every shape is pinned.
+const winNode = mk('win', 'nodejs');
+touch(path.join(winNode, 'node.exe'));
+touch(path.join(winNode, 'node.lib'));
+touch(path.join(mk('win', 'nodejs', 'include', 'node'), 'node_api.h'));
+const toolcache = mk('tc');
+touch(path.join(mk('tc', '22.11.0', 'x64'), 'node.exe'));
+touch(path.join(mk('tc', '22.11.0', 'include', 'node'), 'node_api.h'));
+const nvmNode = mk('nvm');
+touch(path.join(mk('nvm', 'v22.11.0', 'bin'), 'node'));
+touch(path.join(mk('nvm', 'v22.11.0', 'include', 'node'), 'node_api.h'));
+// A root with no node executable in it at all: only an explicit environment
+// variable knows this is a Node installation.
+const flatNode = mk('flat');
+touch(path.join(mk('flat', 'include', 'node'), 'node_api.h'));
+
+const find = (execPaths, env = {}) =>
+    findNodeDevInstall({
+        execPaths, env, existsSync: fs.existsSync,
+        listDirs: (d) => {
+            try { return fs.readdirSync(d, { withFileTypes: true }).filter(x => x.isDirectory()).map(x => x.name); }
+            catch { return []; }
+        },
+    });
+
+{
+    const r = find([path.join(toolcache, '22.11.0', 'x64', 'node.exe')]);
+    check(r.headers === path.join(toolcache, '22.11.0', 'include', 'node'),
+        'finds headers in the versioned layout (tool cache, nvm)', r.headers);
+    check(r.searched.length >= 2, 'the ancestor walk covers more than the executable directory',
+        `${r.searched.length} roots`);
+}
+{
+    const r = find([path.join(winNode, 'node.exe')]);
+    check(r.lib === path.join(winNode, 'node.lib'), 'finds the import library', r.lib);
+}
+{
+    const r = find([path.join(nvmNode, 'v22.11.0', 'bin', 'node')]);
+    check(r.headers === path.join(nvmNode, 'v22.11.0', 'include', 'node'),
+        'finds headers in the bin/ layout (Linux distro, nvm)', r.headers);
+}
+{
+    const r = find([], { NODE_ROOT_DIR: flatNode });
+    check(r.headers === path.join(flatNode, 'include', 'node'),
+        'NODE_ROOT_DIR names an explicit installation root', r.headers);
+}
+{
+    const r = find([path.join(mk('other', 'bin'), 'node')], { HOME: scratch });
+    check(r.headers === null && r.lib === null,
+        'a tree without node_api.h reports nothing rather than a wrong path',
+        `headers=${r.headers} lib=${r.lib}`);
+    check(r.searched.length > 0, 'the absence report lists the roots that were searched');
 }
 
 fs.rmSync(scratch, { recursive: true, force: true });

@@ -70,6 +70,8 @@ npm run build
 
 构建流程：CMake 用 MSVC 生成 `cairn_engine.dll` + `cairn_engine.lib`（`WINDOWS_EXPORT_ALL_SYMBOLS` 导出全部符号）；插件用 `cl /LD` 编译、链接 `cairn_engine.lib` 与 Node 自带的 `node.lib`；玩法脚本（`editor/main/build.js`）同样走 `cl /LD`。需要 Node 安装包含头文件（`<node>\include\node`）与 `node.lib`；若缺失，脚本会明确提示。
 
+脚本对 Node 安装的定位不止一种形状：`<root>/bin/node`、`<root>/node.exe`、`<root>/<arch>/node.exe` 都在搜索范围内（`scripts/build.js` 会从解释器路径向上逐级找，并读取 `NODE_ROOT_DIR` / `npm_config_nodedir`）。因此同一套脚本在发行版的 `nodejs` 包、nvm/nvm4w、fnm、以及 CI 的工具缓存里都能找到 `node_api.h` 与 `node.lib`；失败时会列出搜过的每一个根目录。GitHub Actions 的 Windows 任务因此多打印一行 Node 安装布局，供下次排查对照。
+
 若看到 `cl.exe not found. Open a "Developer Command Prompt for VS"...`，说明当前不是 VS 开发者环境；用上述命令提示符重开终端即可。避免在 Play 模式下重新编译脚本——Windows 会锁定已加载的 `GameScripts.dll`。
 
 ## 故障排查 / Troubleshooting

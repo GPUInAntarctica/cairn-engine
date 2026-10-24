@@ -2,6 +2,14 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.2] - 2026-10-24
+
+### Build: the addon finds Node's headers and node.lib in the installation that has them
+- **`npm run build` on Windows reported "node headers not found" on a Node that may well have had them.** `nodeIncludeDir()` checked exactly two paths beside the interpreter that ran the script, `<node>/include/node` and `<node>/../include/node`. A Node installation lays its headers out in more than one shape - `<root>/bin/node` (a distro package, nvm, fnm), `<root>/node.exe` (the Windows installer), `<root>/<arch>/node.exe` (a runner tool cache) - and the interpreter npm runs need not be the installation the build should use. The failing step was the addon's, and it stopped the Windows build after the engine DLL had already produced, which made the failure look like a missing SDK rather than a search that was too narrow.
+- **One discovery answers both halves.** `findNodeDevInstall({execPaths, env})` walks the ancestors of the interpreter *and* of every `node` on PATH (`nodeExePaths`), and honours `NODE_ROOT_DIR`, `npm_config_nodedir`, `NVM_HOME`/`NVM_SYMLINK`, the Windows `Program Files`/Chocolatey install paths and the node-gyp cache. `node_api.h` is the marker, because that is the header an N-API addon compiles against; `node.lib` and `lib/node.lib` are read from the same roots, so the Windows link path takes its import library from wherever the headers were. A failure now names what was searched instead of repeating the one path that was not searched, and a successful build logs `[cairn] node -> headers ... / lib ...`.
+- **Tests.** `test/build.js` grows to **19 checks** with a `build: node development install discovery` section over synthetic trees: the versioned layout (tool cache), the `bin/` layout (distro, nvm), the flat layout (Windows installer, via `NODE_ROOT_DIR`), the import library, the absence report, and the searched-roots list. Four mutations were applied, built, observed to fail and reverted - limiting the ancestor walk to the executable's own directory (3 checks), changing the marker file (3), ignoring the environment overrides (1), and accepting a root without `node_api.h` (3). Each run used the same fake trees, so no compiler is needed.
+- **CI.** The Windows job prints `process.execPath` and the contents of its directory before the build, so the next failure of this step names the layout instead of the search.
+
 ## [0.2.1] - 2026-10-24
 
 ### Rendering quality: shadows on the GPU, and the seams between triangles

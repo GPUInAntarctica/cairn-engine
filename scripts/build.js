@@ -92,14 +92,93 @@ function run(cmd, args, opts = {}) {
     return r;
 }
 
-function nodeIncludeDir() {
-    // Node headers shipped with the running interpreter.
-    const cand = path.join(path.dirname(process.execPath), 'include', 'node');
-    if (fs.existsSync(cand)) return cand;
-    // ...or from npm's node-headers layout inside a Node installation.
-    const alt = path.join(path.dirname(process.execPath), '..', 'include', 'node');
-    if (fs.existsSync(alt)) return alt;
-    fail('node headers not found (expected <node>/include/node). Install nodejs with headers.');
+// Node's headers and import library live inside an installation whose shape
+// varies:
+//
+//   <root>/bin/node      + <root>/include/node     (Linux distro, nvm, fnm)
+//   <root>/node.exe      + <root>/include/node     (Windows installer)
+//   <root>/x64/node.exe  + <root>/include/node     (GitHub Actions tool cache)
+//
+// so the search walks the ancestors of every interpreter it knows about rather
+// than assuming one shape, and it honours the environment variables the
+// installers and tools hand out: NODE_ROOT_DIR (nvm4w), npm_config_nodedir
+// (node-gyp), and the node-gyp cache where a previous build unpacked a tree.
+function pathAncestors(dir) {
+    const out = [];
+    let cur = dir;
+    while (cur && out.length < 8) {
+        out.push(cur);
+        const parent = path.dirname(cur);
+        if (!parent || parent === cur) break;
+        cur = parent;
+    }
+    return out;
+}
+
+function listDirsSafe(dir) {
+    try {
+        return fs.readdirSync(dir, { withFileTypes: true })
+            .filter(d => d.isDirectory()).map(d => d.name);
+    } catch { return []; }
+}
+
+function nodeInstallRoots(ctx) {
+    const { execPaths = [], env = {}, listDirs = listDirsSafe } = ctx;
+    const roots = [];
+    const add = (dir) => { if (dir && !roots.includes(dir)) roots.push(dir); };
+    for (const key of ['NODE_ROOT_DIR', 'npm_config_nodedir', 'NVM_HOME', 'NVM_SYMLINK'])
+        if (env[key]) add(env[key]);
+    for (const exe of execPaths) {
+        if (!exe) continue;
+        for (const ancestor of pathAncestors(path.dirname(exe))) add(ancestor);
+    }
+    // Paths no ancestor search reaches: system-wide installs on Windows.
+    for (const base of [env['PROGRAMFILES'], env['ProgramFiles'], env['PROGRAMFILES(X86)'],
+                        env['ProgramFiles(x86)'], env['PROGRAMDATA'], env.ChocolateyInstall])
+        if (base) add(path.join(base, 'nodejs'));
+    // node-gyp unpacks a headers tree per version it has built against.
+    for (const cache of [env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, 'node-gyp', 'Cache') : null,
+                          env.HOME ? path.join(env.HOME, '.cache', 'node-gyp') : null,
+                          env.USERPROFILE ? path.join(env.USERPROFILE, 'AppData', 'Local', 'node-gyp', 'Cache') : null]) {
+        if (!cache) continue;
+        for (const entry of listDirs(cache)) add(path.join(cache, entry));
+    }
+    return roots;
+}
+
+// Locates the N-API headers and, on Windows, the import library. node_api.h is
+// the marker: it is the header an N-API addon compiles against, and a Node
+// installation without it has no headers worth putting on an include path.
+function findNodeDevInstall(ctx = {}) {
+    const { execPaths = [], env = {}, existsSync = fs.existsSync, listDirs = listDirsSafe } = ctx;
+    const roots = nodeInstallRoots({ execPaths, env, listDirs });
+    let headers = null;
+    let lib = null;
+    for (const root of roots) {
+        if (!headers) {
+            const inc = path.join(root, 'include', 'node');
+            if (existsSync(path.join(inc, 'node_api.h'))) headers = inc;
+        }
+        if (!lib)
+            for (const cand of [path.join(root, 'node.lib'), path.join(root, 'lib', 'node.lib')])
+                if (existsSync(cand)) { lib = cand; break; }
+        if (headers && lib) break;
+    }
+    return { headers, lib, searched: roots };
+}
+
+// Every node.exe on PATH plus the interpreter running this script. A build may
+// use the headers of any of them, not only of the one npm happens to run.
+function nodeExePaths() {
+    const out = [process.execPath];
+    const probe = process.platform === 'win32' ? ['where', ['node']] : ['which', ['-a', 'node']];
+    const r = spawnSync(probe[0], probe[1], { encoding: 'utf8', shell: process.platform === 'win32' });
+    if (r.status === 0)
+        for (const line of (r.stdout || '').split('\n')) {
+            const p = line.trim();
+            if (p && !out.includes(p)) out.push(p);
+        }
+    return out;
 }
 
 function buildEngine() {
@@ -139,24 +218,17 @@ function findCl() {
     return null;
 }
 
-// Directory holding node.lib (the N-API import library) for the running Node.
-function nodeLibDirCandidates() {
-    const home = path.dirname(process.execPath);
-    const out = [home, path.join(home, 'lib')];
-    if (process.env.LOCALAPPDATA) out.push(path.join(process.env.LOCALAPPDATA, 'node-gyp', 'Cache'));
-    return out.filter(p => fs.existsSync(path.join(p, 'node.lib')));
-}
-
-function buildAddonWindows(out, inc) {
+function buildAddonWindows(out, inc, install) {
     const cl = findCl();
     if (!cl) {
         fail('Windows: cl.exe not found. Open a "Developer Command Prompt for VS"\n' +
              '       (or run vcvars64.bat) and re-run `npm run build`.');
     }
-    const libDirs = nodeLibDirCandidates();
+    const libDirs = install.lib ? [path.dirname(install.lib)] : [];
     if (libDirs.length === 0) {
-        fail('Windows: node.lib not found. Install Node.js with the native module\n' +
-             '       headers/npm tools, or set LOCALAPPDATA for the node-gyp cache.');
+        fail(`Windows: node.lib not found. Searched ${install.searched.length} Node installation roots, ` +
+             `nearest were: ${install.searched.slice(0, 6).join(', ')}. Install Node.js with its native ` +
+             'module headers, or set NODE_ROOT_DIR to an installation that has them.');
     }
     const objDir = path.join(buildOut, 'obj');
     fs.mkdirSync(objDir, { recursive: true });
@@ -178,15 +250,26 @@ function buildAddonWindows(out, inc) {
 
 function buildAddon(engineLib) {
     const out = path.join(buildOut, 'cairn_engine_addon.node');
+    // One search answers both the include path and, on Windows, the import
+    // library, so a machine whose Node keeps its headers somewhere other than
+    // the running interpreter still builds.
+    const install = findNodeDevInstall({ execPaths: nodeExePaths(), env: process.env });
+    if (!install.headers)
+        fail(`Node headers not found: expected <root>/include/node/node_api.h under one of the
+  ${install.searched.length} Node installation roots searched:
+  ${install.searched.slice(0, 12).join('\n  ')}${install.searched.length > 12 ? '\n  ...' : ''}
+  Install Node.js with its native module headers, or set NODE_ROOT_DIR to an
+  installation that has them.`);
+    log(`node   -> headers ${install.headers}${install.lib ? ` / lib ${install.lib}` : ''}`);
     const inc = [
         path.join(root, 'engine', 'include'),
         path.join(root, 'engine', 'src'),
         path.join(root, 'engine', 'thirdparty'),
         path.join(root, 'node_modules', 'node-addon-api'),
-        nodeIncludeDir(),
+        install.headers,
     ];
     if (process.platform === 'win32') {
-        buildAddonWindows(out, inc);
+        buildAddonWindows(out, inc, install);
         log(`addon  -> build/cairn_engine_addon.node`);
         return out;
     }
@@ -254,6 +337,7 @@ function main() {
 
 // Exported so test/build.js can exercise the staging logic, and so
 // run-engine-tests.js shares one definition of where CMake writes its output.
-module.exports = { engineOutputDirs, locateEngineLibrary, stageLibrary };
+module.exports = { engineOutputDirs, locateEngineLibrary, stageLibrary, nodeInstallRoots,
+                 findNodeDevInstall, nodeExePaths };
 
 if (require.main === module) main();
