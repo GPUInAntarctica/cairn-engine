@@ -146,9 +146,11 @@ float sampleShadow(vec3 P, float viewDepth, float ndotl) {
     float refDepth = ndc.z * 0.5 + 0.5;
     float size = shadow.shadowParams.z;
     float fx = (ndc.x * 0.5 + 0.5) * size;
-    // shadow.vert flips y before rasterising, so the lookup uses the raw
-    // NDC row. Flipping here as well would mirror every shadow.
-    float fy = (ndc.y * 0.5 + 0.5) * size;
+    // shadow.vert negates clip-space y so the depth pass rasterises into the
+    // same top-down rows the software pass writes: with Vulkan's y-down NDC the
+    // written row for this point is (1 - (ndc.y * 0.5 + 0.5)) * size. Reading
+    // the unflipped row looks at the mirror image of the map and finds nothing.
+    float fy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
     int ix = int(fx), iy = int(fy);
     float hits = 0.0, taps = 0.0;
     for (int dy = -1; dy <= 1; ++dy) {

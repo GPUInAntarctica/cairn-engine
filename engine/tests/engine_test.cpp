@@ -582,7 +582,9 @@ static void TestCullingAndAA() {
     mr->unlit = true;
     mr->cullMode = MeshRenderer::CullMode::Back;
     quad->transform().position = Vec3(0, 0, 0);
-    quad->transform().scale = Vec3(6, 6, 6);
+    // Small enough that the silhouette stays inside a 40x40 frame: the AA check
+    // below counts partially covered pixels along it.
+    quad->transform().scale = Vec3(2.5f, 2.5f, 2.5f);
 
     // The scene camera is only used while playing; otherwise the editor viewport
     // camera renders the frame.
@@ -925,6 +927,152 @@ static void TestMeshWinding() {
             std::printf("  winding: %s has %d inward-wound triangle(s)\n", p.name, mismatched);
         }
     }
+}
+
+// A directional shadow has to land on the same pixels on both rasterisers.
+// The depth pass flips clip-space y before rasterising the cascade, but the
+// fragment lookup read the mirrored row of the map: the GPU found nothing
+// where the software reference drew a shadow, and rendered no shadow at all.
+// Nothing compared the two pictures, because TestShadows only runs the
+// software path, so the fault outlived the suite.
+static void TestShadowsAcrossBackends() {
+    const int w = 200, h = 150;
+    auto render = [&](int backend, int cascades) {
+        Engine engine;
+        engine.SetViewportSize(w, h);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.shadows = cascades;
+        scene.shadowResolution = 512;
+        scene.shadowDistance = 60.0f;
+        scene.ambient = Color(0.28f, 0.28f, 0.30f, 1.0f);
+        scene.background = Color(0, 0, 0, 1);
+
+        GameObject* ground = scene.CreateEntity("Ground");
+        ground->transform().scale = Vec3(30, 1, 30);
+        auto* groundMr = ground->AddComponent<MeshRenderer>();
+        groundMr->mesh = MeshRenderer::MeshSource::Plane;
+        groundMr->albedoColor = Color(0.8f, 0.8f, 0.8f, 1.0f);
+
+        GameObject* box = scene.CreateEntity("Box");
+        box->transform().position = Vec3(0, 1.2f, 0);
+        box->transform().scale = Vec3(1.4f, 1.4f, 1.4f);
+        box->AddComponent<MeshRenderer>();
+
+        GameObject* sun = scene.CreateEntity("Sun");
+        sun->transform().SetEulerDegrees(Vec3(-55, -130, 0));
+        auto* light = sun->AddComponent<LightComponent>();
+        light->type = LightComponent::LightType::Directional;
+        light->castShadows = true;
+        light->intensity = 1.2f;
+
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 2.2f, 8);
+        auto* camera = cam->AddComponent<CameraComponent>();
+        camera->skyEnabled = false;
+        camera->clearColor = Color(0, 0, 0, 1);
+
+        RenderStats stats = engine.RenderGameFrame();
+        struct Shot {
+            std::vector<uint8_t> color;
+            std::string backend;
+        } shot;
+        shot.color = engine.frame().color;
+        shot.backend = stats.backend;
+        return shot;
+    };
+    // Pixels that change when shadows are switched on are the shadow region.
+    auto shadowMask = [&](const std::vector<uint8_t>& on, const std::vector<uint8_t>& off,
+                          int* count, double* cx, double* cy) {
+        int n = 0;
+        double sx = 0, sy = 0;
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const size_t i = ((size_t)y * w + x) * 4;
+                int d = 0;
+                for (int c = 0; c < 3; ++c)
+                    d = std::max(d, std::abs((int)on[i + c] - (int)off[i + c]));
+                if (d > 12) {
+                    ++n;
+                    sx += x;
+                    sy += y;
+                }
+            }
+        }
+        *count = n;
+        *cx = n ? sx / n : -1.0;
+        *cy = n ? sy / n : -1.0;
+    };
+
+    const auto cpuOn = render(2, 2);
+    const auto cpuOff = render(2, 0);
+    int cpuCount = 0;
+    double cpuX = 0, cpuY = 0;
+    shadowMask(cpuOn.color, cpuOff.color, &cpuCount, &cpuX, &cpuY);
+    CHECK(cpuOn.backend == "software");
+    CHECK(cpuCount > 200);              // the reference draws a visible shadow
+    CHECK(cpuY > h * 0.5);              // ...on the ground, below the caster
+
+    const auto gpuOn = render(1, 2);
+    const auto gpuOff = render(1, 0);
+    if (gpuOn.backend == "vulkan") {
+        int gpuCount = 0;
+        double gpuX = 0, gpuY = 0;
+        shadowMask(gpuOn.color, gpuOff.color, &gpuCount, &gpuX, &gpuY);
+        CHECK(gpuCount > 200);
+        // Same region, not merely a shadow somewhere: allow the few edge pixels
+        // the two rasterisers cover differently.
+        CHECK(std::abs(gpuCount - cpuCount) < cpuCount / 4);
+        CHECK(std::abs(gpuX - cpuX) < 3.0);
+        CHECK(std::abs(gpuY - cpuY) < 3.0);
+    }
+}
+
+// Analytic edge coverage must fill a pixel once. Two triangles of one surface
+// meet on a diagonal; the pixel under that edge is partly in each of them. The
+// rasteriser used to own it for the triangle that contained its centre only, so
+// the rest of the pixel kept the background and every shared interior edge drew
+// a one-pixel dark line — the subdivided Ground plane of a new 3D project is
+// such a mesh, and the line ran right across its surface.
+static void TestInteriorEdgeAntialiasing() {
+    Engine engine;
+    engine.SetViewportSize(160, 120);
+    Scene& scene = engine.scene();
+    scene.renderBackend = 2;   // the software path defines the reference picture
+    scene.shadows = 0;
+    scene.ambient = Color(1, 1, 1, 1);
+
+    GameObject* cam = scene.CreateEntity("Camera");
+    cam->tag = "MainCamera";
+    auto* camera = cam->AddComponent<CameraComponent>();
+    camera->skyEnabled = false;
+    camera->clearColor = Color(0, 0, 0, 1);
+    cam->transform().position = Vec3(0, 6, 0);
+    cam->transform().SetEulerDegrees(Vec3(-90, 0, 0));
+
+    GameObject* ground = scene.CreateEntity("Ground");
+    ground->transform().scale = Vec3(30, 1, 30);
+    auto* mr = ground->AddComponent<MeshRenderer>();
+    mr->mesh = MeshRenderer::MeshSource::Plane;   // two triangles, one diagonal
+    mr->unlit = true;
+    mr->albedoColor = Color(0.55f, 0.55f, 0.55f, 1.0f);
+
+    engine.RenderGameFrame();
+    const std::vector<uint8_t>& fb = engine.frame().color;
+    CHECK(fb.size() == (size_t)160 * 120 * 4);
+    // The surface's own colour, sampled away from the diagonal.
+    const size_t probe = ((size_t)20 * 160 + 30) * 4;
+    const int ref = fb[probe];
+    CHECK(ref > 50);
+    int darker = 0, brighter = 0;
+    for (size_t i = 0; i + 3 < fb.size(); i += 4) {
+        const int v = std::max({fb[i], fb[i + 1], fb[i + 2]});
+        if (v < ref - 12) ++darker;
+        if (v > ref + 12) ++brighter;
+    }
+    CHECK(darker == 0);   // no seam: the whole frame is the surface
+    CHECK(brighter == 0);
 }
 
 // Post-processing: every effect individually switchable, neutral defaults
@@ -1488,6 +1636,74 @@ static void TestSpriteQuality() {
     const RenderStats gpuStats = gpu.RenderGameFrame();
     CHECK(std::string(gpuStats.backend) == "vulkan");
     checkSprite(gpu);
+}
+
+// A sprite is one quad: two triangles that share the quad's diagonal. Edge
+// coverage has to fill the pixel under that diagonal once. Compositing each
+// triangle's half-covered share separately left the background showing through
+// the seam, which a rotated sprite (any sprite that is not pixel-perfect) shows
+// as a faint dark line straight across its middle.
+static void TestSpriteEdgeAntialiasing() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-sprite-aa").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/white.bmp";
+    WriteTestBmpChecker(dir + "/" + tex, 8, 8, 255, 255, 255, 255, 255, 255);
+
+    Engine engine;
+    engine.SetProjectRoot(dir);
+    engine.SetViewportSize(160, 120);
+    Scene& scene = engine.scene();
+    scene.renderBackend = 2;   // the software path defines the reference picture
+    scene.msaa = 1;
+    scene.shadows = 0;
+    scene.ambient = Color(1, 1, 1, 1);
+
+    GameObject* cam = scene.CreateEntity("Main");
+    cam->tag = "MainCamera";
+    cam->transform().position = Vec3(0, 0, 8);
+    auto* cc = cam->AddComponent<CameraComponent>();
+    cc->orthographic = true;
+    cc->orthographicSize = 2.0f;    // 4 world units across 160 pixels
+    cc->clearColor = Color(0, 0, 0, 1);
+    cc->skyEnabled = false;
+
+    GameObject* sprite = scene.CreateEntity("Sprite");
+    auto* sr = sprite->AddComponent<SpriteRenderer>();
+    sr->texturePath = tex;
+    sr->pixelPerfect = false;       // edge coverage on (the renderer's default)
+    sr->pixelsPerUnit = 5.0f;       // 8 texels -> 1.6 world units (64 pixels)
+    sprite->transform().scale = Vec3(1.0f, 1.0f, 1.0f);
+    sprite->transform().SetEulerDegrees(Vec3(0, 0, 30));
+
+    engine.RenderGameFrame();
+    const auto& fb = engine.frame().color;
+    const int w = 160;
+    auto lum = [&](int x, int y) { return (int)fb[((size_t)y * (size_t)w + (size_t)x) * 4]; };
+    // The middle row crosses the sprite through its centre, and the shared
+    // diagonal passes through the centre too, so a seam lands on this row.
+    const int mid = 60;
+    // The middle row crosses the sprite through its centre, and the shared
+    // diagonal passes through the centre too, so a seam lands on this row.
+    int peak = 0;
+    for (int x = 0; x < w; ++x) peak = std::max(peak, lum(x, mid));
+    CHECK(peak > 120);
+    int first = -1, last = -1;
+    for (int x = 0; x < w; ++x) {
+        if (lum(x, mid) == peak) {
+            if (first < 0) first = x;
+            last = x;
+        }
+    }
+    CHECK(first > 0 && last > first + 20);
+    int seam = 0, soft = 0;
+    for (int x = first; x <= last; ++x)
+        if (lum(x, mid) < peak - 8) ++seam;
+    for (int x = 0; x < w; ++x) {
+        if (x >= first && x <= last) continue;
+        if (lum(x, mid) > 20 && lum(x, mid) < peak - 8) ++soft;
+    }
+    CHECK(seam == 0);    // no seam across the quad's diagonal
+    CHECK(soft > 0);     // the silhouette is still antialiased
 }
 
 // Sprites in a frame that also carries lines. The editor grid arrives as debug
@@ -4472,6 +4688,8 @@ int main() {
     TestRenderGameCamera();
     TestBindlessTextureSlots();
     TestShadows();
+    TestShadowsAcrossBackends();
+    TestInteriorEdgeAntialiasing();
     TestPostProcessing();
     TestPhysics();
     TestHierarchy();
@@ -4480,6 +4698,7 @@ int main() {
     TestCullingAndAA();
     TestSortingOrder();
     TestSpriteQuality();
+    TestSpriteEdgeAntialiasing();
     TestEditorFrameSprites();
     TestSpriteOrientation();
     TestSpriteNormalOrientation();

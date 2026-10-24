@@ -39,6 +39,9 @@ struct MaterialGpu {
     bool castShadows = false;
     bool receiveShadows = true;
     bool depthOnly = false;    // shadow pass: write depth, skip shading
+    // 2D item (sprite/text quad) rasterized as one draw: its triangles may be
+    // composited once per pixel even where they share the quad's diagonal.
+    bool item2D = false;
 };
 
 struct GpuLight {

@@ -114,6 +114,17 @@ struct Renderer::Impl {
     int W = 0, H = 0;
     std::vector<uint8_t>* color = nullptr;
     std::vector<float>* depth = nullptr;
+    // Analytic edge antialiasing: a partially covered pixel is filled with the
+    // triangle's share of the surface over the *background*, not blended over
+    // the share a neighbouring triangle of the same surface already wrote.
+    // `aaBackground` is the sky-only frame (the colour behind every surface)
+    // and `aaCover` the area of each pixel already covered by opaque geometry.
+    std::vector<uint8_t> aaBackground;
+    std::vector<float> aaCover;
+    // Colour under the current 2D item, captured where its first triangle
+    // touches a pixel, so the second triangle can add its share of the quad
+    // instead of compositing over the first one's half-covered result.
+    std::vector<uint8_t> aaBlendBg;
 
     // Directional shadow cascades.
     static constexpr int kMaxCascades = Cairn::kMaxCascades;
@@ -1171,25 +1182,65 @@ struct Renderer::Impl {
         if (mat.blend) {
             // Blend in display space: the framebuffer holds encoded bytes, so
             // the source is encoded first (matches what the user sees).
-            const float a = albedo[3] * coverage;
             uint8_t src[3];
             EncodePixel(src, r, g, b);
-            p[0] = (uint8_t)std::clamp(src[0] * a + p[0] * (1.0f - a) + 0.5f, 0.0f, 255.0f);
-            p[1] = (uint8_t)std::clamp(src[1] * a + p[1] * (1.0f - a) + 0.5f, 0.0f, 255.0f);
-            p[2] = (uint8_t)std::clamp(src[2] * a + p[2] * (1.0f - a) + 0.5f, 0.0f, 255.0f);
+            const size_t pix = (size_t)y * W + x;
+            const bool perQuad = mat.item2D && mat.antialias &&
+                                 aaBlendBg.size() == (size_t)W * H * 4 && aaCover.size() == (size_t)W * H;
+            if (perQuad && coverage < 0.999f) {
+                // A sprite is two triangles: the pixel under their shared
+                // diagonal is partly in each of them, and they must fill it
+                // once. Compositing both halves separately (the old path)
+                // darkened the diagonal; here each triangle adds its share of
+                // the quad's own colour over the colour underneath the item.
+                if (aaCover[pix] <= 0.0f) std::memcpy(&aaBlendBg[pix * 4], p, 4);
+                const float share = std::min(coverage, 1.0f - aaCover[pix]);
+                const uint8_t* bg = &aaBlendBg[pix * 4];
+                const float mix = albedo[3] * share;
+                for (int ch = 0; ch < 3; ++ch) {
+                    const float v = (float)p[ch] + mix * ((float)src[ch] - (float)bg[ch]);
+                    p[ch] = (uint8_t)std::clamp(v + 0.5f, 0.0f, 255.0f);
+                }
+                aaCover[pix] = std::min(1.0f, aaCover[pix] + share);
+            } else {
+                const float a = albedo[3] * coverage;
+                p[0] = (uint8_t)std::clamp(src[0] * a + p[0] * (1.0f - a) + 0.5f, 0.0f, 255.0f);
+                p[1] = (uint8_t)std::clamp(src[1] * a + p[1] * (1.0f - a) + 0.5f, 0.0f, 255.0f);
+                p[2] = (uint8_t)std::clamp(src[2] * a + p[2] * (1.0f - a) + 0.5f, 0.0f, 255.0f);
+                if (perQuad) aaCover[pix] = 1.0f;
+            }
             p[3] = 255;
         } else if (coverage >= 0.999f) {
             EncodePixel(p, r, g, b);
             p[3] = 255;
             dz = z;
+            if (aaCover.size() == (size_t)W * H) aaCover[(size_t)y * W + x] = 1.0f;
         } else {
-            // Partially covered edge pixel: blend with what is already there
-            // and leave the depth buffer alone (it still belongs to the
-            // neighbour that fully covers this texel, if any).
+            // Partially covered edge pixel: leave the depth buffer alone (it
+            // still belongs to the neighbour that fully covers this texel, if
+            // any). Part of the pixel is still background, so the triangle
+            // contributes its own share of the surface on top of the
+            // background rather than blending over a share an adjacent
+            // triangle already wrote: blending twice darkened every interior
+            // edge of a subdivided mesh by the uncovered background.
+            const size_t pix = (size_t)y * W + x;
             uint8_t src[3];
             EncodePixel(src, r, g, b);
-            for (int c = 0; c < 3; ++c) {
-                p[c] = (uint8_t)std::clamp(src[c] * coverage + p[c] * (1.0f - coverage) + 0.5f, 0.0f, 255.0f);
+            const bool onSurface = aaCover.size() != (size_t)W * H || aaCover[pix] >= 0.999f;
+            if (onSurface) {
+                for (int ch = 0; ch < 3; ++ch)
+                    p[ch] = (uint8_t)std::clamp(src[ch] * coverage + p[ch] * (1.0f - coverage) + 0.5f,
+                                                0.0f, 255.0f);
+            } else {
+                // Only the area still uncovered can take a new share, so three
+                // triangles meeting at a corner cannot fill the pixel twice.
+                const float share = std::min(coverage, 1.0f - aaCover[pix]);
+                const uint8_t* bg = aaBackground.data() + pix * 4;
+                for (int ch = 0; ch < 3; ++ch) {
+                    const float v = (float)p[ch] + share * ((float)src[ch] - (float)bg[ch]);
+                    p[ch] = (uint8_t)std::clamp(v + 0.5f, 0.0f, 255.0f);
+                }
+                aaCover[pix] = std::min(1.0f, aaCover[pix] + share);
             }
             p[3] = 255;
         }
@@ -1250,13 +1301,19 @@ struct Renderer::Impl {
                 float e0 = (v[1].x - v[0].x) * (py - v[0].y) - (v[1].y - v[0].y) * (px - v[0].x);
                 float e1 = (v[2].x - v[1].x) * (py - v[1].y) - (v[2].y - v[1].y) * (px - v[1].x);
                 float e2 = (v[0].x - v[2].x) * (py - v[2].y) - (v[0].y - v[2].y) * (px - v[2].x);
-                if (e0 < 0 || e1 < 0 || e2 < 0) continue;
                 float coverage = 1.0f;
                 if (mat.antialias) {
+                    // A triangle also owns pixels whose centre falls up to half
+                    // a pixel outside an edge: part of the square is inside it
+                    // and the rest inside the neighbour that shares the edge.
+                    // Discarding those pixels left the background visible along
+                    // every interior edge of a mesh as a one-pixel dark seam.
                     const float d = std::min(std::min(e0 / std::max(len2, 1e-5f), e1 / std::max(len0, 1e-5f)),
                                              e2 / std::max(len1, 1e-5f));
                     coverage = std::clamp(d + 0.5f, 0.0f, 1.0f);
                     if (coverage <= 0.0f) continue;
+                } else if (e0 < 0 || e1 < 0 || e2 < 0) {
+                    continue;
                 }
                 float w0 = e1 * invArea, w1 = e2 * invArea;
                 float w2 = 1.0f - w0 - w1;
@@ -1279,6 +1336,29 @@ struct Renderer::Impl {
                 float L[3] = {w0, w1, w2};
                 ShadeAndStore(x, y, v, L, mat, lod, coverage);
             }
+        }
+    }
+
+    // Drops the per-pixel coverage accumulated by an earlier 2D item across the
+    // screen bounds of the triangles just emitted (startVertex..end of the
+    // triangle list).
+    void ClearItemCoverage(size_t startVertex) {
+        if (aaCover.size() != (size_t)W * H) return;
+        float minX = 1e30f, maxX = -1e30f, minY = 1e30f, maxY = -1e30f;
+        for (size_t i = startVertex; i < triVerts.size(); ++i) {
+            minX = std::min(minX, triVerts[i].x);
+            maxX = std::max(maxX, triVerts[i].x);
+            minY = std::min(minY, triVerts[i].y);
+            maxY = std::max(maxY, triVerts[i].y);
+        }
+        if (minX > maxX) return;
+        const int x0 = std::clamp((int)std::floor(minX) - 1, 0, W);
+        const int x1 = std::clamp((int)std::ceil(maxX) + 1, 0, W);
+        const int y0 = std::clamp((int)std::floor(minY) - 1, 0, H);
+        const int y1 = std::clamp((int)std::ceil(maxY) + 1, 0, H);
+        for (int y = y0; y < y1; ++y) {
+            float* row = aaCover.data() + (size_t)y * W;
+            std::fill(row + x0, row + x1, 0.0f);
         }
     }
 
@@ -1855,6 +1935,10 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
     // ---- Software backend.
     R.lights = list.lights;
     R.ClearAndSky(cam);
+    // Analytic edge AA composites opaque geometry over this sky-only frame.
+    R.aaBackground.assign(R.color->begin(), R.color->end());
+    R.aaCover.assign((size_t)R.W * R.H, 0.0f);
+    R.aaBlendBg.assign((size_t)R.W * R.H * 4, 0);
 
     const int prevShadowSize = R.cascadeSize;
     if (R.cascadeSize != prevShadowSize ||
@@ -1896,9 +1980,15 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
     // emitted so the depth sort stays exact (clipped quads can fan out).
     for (const auto& item : list.items2D) {
         size_t startIndex = R.triVerts.size();
-        R.EmitQuadVerts(list.verts2D.data() + item.firstVert, item.vertCount, item.mat);
+        MaterialGpu mat = item.mat;
+        mat.item2D = true;
+        R.EmitQuadVerts(list.verts2D.data() + item.firstVert, item.vertCount, mat);
         int from = (int)(startIndex / 3);
         int to = (int)(R.triVerts.size() / 3);
+        // Each item starts with no coverage so its own triangles share one
+        // composite; the previous item's coverage is dropped over the same
+        // bounds, which is exactly what this item will rasterize.
+        R.ClearItemCoverage(startIndex);
         // Sorted per item and drawn on this thread so blend order is exact.
         for (int i = from; i < to; ++i) R.RasterTriangle(i, 0, R.H);
         R.triVerts.resize(startIndex);
