@@ -327,6 +327,32 @@ engine.renderEditorFrame();
 const childWorld = engine.getEntityJSON(child).transform.position;  // local space stays local
 check(Math.abs(childWorld[1]) < 1e-4, 'local transform stays local under a parent');
 
+// The editor's gizmo, its focus pivot and a move drag are world-space, while
+// Transform.position is parent-relative. Both directions must agree, including
+// under a rotated parent.
+const near3 = (a, b) => Array.isArray(a) && a.length === 3 &&
+    a.every((v, i) => Math.abs(v - b[i]) < 1e-4);
+check(near3(engine.getWorldPosition(child), [0, 5, 0]),
+    'world position includes the parent offset');
+check(engine.setWorldPosition(child, 2, 3, 4) === true, 'setWorldPosition reports success');
+check(near3(engine.getWorldPosition(child), [2, 3, 4]),
+    'setting a world position puts the entity there');
+const afterWorldSet = engine.getEntityJSON(child).transform.position;
+check(Math.abs(afterWorldSet[1] + 2) < 1e-4,
+    `the stored transform stays parent-relative (${afterWorldSet[1].toFixed(2)})`);
+engine.setComponentProp(parent, 'Transform', 'rotation', [0, 90, 0]);
+engine.setComponentProp(child, 'Transform', 'position', [1, 0, 0]);
+const rotatedWorld = engine.getWorldPosition(child);
+check(rotatedWorld && Math.abs(rotatedWorld[1] - 5) < 1e-4 &&
+      Math.abs(rotatedWorld[0]) < 1e-4 && Math.abs(Math.abs(rotatedWorld[2]) - 1) < 1e-4,
+    `a rotated parent turns local +X into world -Z (${rotatedWorld && rotatedWorld.map(v => v.toFixed(2)).join(', ')})`);
+engine.setWorldPosition(child, 0.5, 2, -0.5);
+check(near3(engine.getWorldPosition(child), [0.5, 2, -0.5]),
+    'a world position round-trips through a rotated parent');
+check(engine.getWorldPosition(999999) === null, 'a missing entity has no world position');
+check(engine.setWorldPosition(999999, 0, 0, 0) === false,
+    'setting a world position on a missing entity reports failure');
+
 fs.rmSync(projectDir, { recursive: true, force: true });
 
 if (failures === 0) {

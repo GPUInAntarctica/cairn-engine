@@ -93,6 +93,7 @@ export class Inspector {
 
         header.querySelector('#insp-name').addEventListener('change', ev => {
             engineInstance().setEntityName(ent.id, ev.target.value.trim() || ent.name);
+            markDirty();
             emit('scene-changed');
         });
         header.querySelector('#insp-tag').addEventListener('change', ev => {
@@ -195,9 +196,16 @@ export class Inspector {
                 const live = liveEntity(ent.id) || ent;
                 return live.transform[key];
             };
-            body.appendChild(vectorRow(t('insp.position'), read('position'), v => eng.setComponentProp(ent.id, 'Transform', 'position', v), true, 3));
-            body.appendChild(vectorRow(t('insp.rotation'), read('rotation'), v => eng.setComponentProp(ent.id, 'Transform', 'rotation', v), true, 3));
-            body.appendChild(vectorRow(t('insp.scale'), read('scale'), v => eng.setComponentProp(ent.id, 'Transform', 'scale', v), true, 3));
+            const commit = key => v => {
+                eng.setComponentProp(ent.id, 'Transform', key, v);
+                markDirty();
+                // Rotation comes back normalised (Euler -> quaternion -> Euler),
+                // so the other rows are repainted from what the engine stored.
+                emit('entity-edited', ent.id);
+            };
+            body.appendChild(vectorRow(t('insp.position'), read('position'), commit('position'), true, 3));
+            body.appendChild(vectorRow(t('insp.rotation'), read('rotation'), commit('rotation'), true, 3));
+            body.appendChild(vectorRow(t('insp.scale'), read('scale'), commit('scale'), true, 3));
         } else if (comp.type === 'Script') {
             this.scriptBody(body, ent, comp);
         } else if (comp.meta) {

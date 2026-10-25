@@ -6,6 +6,7 @@
 import path from 'path';
 import fs from 'fs';
 import { emit } from './events.js';
+import { DEFAULT_SUN_ROTATION } from './scene_defaults.mjs';
 
 // Root of the application, derived from the loaded page so the same code
 // works from the source tree and the bundled renderer (dist/).
@@ -90,7 +91,7 @@ export function createDefaults() {
     // Light rig + main camera, the baseline every engine gives you.
     const sun = engineInstance().createEntity('Directional Light', 0);
     engineInstance().addComponent(sun, 'Light');
-    engineInstance().setComponentProp(sun, 'Transform', 'rotation', [35, -130, 0]);
+    engineInstance().setComponentProp(sun, 'Transform', 'rotation', [...DEFAULT_SUN_ROTATION]);
     engineInstance().setComponentProp(sun, 'Light', 'intensity', 1.0);
 
     const cam = engineInstance().createEntity('Main Camera', 0);
@@ -183,7 +184,7 @@ export function createEntity(kind, name) {
         case 'light-directional': {
             id = eng.createEntity(name || 'Directional Light', 0);
             eng.addComponent(id, 'Light');
-            eng.setComponentProp(id, 'Transform', 'rotation', [35, -130, 0]);
+            eng.setComponentProp(id, 'Transform', 'rotation', [...DEFAULT_SUN_ROTATION]);
             break;
         }
         case 'light-point': {

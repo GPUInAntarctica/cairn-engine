@@ -5,6 +5,11 @@
 import { editor, engineInstance, selectEntity, entityList, markDirty, pushUndo } from '../state.js';
 import { emit, on } from '../events.js';
 import { t } from '../i18n.js';
+import {
+    cameraForward, cameraRight, cameraUp,
+    moveInCameraPlane, axisMove, rotateFromDrag, scaleFromDrag,
+    handleScreen, hitHandle, alongHandle, deviceToCss,
+} from './transform_drag.mjs';
 
 const NAV_SPEED = 8;          // world units per second at speed 1
 const ZOOM_SPEED = 1.15;
@@ -39,11 +44,13 @@ export class Viewport {
         this.keys = {};
         this.tool = editor.tool;
         this.showStats = true;
+        this.axisCamKey = '';
 
         this.bindPointer();
         this.bindKeyboard();
-        on('selection-changed', () => this.drawOverlay());
-        on('scene-changed', () => this.drawOverlay());
+        on('selection-changed', () => { this.syncAxisHandles(true); this.drawOverlay(); });
+        on('scene-changed', () => { this.syncAxisHandles(true); this.drawOverlay(); });
+        on('entity-edited', () => this.syncAxisHandles(true));
         window.addEventListener('resize', () => this.resize());
         // The cached box is only exact if something tells us when the layout
         // moved. A ResizeObserver covers splitter drags, tab switches (the
@@ -71,12 +78,22 @@ export class Viewport {
         const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
         const w = Math.max(2, Math.min(1920, Math.floor(rect.width * dpr)));
         const h = Math.max(2, Math.min(1200, Math.floor(rect.height * dpr)));
+        const ow = Math.max(1, Math.floor(rect.width));
+        const oh = Math.max(1, Math.floor(rect.height));
+        let changed = false;
         if (this.sceneCanvas.width !== w || this.sceneCanvas.height !== h) {
             this.sceneCanvas.width = w;
             this.sceneCanvas.height = h;
-            this.overlay.width = rect.width;
-            this.overlay.height = rect.height;
             engineInstance().setViewportSize(w, h);
+            changed = true;
+        }
+        if (this.overlay.width !== ow || this.overlay.height !== oh) {
+            this.overlay.width = ow;
+            this.overlay.height = oh;
+            changed = true;
+        }
+        if (changed) {
+            this.syncAxisHandles(true);
             this.drawOverlay();
         }
     }
@@ -85,10 +102,7 @@ export class Viewport {
     // World-space view direction for yaw/pitch (must mirror the engine's
     // Quat::FromEulerDegrees([pitch, yaw, 0]) * Forward convention).
     camForward() {
-        const yaw = this.cam.yaw * Math.PI / 180;
-        const pitch = this.cam.pitch * Math.PI / 180;
-        const cp = Math.cos(pitch);
-        return [-cp * Math.sin(yaw), Math.sin(pitch), -cp * Math.cos(yaw)];
+        return cameraForward(this.cam.yaw, this.cam.pitch);
     }
 
     camPosition() {
@@ -98,8 +112,7 @@ export class Viewport {
     }
 
     camRight() {
-        const yaw = this.cam.yaw * Math.PI / 180;
-        return [Math.cos(yaw), 0, -Math.sin(yaw)];
+        return cameraRight(this.cam.yaw);
     }
 
     applyCamera() {
@@ -148,9 +161,17 @@ export class Viewport {
             el.focus();
             const pt = this.localPoint(ev);
             if (editor.playing) { this.forwardMouse(ev, true); return; }
+            if (this.entityDrag) return;
             if (ev.button === 0) {
-                // Gizmo handles first.
-                if (this.gizmoHit && this.gizmoHit(pt)) return;
+                // Gizmo handles first; the lines meet at the origin, and
+                // hitHandle ignores that region so a click on the entity still
+                // starts a camera-plane drag.
+                const handle = this.gizmoHit(pt);
+                if (handle) {
+                    this.beginEntityDrag(editor.selection, pt, handle);
+                    ev.preventDefault();
+                    return;
+                }
                 const hit = this.pickAt(pt.x, pt.y);
                 selectEntity(hit);
                 if (hit && editor.tool !== 'select') this.beginEntityDrag(hit, pt);
@@ -165,7 +186,7 @@ export class Viewport {
         window.addEventListener('mousemove', ev => {
             const pt = this.localPoint(ev);
             if (editor.playing) { this.forwardMouse(ev, false); return; }
-            if (this.entityDrag) { this.updateEntityDrag(pt); return; }
+            if (this.entityDrag) { this.updateEntityDrag(pt, ev.shiftKey); return; }
             if (!this.drag) return;
             const dx = pt.x - this.drag.start.x, dy = pt.y - this.drag.start.y;
             if (this.drag.mode === 'orbit') {
@@ -241,84 +262,194 @@ export class Viewport {
     focusSelected() {
         const ent = entityList().find(e => e.id === editor.selection);
         if (!ent) return;
-        const p = ent.transform.position;
+        const p = entityWorldPosition(ent);
         this.cam.pivot = [p[0], p[1], p[2]];
     }
 
-    // ---- entity drag (move/rotate/scale on gizmo axes) ----------------------
-    beginEntityDrag(id, pt) {
+    // ---- entity drag (move/rotate/scale) -----------------------------------
+    beginEntityDrag(id, pt, handle = null) {
         const ent = entityList().find(e => e.id === id);
         if (!ent) return;
-        pushUndo();
-        const pos = ent.transform.position;
-        const screen = worldToScreen(pos);
-        if (!screen.ok) return;
+        const pos = entityWorldPosition(ent);
+        const screen = this.projectCss(pos);
+        if (!screen.ok && !handle) return;
+        const origin = screen.ok ? screen : handle.origin;
         this.entityDrag = {
             id,
             mode: editor.tool,
             startPos: [...pos],
             startRot: [...ent.transform.rotation],
             startScale: [...ent.transform.scale],
-            startScreen: screen,
             startPointer: pt,
-            pivotScreen: screen,
+            depth: this.objectDepth(pos),
+            // Captured at the start of the drag: a wheel zoom or a camera
+            // orbit while the button is down must not change the ratio the
+            // pointer is already driving.
+            axis: handle ? {
+                ...handle,
+                origin: { ...handle.origin },
+                tip: { ...handle.tip },
+                screenDir: [...handle.screenDir],
+                handleWorldLength: this.gizmoLength(),
+            } : null,
+            undoPushed: false,
         };
-        if (this.entityDrag.mode === 'move') this.setupAxisHandles(ent, pos, screen);
+        if (this.entityDrag.mode === 'move') this.setupAxisHandles(pos, origin);
     }
 
-    setupAxisHandles(ent, pos, screen) {
-        // Project unit axes to screen space to build draggable axis handles.
+    // Device pixels per CSS pixel. worldToScreen() reports in the renderer
+    // target's pixels, while the overlay canvas is sized in CSS pixels.
+    screenScale() {
+        return {
+            x: this.overlay.width ? this.sceneCanvas.width / this.overlay.width : 1,
+            y: this.overlay.height ? this.sceneCanvas.height / this.overlay.height : 1,
+        };
+    }
+
+    projectCss(p) {
+        const s = worldToScreen(p);
+        if (!s.ok) return s;
+        const k = this.screenScale();
+        return { ok: true, ...deviceToCss(s.x, s.y, k.x, k.y) };
+    }
+
+    objectDepth(pos) {
+        const cam = this.camPosition();
+        const f = this.camForward();
+        return Math.max(0.05,
+            (pos[0] - cam[0]) * f[0] + (pos[1] - cam[1]) * f[1] + (pos[2] - cam[2]) * f[2]);
+    }
+
+    setupAxisHandles(pos, screen) {
+        // Project unit world axes to CSS space to build draggable handles.
         const len = this.gizmoLength();
         const axes = [
             { axis: 0, color: 'var(--axis-x)', dir: [1, 0, 0] },
             { axis: 1, color: 'var(--axis-y)', dir: [0, 1, 0] },
             { axis: 2, color: 'var(--axis-z)', dir: [0, 0, 1] },
         ].map(a => {
-            const tip = worldToScreen([pos[0] + a.dir[0] * len, pos[1] + a.dir[1] * len, pos[2] + a.dir[2] * len]);
+            const tip = this.projectCss([
+                pos[0] + a.dir[0] * len,
+                pos[1] + a.dir[1] * len,
+                pos[2] + a.dir[2] * len,
+            ]);
+            if (!tip.ok) return null;
+            const line = handleScreen(screen, tip);
+            // An axis pointing at the camera has almost no screen extent;
+            // drawing it would leave a dot that cannot be aimed at.
+            if (!line || line.length < 8) return null;
             return {
                 ...a,
                 origin: { x: screen.x, y: screen.y },
-                tip: tip.ok ? tip : null,
+                tip,
+                screenDir: line.dir,
+                screenLength: line.length,
             };
-        }).filter(a => a.tip);
+        }).filter(Boolean);
         this.axisHandles = axes;
     }
 
-    updateEntityDrag(pt) {
+    syncAxisHandles(force = false) {
+        const key = [
+            editor.tool, editor.selection, editor.playing,
+            this.cam.yaw, this.cam.pitch, this.cam.distance,
+            this.cam.ortho, this.cam.orthoSize,
+            this.cam.pivot[0], this.cam.pivot[1], this.cam.pivot[2],
+            this.sceneCanvas.width, this.sceneCanvas.height,
+            this.overlay.width, this.overlay.height,
+        ].join('|');
+        if (!force && key === this.axisCamKey) return;
+        this.axisCamKey = key;
+        if (editor.tool !== 'move' || editor.playing || !editor.selection) {
+            this.axisHandles = null;
+            return;
+        }
+        const ent = entityList().find(e => e.id === editor.selection);
+        if (!ent) { this.axisHandles = null; return; }
+        const pos = entityWorldPosition(ent);
+        const screen = this.projectCss(pos);
+        if (!screen.ok) { this.axisHandles = null; return; }
+        this.setupAxisHandles(pos, screen);
+    }
+
+    gizmoHit(pt) {
+        if (editor.tool !== 'move' || editor.playing || !editor.selection) return null;
+        if (!this.axisHandles || !this.axisHandles.length) return null;
+        const i = hitHandle(pt, this.axisHandles, 9, 14);
+        return i >= 0 ? this.axisHandles[i] : null;
+    }
+
+    updateEntityDrag(pt, shift = false) {
         const eng = engineInstance();
         const drag = this.entityDrag;
+        const dx = pt.x - drag.startPointer.x;
+        const dy = pt.y - drag.startPointer.y;
+        const snapStep = shift
+            ? (drag.mode === 'move' ? 0.25 : drag.mode === 'rotate' ? 15 : 0.1)
+            : 0;
+
+        let next;
+        let start;
+        let prop;
         if (drag.mode === 'move') {
-            // Move on the camera-facing plane; snap to the dominant axis with Shift.
-            const scale = this.cam.ortho
-                ? this.cam.orthoSize * 2 / this.box.height
-                : this.cam.distance * 0.0018;
-            const dx = (pt.x - drag.startPointer.x) * scale;
-            const dy = -(pt.y - drag.startPointer.y) * scale;
-            const right = this.camRight();
-            const up = cameraUp(this.cam.yaw, this.cam.pitch);
-            const world = [
-                drag.startPos[0] + dx * right[0] + dy * -up[0],
-                drag.startPos[1] + dy * up[1],
-                drag.startPos[2] + dx * right[2] + dy * -up[2],
-            ];
-            eng.setComponentProp(drag.id, 'Transform', 'position', world);
+            prop = 'position';
+            start = drag.startPos;
+            if (drag.axis) {
+                next = axisMove(
+                    drag.startPos, drag.axis.dir,
+                    alongHandle(dx, dy, drag.axis.screenDir),
+                    drag.axis.screenLength, drag.axis.handleWorldLength,
+                    snapStep);
+            } else {
+                next = moveInCameraPlane(drag.startPos, dx, dy, {
+                    yaw: this.cam.yaw,
+                    pitch: this.cam.pitch,
+                    ortho: this.cam.ortho,
+                    orthoSize: this.cam.orthoSize,
+                    depth: drag.depth,
+                    fovDeg: 60,
+                    viewportHeight: this.box.height,
+                }, snapStep);
+            }
         } else if (drag.mode === 'rotate') {
-            const delta = (pt.x - drag.startPointer.x) + (pt.y - drag.startPointer.y);
-            const rot = [...drag.startRot];
-            rot[1] = drag.startRot[1] + delta * 0.5;
-            eng.setComponentProp(drag.id, 'Transform', 'rotation', rot);
+            prop = 'rotation';
+            start = drag.startRot;
+            next = rotateFromDrag(drag.startRot, dx, dy, {
+                sensitivity: 0.5,
+                snapStep: snapStep,
+            });
         } else if (drag.mode === 'scale') {
-            const delta = -(pt.y - drag.startPointer.y) * 0.01;
-            const s = drag.startScale.map(v => Math.max(0.01, v * (1 + delta)));
-            eng.setComponentProp(drag.id, 'Transform', 'scale', s);
+            prop = 'scale';
+            start = drag.startScale;
+            next = scaleFromDrag(drag.startScale, dy, {
+                sensitivity: 0.01,
+                snapStep: snapStep,
+            });
+        } else {
+            return;
         }
+
+        // A click that never moves must not leave an undo entry behind; the
+        // snapshot is taken on the first frame that actually changes the
+        // transform. Returning to the start after a drag still applies, since
+        // the snapshot already exists.
+        if (!drag.undoPushed) {
+            if (sameVector(next, start)) return;
+            pushUndo();
+            drag.undoPushed = true;
+        }
+        // The drag computed a world-space target; a parented entity stores a
+        // parent-relative position, so the engine converts it back.
+        if (drag.mode === 'move') eng.setWorldPosition(drag.id, next[0], next[1], next[2]);
+        else eng.setComponentProp(drag.id, 'Transform', prop, next);
+        if (drag.mode === 'move') this.syncAxisHandles(true);
         markDirty();
         emit('entity-edited', drag.id);
     }
 
     endEntityDrag() {
         this.entityDrag = null;
-        this.axisHandles = null;
+        this.syncAxisHandles();
         this.drawOverlay();
     }
 
@@ -363,6 +494,9 @@ export class Viewport {
         const ctx = this.ctx;
         const w = this.overlay.width, h = this.overlay.height;
         ctx.clearRect(0, 0, w, h);
+        // Mouse orbit, pan and zoom have no event of their own that says
+        // "the projection moved"; the camera key notices and re-projects.
+        this.syncAxisHandles();
         const wantStats = this.showStats ? 'block' : 'none';
         if (wantStats !== this.statsShown) {
             this.statsEl.style.display = wantStats;
@@ -408,15 +542,7 @@ export class Viewport {
 
     setTool(tool) {
         this.tool = tool;
-        this.axisHandles = null;
-        if (tool === 'move' && editor.selection) {
-            const ent = entityList().find(e => e.id === editor.selection);
-            if (ent) {
-                const pos = ent.transform.position;
-                const screen = worldToScreen(pos);
-                if (screen.ok) this.setupAxisHandles(ent, pos, screen);
-            }
-        }
+        this.syncAxisHandles();
         this.drawOverlay();
     }
 }
@@ -424,23 +550,22 @@ export class Viewport {
 // ---------------------------------------------------------------------------
 function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 
-function cameraUp(yawDeg, pitchDeg) {
-    // World-space up of the editor camera: up = right × forward.
-    const yaw = yawDeg * Math.PI / 180, pitch = pitchDeg * Math.PI / 180;
-    const right = [Math.cos(yaw), 0, -Math.sin(yaw)];
-    const cp = Math.cos(pitch);
-    const fwd = [-cp * Math.sin(yaw), Math.sin(pitch), -cp * Math.cos(yaw)];
-    const up = [
-        right[1] * fwd[2] - right[2] * fwd[1],
-        right[2] * fwd[0] - right[0] * fwd[2],
-        right[0] * fwd[1] - right[1] * fwd[0],
-    ];
-    const len = Math.hypot(up[0], up[1], up[2]) || 1;
-    return [up[0] / len, up[1] / len, up[2] / len];
+function sameVector(a, b) {
+    return Math.abs(a[0] - b[0]) < 1e-6 &&
+        Math.abs(a[1] - b[1]) < 1e-6 &&
+        Math.abs(a[2] - b[2]) < 1e-6;
 }
 
 function worldToScreen(p) {
     return engineInstance().worldToScreen(p[0], p[1], p[2]);
+}
+
+// Transform.position is local; the gizmo, the focus pivot and a move drag all
+// work in world space. The engine resolves the hierarchy so the editor does not
+// carry a second copy of the parent composition rules.
+function entityWorldPosition(ent) {
+    const p = engineInstance().getWorldPosition(ent.id);
+    return Array.isArray(p) ? [p[0], p[1], p[2]] : [...ent.transform.position];
 }
 
 // Axis colours live in theme.css as --ax-x/y/z, alongside the tick colours in

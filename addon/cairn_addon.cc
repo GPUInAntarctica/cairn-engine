@@ -136,6 +136,8 @@ public:
             InstanceMethod("setEntityTag", &EngineWrap::SetEntityTag),
             InstanceMethod("setEntityLayer", &EngineWrap::SetEntityLayer),
             InstanceMethod("setEntityParent", &EngineWrap::SetEntityParent),
+            InstanceMethod("getWorldPosition", &EngineWrap::GetWorldPosition),
+            InstanceMethod("setWorldPosition", &EngineWrap::SetWorldPosition),
             InstanceMethod("getEntityJSON", &EngineWrap::GetEntityJSON),
             InstanceMethod("getSceneTree", &EngineWrap::GetSceneTree),
             InstanceMethod("addComponent", &EngineWrap::AddComponent),
@@ -356,6 +358,34 @@ private:
         GameObject* go = engine_->FindEntity((EntityId)GetNumber(info, 0, 0));
         GameObject* parent = GetNumber(info, 1, 0) > 0 ? engine_->FindEntity((EntityId)GetNumber(info, 1, 0)) : nullptr;
         if (go) go->SetParent(parent);
+    }
+    // Transform.position is local. The editor's gizmos live in world space, so
+    // a parented entity needs the matrix applied (or undone) for a drag to land
+    // under the pointer. Both directions stay here rather than in the viewport:
+    // the composition is the engine's, and duplicating it in JavaScript would
+    // be a second copy of the hierarchy rules to keep in step.
+    Napi::Value GetWorldPosition(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        GameObject* go = engine_->FindEntity((EntityId)GetNumber(info, 0, 0));
+        if (!go) return env.Null();
+        Vec3 p = go->transform().WorldPosition();
+        Napi::Array out = Napi::Array::New(env, 3);
+        out[(uint32_t)0] = p.x;
+        out[1] = p.y;
+        out[2] = p.z;
+        return out;
+    }
+    Napi::Value SetWorldPosition(const Napi::CallbackInfo& info) {
+        Napi::Env env = info.Env();
+        GameObject* go = engine_->FindEntity((EntityId)GetNumber(info, 0, 0));
+        if (!go) return Napi::Boolean::New(env, false);
+        Vec3 world((float)GetNumber(info, 1), (float)GetNumber(info, 2), (float)GetNumber(info, 3));
+        Transform& t = go->transform();
+        if (Transform* parent = t.m_parent ? &t.m_parent->transform() : nullptr)
+            world = parent->WorldMatrix().Inverted().TransformPoint(world);
+        t.position = world;
+        t.MarkWorldDirty();
+        return Napi::Boolean::New(env, true);
     }
 
     // Entity JSON used by the hierarchy and inspector.
