@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cairn-engine VERSION 0.2.3 LANGUAGES CXX)
+project(cairn-engine VERSION 0.2.4 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -134,6 +134,8 @@ add_library(cairn_engine SHARED
     src/components.cpp
     src/prefab.cpp
     src/renderer.cpp
+    src/material_shader.cpp
+    src/shader_library.cpp
     src/backend_vulkan.cpp
     src/physics.cpp
     src/jobs.cpp

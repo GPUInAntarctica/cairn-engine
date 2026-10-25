@@ -21,7 +21,7 @@ Frames render through a **Vulkan 1.3 backend** (dynamic rendering, loaded at run
 
 - **2D and 3D scenes** — a unified GameObject/Component model with hierarchy, duplication and readable `.cscene` JSON serialization
 - **Two render backends, one picture** — a Vulkan GPU backend (meshes, sprites, text, debug lines, sky, cascaded shadow maps, bloom → grading → vignette → FXAA, optional 4×/8× MSAA) and a software rasterizer, sharing one scene-gather front end
-- **Shading** — GGX specular with metallic/roughness, normal mapping, emissive, per-cascade shadow bias, sky gradient, fog, tone mapping (none/Reinhard/ACES/filmic)
+- **Shading** — GGX specular with metallic/roughness, normal mapping, emissive, per-cascade shadow bias, sky gradient, fog, tone mapping (none/Reinhard/ACES/filmic), plus **material shaders**: a per-fragment expression language for UV displacement and emissive masks with `@ripple` / `@scroll` / `@fresnel` / `@pulse` presets, evaluated identically by both backends
 - **C++ scripting** — Unity-style components: `OnStart` / `OnUpdate` / `FixedUpdate` / trigger and collision callbacks, compiled to a shared library from the editor or the CLI, and hot-reloaded
 - **The editor** — a dark, dense, keyboard-first workspace: hierarchy, reflection-driven inspector, viewport with select/move/rotate/scale and Play/Pause/Step, console, content browser
 - **Code editor** — Monaco with C++ syntax highlighting, engine API completion and build diagnostics mapped onto lines
@@ -209,6 +209,7 @@ CAIRN_SCRIPT(Collector)
 
 | Document | Contents |
 | --- | --- |
+| [Material shaders](docs/shaders.md) | Expression language, presets, outputs, determinism, hot reload |
 | [Architecture overview](docs/architecture.md) | Module breakdown, render backends, data flow, hot-reload mechanics |
 | [Roadmap & progress](docs/roadmap.md) | Phase plan, delivered increments, what is next, known limits |
 | [Editor manual](docs/editor-manual.md) | Interface, keyboard navigation, workflows |

@@ -96,6 +96,12 @@ export const dict = {
     'comp.script.pickClass': 'Script Class',
     'entity.tag': 'Tag',
     'entity.static': 'Static',
+    // material shader picker (MeshRenderer.shaderPath)
+    'shader.placeholder': '@preset or Assets/Shaders/name.cshader',
+    'shader.preset.ripple': 'Ripple',
+    'shader.preset.scroll': 'Scroll',
+    'shader.preset.fresnel': 'Fresnel Rim',
+    'shader.preset.pulse': 'Pulse Glow',
     'insp.sceneSettings': 'Scene Settings',
     'insp.gravity': 'Gravity',
     'insp.ambient': 'Ambient Light',

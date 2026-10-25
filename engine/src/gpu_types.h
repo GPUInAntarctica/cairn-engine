@@ -6,6 +6,7 @@
 #include "cairn/mesh.h"
 #include "cairn/renderer.h"
 #include "cairn/texture.h"
+#include "material_shader.h"
 
 #include <memory>
 #include <vector>
@@ -42,6 +43,10 @@ struct MaterialGpu {
     // 2D item (sprite/text quad) rasterized as one draw: its triangles may be
     // composited once per pixel even where they share the quad's diagonal.
     bool item2D = false;
+    // Optional per-fragment program. Both backends evaluate the same bytecode,
+    // so a custom-shaded surface still has a CPU reference picture.
+    const MaterialShader* shader = nullptr;
+    Vec4 shaderParams{1, 1, 1, 1};
 };
 
 struct GpuLight {
@@ -77,6 +82,10 @@ struct FrameDrawList {
     float tanHalfFov = 1.0f, aspect = 1.0f, orthoSize = 5.0f;
 
     std::vector<GpuLight> lights;
+    // Compiled shader programs referenced by this frame, kept alive until the
+    // backend has uploaded their bytecode (the library cache may be reloaded
+    // between frames).
+    std::vector<std::shared_ptr<MaterialShader>> liveShaders;
 
     // Directional shadow cascades (already fitted by the shared CPU code).
     int cascadeCount = 0;

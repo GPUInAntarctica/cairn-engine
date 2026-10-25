@@ -21,7 +21,7 @@ Cairn 是一个精巧的游戏引擎：C++ 运行时负责渲染、物理与玩�
 
 - **2D 与 3D 场景** — 统一的 GameObject/Component 模型，层级、预制体式复制、序列化为可读的 `.cscene` JSON
 - **双渲染后端，一致画面** — Vulkan GPU 后端（网格、精灵、文本、调试线、天空、级联阴影贴图、bloom → 调色 → 暗角 → FXAA，可选 4×/8× MSAA）与软件光栅化器，共用同一个场景收集前端
-- **着色** — GGX 高光 + metallic/roughness、法线贴图、自发光、逐级联阴影偏移、天空渐变、雾、tonemap（none/Reinhard/ACES/filmic）
+- **着色** — GGX 高光 + metallic/roughness、法线贴图、自发光、逐级联阴影偏移、天空渐变、雾、tonemap（none/Reinhard/ACES/filmic），以及**材质着色器**：逐片元表达式实现 UV 位移与自发光掩码，内置 `@ripple` / `@scroll` / `@fresnel` / `@pulse` 预设，两条后端逐条指令一致
 - **C++ 脚本** — 借鉴 Unity 的组件模型：`OnStart` / `OnUpdate` / `FixedUpdate` / 触发器与碰撞回调，可在编辑器或 CLI 里编译为共享库并热重载
 - **编辑器** — 深色、致密、键盘优先的界面：层级、反射驱动的检视器、视口（选择/移动/旋转/缩放、Play/Pause/Step）、控制台、内容浏览器
 - **代码编辑器** — Monaco，C++ 语法高亮、引擎 API 自动补全、编译诊断直接标注到行
@@ -209,6 +209,7 @@ CAIRN_SCRIPT(Collector)
 
 | 文档 | 内容 |
 | --- | --- |
+| [材质着色器](docs/shaders.md) | 表达式语法、预设、输出应用、确定性、热重载 |
 | [架构总览](docs/architecture.md) | 模块划分、渲染后端、数据流、热重载机制 |
 | [路线图与进度](docs/roadmap.md) | 阶段划分、已交付增量、下一步、已知限制 |
 | [编辑器手册](docs/editor-manual.md) | 界面、键盘导航、工作流 |

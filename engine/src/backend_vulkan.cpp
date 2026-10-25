@@ -46,8 +46,9 @@ struct FrameUbo {
     float skyBottom[4];
     float viewport[4];
     float clearColor[4];
+    float timeParams[4];  // x animation clock for material shaders
 };
-static_assert(sizeof(FrameUbo) == 240, "FrameUBO layout must match mesh.vert");
+static_assert(sizeof(FrameUbo) == 256, "FrameUBO layout must match mesh.vert");
 
 struct LightsUbo {
     float light[16][16];  // 4 vec4 per light
@@ -170,6 +171,8 @@ struct VulkanBackend::Impl {
     BindlessTable bindless[2];
 
     Buffer frameUbo, lightsUbo, shadowUbo, drawUbo, sceneVerts, sceneIndices;
+    // Material shader bytecode for this frame, addressed by DrawUbo::misc.y.
+    Buffer shaderCode;
     // Sprites/text and debug lines are separate vertex streams: they have
     // different strides (48 vs 28 bytes), so sharing one buffer let a frame
     // with editor lines overwrite the quad vertices at the same offset.
@@ -460,6 +463,7 @@ struct VulkanBackend::Impl {
         DestroyBuffer(&lightsUbo);
         DestroyBuffer(&shadowUbo);
         DestroyBuffer(&drawUbo);
+        DestroyBuffer(&shaderCode);
         DestroyBuffer(&sceneVerts);
         DestroyBuffer(&sceneIndices);
         DestroyBuffer(&verts2D);
@@ -667,6 +671,7 @@ bool VulkanBackend::Initialize(std::string* error) {
         {&I.lightsUbo, sizeof(LightsUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT},
         {&I.shadowUbo, sizeof(ShadowUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT},
         {&I.drawUbo, 65536ull * 8, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT},
+        {&I.shaderCode, 128 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT},
         {&I.verts2D, 256 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT},
         {&I.debugVerts, 256 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT},
         {&I.readback, 64, VK_BUFFER_USAGE_TRANSFER_DST_BIT},
@@ -778,18 +783,21 @@ bool VulkanBackend::Initialize(std::string* error) {
     // is the bindless texture arrays the scene path samples. The post chain
     // still uses the two-sampler texLayout as its own set 0.
     {
-        VkDescriptorSetLayoutBinding binds[5]{};
-        for (uint32_t i = 0; i < 5; ++i) {
+        VkDescriptorSetLayoutBinding binds[6]{};
+        for (uint32_t i = 0; i < 6; ++i) {
             binds[i].binding = i;
             binds[i].descriptorType = (i == 3)   ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
                                      : (i == 4) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
-                                                 : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                                     : (i == 5) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                                                : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             binds[i].descriptorCount = 1;
-            binds[i].stageFlags = (i <= 0 || i == 4) ? (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
-                                                      : VK_SHADER_STAGE_FRAGMENT_BIT;
+            binds[i].stageFlags = (i == 5) ? VK_SHADER_STAGE_FRAGMENT_BIT
+                                           : ((i <= 0 || i == 4)
+                                                  ? (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
+                                                  : VK_SHADER_STAGE_FRAGMENT_BIT);
         }
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 5;
+        ci.bindingCount = 6;
         ci.pBindings = binds;
         if (I.fn.CreateDescriptorSetLayout(I.device, &ci, nullptr, &I.frameLayout) != VK_SUCCESS)
             return fail("descriptor layout failed");
@@ -817,7 +825,7 @@ bool VulkanBackend::Initialize(std::string* error) {
     }
     {
         constexpr uint32_t kChunks = 8;   // 8 * 256 = 2048 draws per frame
-        VkDescriptorPoolSize sizes[3]{};
+        VkDescriptorPoolSize sizes[4]{};
         sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         sizes[0].descriptorCount = 4 * kChunks;
         sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
@@ -827,10 +835,12 @@ bool VulkanBackend::Initialize(std::string* error) {
         // shadow sampler of every frame set, and the post sets.
         sizes[2].descriptorCount =
             (uint32_t)(2 * Impl::kBindlessSlots + kChunks + 2 * Impl::kPostSlots);
+        sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        sizes[3].descriptorCount = kChunks;  // the shader-code buffer, one per frame set
         VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         // Frame-set windows, the bindless set and the post sets.
         ci.maxSets = (uint32_t)(kChunks + 1 + Impl::kPostSlots);
-        ci.poolSizeCount = 3;
+        ci.poolSizeCount = 4;
         ci.pPoolSizes = sizes;
         if (I.fn.CreateDescriptorPool(I.device, &ci, nullptr, &I.descPool) != VK_SUCCESS)
             return fail("descriptor pool failed");
@@ -1462,6 +1472,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         f.viewport[2] = list.aspect; f.viewport[3] = list.orthoSize;
         f.clearColor[0] = cam.clearColor.r; f.clearColor[1] = cam.clearColor.g;
         f.clearColor[2] = cam.clearColor.b; f.clearColor[3] = 1.0f;
+        f.timeParams[0] = cam.time;
         std::memcpy(I.frameUbo.mapped, &f, sizeof(f));
     }
     {
@@ -1511,6 +1522,40 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
     const size_t drawBudget = std::min(totalDraws, maxDraws);
     std::vector<DrawUbo> drawData;
     drawData.reserve(drawBudget);
+    // ---- material shader bytecode -----------------------------------------
+    // One storage buffer holds every program this frame uses; a draw carries
+    // the first instruction and its length. Draws that share a material share
+    // one region, so the cost is per unique program, not per draw.
+    struct CodeSlot { uint32_t start = 0, count = 0; };
+    std::unordered_map<const MaterialShader*, CodeSlot> codeSlots;
+    uint32_t codeCursor = 0;
+    const uint32_t codeCapacity =
+        (uint32_t)((128 * 1024) / (4 * sizeof(float)));
+    float* codeWords = I.shaderCode.mapped ? static_cast<float*>(I.shaderCode.mapped) : nullptr;
+    auto codeSlot = [&](const MaterialShader* shader) -> CodeSlot {
+        CodeSlot slot;
+        if (!shader || !codeWords) return slot;
+        auto it = codeSlots.find(shader);
+        if (it != codeSlots.end()) return it->second;
+        slot.start = codeCursor;
+        slot.count = (uint32_t)std::min<size_t>(shader->code.size(), kMaxShaderInsns);
+        if (slot.count == 0 || codeCursor + slot.count > codeCapacity) {
+            Log::Warning("Vulkan backend: shader code pool full; program dropped");
+            codeSlots[shader] = slot;
+            return slot;
+        }
+        for (uint32_t i = 0; i < slot.count; ++i) {
+            const ShaderInsn& ins = shader->code[i];
+            float* dst = codeWords + 4 * (size_t)(slot.start + i);
+            dst[0] = (float)ins.op;
+            dst[1] = ins.a;
+            dst[2] = ins.b;
+            dst[3] = ins.c;
+        }
+        codeCursor += slot.count;
+        codeSlots[shader] = slot;
+        return slot;
+    };
     auto pushDraw = [&](const MaterialGpu& mat, const Mat4& model, uint32_t albedoSlot,
                         uint32_t normalSlot) {
         if (drawData.size() >= drawBudget) return;
@@ -1528,6 +1573,15 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         d.flags[2] = (mat.albedo && mat.albedo->isSRGB()) ? 1.0f : 0.0f;
         d.flags[3] = mat.normalMap ? 1.0f : 0.0f;
         d.misc[0] = mat.spriteLighting ? 1.0f : 0.0f;
+        if (mat.shader) {
+            const CodeSlot slot = codeSlot(mat.shader);
+            d.misc[1] = (float)slot.start;
+            d.misc[2] = (float)slot.count;
+            d.pad[0] = mat.shaderParams.x;
+            d.pad[1] = mat.shaderParams.y;
+            d.pad[2] = mat.shaderParams.z;
+            d.pad[3] = mat.shaderParams.w;
+        }
         d.texIndex[0] = (float)albedoSlot;
         d.texIndex[1] = (float)normalSlot;
         drawData.push_back(d);
@@ -1737,24 +1791,25 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
     // the per-draw dynamic offset is relative to that window.
     const VkDeviceSize kWindow = (VkDeviceSize)I.drawUboChunk * stride;
     for (size_t w = 0; w < I.frameSets.size(); ++w) {
-        VkDescriptorBufferInfo infos[5]{};
+        VkDescriptorBufferInfo infos[6]{};
         infos[0] = {I.frameUbo.handle, 0, sizeof(FrameUbo)};
         infos[1] = {I.lightsUbo.handle, 0, sizeof(LightsUbo)};
         infos[2] = {I.shadowUbo.handle, 0, sizeof(ShadowUbo)};
         infos[3] = {I.drawUbo.handle, (VkDeviceSize)w * kWindow, kWindow};
         infos[4] = {I.drawUbo.handle, (VkDeviceSize)w * kWindow, kWindow};
+        infos[5] = {I.shaderCode.handle, 0, VK_WHOLE_SIZE};
         // With cascades off the binding still needs a valid image; the 1x1
         // white array stands in (the shader short-circuits on count == 0).
         VkDescriptorImageInfo shadowImage{};
         shadowImage.sampler = I.nearestClamp;
         shadowImage.imageView = shadows ? I.shadowMap.view : I.whiteArrayView;
         shadowImage.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        VkWriteDescriptorSet writes[5]{};
-        const VkDescriptorType types[5] = {
+        VkWriteDescriptorSet writes[6]{};
+        const VkDescriptorType types[6] = {
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC};
-        for (uint32_t i = 0; i < 5; ++i) {
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
+        for (uint32_t i = 0; i < 6; ++i) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = I.frameSets[w];
             writes[i].dstBinding = i;
@@ -1765,7 +1820,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             else
                 writes[i].pBufferInfo = &infos[i];
         }
-        fn.UpdateDescriptorSets(device, 5, writes, 0, nullptr);
+        fn.UpdateDescriptorSets(device, 6, writes, 0, nullptr);
     }
     // Draw `n` lives in window n / drawUboChunk at offset (n % drawUboChunk) * stride.
     // Set 1 is the one bindless table, identical for every draw.

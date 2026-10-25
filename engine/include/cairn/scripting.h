@@ -355,6 +355,11 @@ public:
     float roughness = -1.0f;
     std::string normalMapPath;       // project-relative tangent-space normal map
     float normalStrength = 1.0f;
+    // A .cshader expression program, or one of the named presets "@ripple",
+    // "@scroll", "@fresnel", "@pulse". Empty = the fixed-function material.
+    // Evaluated per fragment on both backends; see docs/shaders.md.
+    std::string shaderPath;
+    Vec4 shaderParams{1, 1, 1, 1};   // p0..p3, read by the program as p0..p3
     Color emissiveColor{0, 0, 0, 1}; // added in linear space, unaffected by lights
     bool unlit = false;
     CullMode cullMode = CullMode::Back;

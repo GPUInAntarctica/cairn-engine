@@ -8,6 +8,7 @@
 #include "font_internal.h"
 #include "gpu_types.h"
 #include "scene_internal.h"
+#include "shader_library.h"
 
 #include <algorithm>
 #include <cmath>
@@ -102,6 +103,7 @@ struct Renderer::Impl {
     Mat4 invertViewProj;
     bool ortho = false;
     float tanHalfFov = 1.0f, aspect = 1.0f, orthoSize = 5.0f;
+    float shaderTime = 0.0f;   // camera clock handed to material programs
     // Scene atmosphere snapshot (read by workers).
     Color ambient;
     Color ambientLinear;
@@ -1001,6 +1003,30 @@ struct Renderer::Impl {
         float viewDist = V.Length();
         if (viewDist > 1e-6f) V = V / viewDist;
 
+        // Material shader: evaluated before sampling so the albedo and normal
+        // map both see the displaced UV. Its emissive contribution is added
+        // after the lighting branch, on top of the material's own emissive.
+        float shaderEmissive = 0.0f;
+        if (mat.shader) {
+            Vec3 n = (v[0].nw * l[0] + v[1].nw * l[1] + v[2].nw * l[2]) * w;
+            if (n.LengthSq() > 1e-9f) n = n.Normalized(); else n = Vec3(0, 1, 0);
+            ShaderInputs si;
+            si.u = uv.x;
+            si.v = uv.y;
+            si.time = shaderTime;
+            si.ndotv = Vec3::Dot(n, V);
+            si.nx = n.x; si.ny = n.y; si.nz = n.z;
+            si.vx = V.x; si.vy = V.y; si.vz = V.z;
+            si.p[0] = mat.shaderParams.x;
+            si.p[1] = mat.shaderParams.y;
+            si.p[2] = mat.shaderParams.z;
+            si.p[3] = mat.shaderParams.w;
+            const ShaderOutputs so = EvalShader(*mat.shader, si);
+            uv.x += so.du;
+            uv.y += so.dv;
+            shaderEmissive = so.emissive;
+        }
+
         Texture::Wrap wrap = mat.pixelPerfect ? Texture::Wrap::Clamp : Texture::Wrap::Repeat;
         // Trilinear where a mip chain exists; pixel-perfect sprites stay crisp.
         Texture::Filter filter = mat.pixelPerfect
@@ -1162,6 +1188,15 @@ struct Renderer::Impl {
             lg += mat.emissive.g;
             lb += mat.emissive.b;
             r = lr; g = lg; b = lb;
+        }
+
+        if (mat.shader && shaderEmissive != 0.0f) {
+            // The program's emissive output is a mask over the material's
+            // emissive colour; unlit and 2D lighting get it too because a glow
+            // is a property of the shader, not of the lighting model.
+            r += mat.emissive.r * shaderEmissive;
+            g += mat.emissive.g * shaderEmissive;
+            b += mat.emissive.b * shaderEmissive;
         }
 
         if (fogEnabled) {
@@ -1656,6 +1691,19 @@ struct Renderer::Impl {
                 list->liveTextures.push_back(tex);
                 mat.normalMap = tex.get();
             }
+            if (!mr->shaderPath.empty()) {
+                // "@name" is a built-in preset; anything else is a project file.
+                const std::string path = mr->shaderPath[0] == '@' ? mr->shaderPath
+                                                                  : EngineResolvePath(mr->shaderPath);
+                std::string shaderError;
+                std::shared_ptr<MaterialShader> shader =
+                    EngineShaderLibrary().Get(path, &shaderError);
+                if (shader) {
+                    mat.shader = shader.get();
+                    mat.shaderParams = mr->shaderParams;
+                    list->liveShaders.push_back(std::move(shader));
+                }
+            }
             if (mesh->indices.size() < 3) {
                 stats->clipRejected++;
                 continue;
@@ -1847,6 +1895,7 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
     R.tanHalfFov = std::tan(Radians(cam.fov) * 0.5f);
     R.aspect = (float)target_.width / (float)target_.height;
     R.orthoSize = cam.orthoSize;
+    R.shaderTime = cam.time;
     Mat4 invView = cam.view.Inverted();
     R.camRight = invView.TransformDirection(Vec3::Right);
     R.camUp = invView.TransformDirection(Vec3::Up);

@@ -91,6 +91,7 @@ const char* PropKindName(EditorPropKind kind) {
         case EditorPropKind::Asset: return "asset";
         case EditorPropKind::Object: return "object";
         case EditorPropKind::Json: return "json";
+        case EditorPropKind::Shader: return "shader";
     }
     return "float";
 }
@@ -915,7 +916,7 @@ Napi::FunctionReference EngineWrap::constructor;
 
 Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
     EngineWrap::Init(env, exports);
-    exports.Set("engineVersion", Napi::String::New(env, "0.2.3"));
+    exports.Set("engineVersion", Napi::String::New(env, "0.2.4"));
     return exports;
 }
 

@@ -5,6 +5,7 @@
 #include "cairn/profiler.h"
 #include "scene_internal.h"
 #include "script_host.h"
+#include "shader_library.h"
 
 #include <algorithm>
 #include <cctype>
@@ -31,6 +32,10 @@ MeshLibrary& EngineMeshLibrary() {
 }
 TextureLibrary& EngineTextureLibrary() {
     static TextureLibrary lib;
+    return lib;
+}
+ShaderLibrary& EngineShaderLibrary() {
+    static ShaderLibrary lib;
     return lib;
 }
 std::string EngineResolvePath(const std::string& projectPath) {
@@ -472,6 +477,7 @@ void Engine::ReloadAssets() {
     assets_.Scan();
     EngineTextureLibrary().ReloadChanged();
     EngineMeshLibrary().ClearObj();
+    EngineShaderLibrary().ReloadChanged();
 }
 
 void Engine::ReloadScriptLibraries() {
@@ -740,6 +746,7 @@ bool Engine::BuildCameraView(CameraView* out, bool useSceneCamera) const {
     out->ambient = scene_->ambient;
     out->tonemap = (Tonemap)std::clamp(scene_->tonemap, 0, 3);
     out->exposure = scene_->exposure;
+    out->time = time_;
     out->shadowCascades = std::clamp(scene_->shadows, 0, 4);
     out->shadowResolution = std::clamp(scene_->shadowResolution, 256, 4096);
     out->shadowDistance = std::clamp(scene_->shadowDistance, 5.0f, 500.0f);

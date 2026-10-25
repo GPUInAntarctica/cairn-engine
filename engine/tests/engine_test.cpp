@@ -5,6 +5,8 @@
 #include "cairn/texture.h"
 #include "cairn/physics.h"
 #include "scene_internal.h"
+#include "material_shader.h"
+#include "shader_library.h"
 
 #ifdef CAIRN_HAS_VULKAN
 #include "vulkan_memory.h"
@@ -4825,6 +4827,343 @@ static void TestJobs() {
     CHECK(s.indices >= (uint64_t)n);
 }
 
+// ---------------------------------------------------------------------------
+// Material shader programs: the scalar bytecode VM that both backends run.
+// ---------------------------------------------------------------------------
+static void TestMaterialShaderCompiler() {
+    MaterialShader shader;
+    std::string error;
+
+    // Arithmetic, variables and the argument order of the binary/ternary
+    // functions. These values are the contract the GPU interpreter mirrors.
+    CHECK(CompileShaderSource("u * 2 + 0.5", "v - 0.25", "clamp(p0 + p1, 0, 1)",
+                              &shader, &error));
+    CHECK(error.empty());
+    CHECK(shader.stackDepth >= 3 && shader.stackDepth <= kMaxShaderStack);
+    CHECK(!shader.code.empty());
+    ShaderInputs in;
+    in.u = 0.25f;
+    in.v = 0.75f;
+    in.p[0] = 0.2f;
+    in.p[1] = 0.6f;
+    ShaderOutputs out = EvalShader(shader, in);
+    CHECK(NearlyEqual(out.du, 1.0f, 1e-5f));
+    CHECK(NearlyEqual(out.dv, 0.5f, 1e-5f));
+    CHECK(NearlyEqual(out.emissive, 0.8f, 1e-5f));
+
+    // Every function, with values that distinguish a swapped argument (step,
+    // pow, min/max) from a correct one.
+    CHECK(CompileShaderSource(
+        "abs(-3) + sqrt(9) + fract(2.75) + floor(-1.2)",
+        "pow(-2, 2) + min(3, 1) + max(3, 1)",
+        "mix(2, 4, 0.25) + step(0.5, 0.6) + smoothstep(0, 1, 0.5) + clamp(5, 0, 1)",
+        &shader, &error));
+    out = EvalShader(shader, in);
+    CHECK(NearlyEqual(out.du, 4.75f, 1e-5f));      // 3 + 3 + 0.75 - 2
+    CHECK(NearlyEqual(out.dv, 4.0f, 1e-5f));       // pow clamps its base: 0 + 1 + 3
+    CHECK(NearlyEqual(out.emissive, 5.0f, 1e-5f)); // 2.5 + 1 + 0.5 + 1
+
+    // Division by zero is zero, not infinity: one NaN would poison the frame.
+    CHECK(CompileShaderSource("1 / 0", "0 / 0", "1 / 1e-9", &shader, &error));
+    out = EvalShader(shader, in);
+    CHECK(out.du == 0.0f && out.dv == 0.0f && out.emissive == 0.0f);
+
+    // Geometry and clock inputs.
+    CHECK(CompileShaderSource("time", "ndotv", "nx + ny + nz + vx + vy + vz + p2 + p3",
+                              &shader, &error));
+    ShaderInputs geom;
+    geom.time = 2.5f;
+    geom.ndotv = 0.25f;
+    geom.nx = 0.1f; geom.ny = 0.2f; geom.nz = 0.3f;
+    geom.vx = 0.4f; geom.vy = 0.5f; geom.vz = 0.6f;
+    geom.p[2] = 0.7f; geom.p[3] = 0.8f;
+    out = EvalShader(shader, geom);
+    CHECK(NearlyEqual(out.du, 2.5f, 1e-5f));
+    CHECK(NearlyEqual(out.dv, 0.25f, 1e-5f));
+    CHECK(NearlyEqual(out.emissive, 3.6f, 1e-5f));
+
+    // Empty expressions mean "no effect"; a document still needs one output.
+    CHECK(CompileShaderSource("", "", "p0", &shader, &error));
+    CHECK(EvalShader(shader, geom).emissive == 1.0f);
+    Json doc = Json::MakeObject();
+    doc.set("format", "cairn-shader");
+    doc.set("du", "0.125");
+    doc.set("dv", "0");
+    doc.set("emissive", "0.5");
+    doc.set("editorNote", Json::MakeObject());
+    CHECK(CompileShaderDocument(doc, &shader, &error));
+    out = EvalShader(shader, geom);
+    CHECK(NearlyEqual(out.du, 0.125f, 1e-6f));
+    CHECK(NearlyEqual(out.emissive, 0.5f, 1e-6f));
+
+    // Rejections. Each of these must fail to compile instead of evaluating.
+    CHECK(!CompileShaderSource("nope", "", "", &shader, &error));
+    CHECK(!error.empty());
+    CHECK(!CompileShaderSource("1 +", "", "", &shader, &error));
+    CHECK(!CompileShaderSource("1 2", "", "", &shader, &error));
+    CHECK(!CompileShaderSource("sin(", "", "", &shader, &error));
+    CHECK(!CompileShaderSource("sqrt(1, 2)", "", "", &shader, &error));
+    Json wrongFormat = Json::MakeObject();
+    wrongFormat.set("format", "something-else");
+    wrongFormat.set("du", "1");
+    CHECK(!CompileShaderDocument(wrongFormat, &shader, &error));
+    Json noOutputs = Json::MakeObject();
+    noOutputs.set("format", "cairn-shader");
+    CHECK(!CompileShaderDocument(noOutputs, &shader, &error));
+
+    // Depth limit: a right-nested chain pushes one operand per level.
+    std::string deep = "0";
+    for (int i = 0; i < 20; ++i) deep = "1 + (" + deep + ")";
+    CHECK(!CompileShaderSource(deep, "", "", &shader, &error));
+    CHECK(error.find("deeper") != std::string::npos);
+    // Length limit: 40 constants and 39 additions is over 64 instructions.
+    std::string longExpr = "0";
+    for (int i = 0; i < 40; ++i) longExpr += " + 1";
+    CHECK(!CompileShaderSource(longExpr, "", "", &shader, &error));
+    CHECK(error.find("instructions") != std::string::npos);
+
+    // Determinism: the same program and inputs evaluate bit for bit.
+    CHECK(CompileShaderSource("sin(u * 10 + time) * 0.03", "cos(v * 7 - time) * 0.02",
+                              "p0 * pow(1 - ndotv, 3)", &shader, &error));
+    const ShaderOutputs a = EvalShader(shader, geom);
+    const ShaderOutputs b = EvalShader(shader, geom);
+    CHECK(std::memcmp(&a, &b, sizeof(a)) == 0);
+}
+
+static void TestMaterialShaderLibrary() {
+    const std::string dir =
+        (std::filesystem::temp_directory_path() / "cairn-test-material-shader").string();
+    std::filesystem::create_directories(dir);
+    const std::string path = dir + "/wave.cshader";
+    const std::string missingPath = dir + "/created-later.cshader";
+    std::filesystem::remove(missingPath);
+
+    auto write = [](const std::string& file, const std::string& text) {
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out << text;
+    };
+    write(path, "{\"format\":\"cairn-shader\",\"du\":\"0.25\",\"dv\":\"0\",\"emissive\":\"0.5\"}");
+    ShaderLibrary& lib = EngineShaderLibrary();
+    lib.ReloadChanged();
+
+    std::string error;
+    auto shader = lib.Get(path, &error);
+    CHECK(shader != nullptr);
+    CHECK(error.empty());
+    ShaderInputs in;
+    const ShaderOutputs out = EvalShader(*shader, in);
+    CHECK(NearlyEqual(out.du, 0.25f, 1e-6f));
+    CHECK(NearlyEqual(out.emissive, 0.5f, 1e-6f));
+    // A second lookup returns the cached program without re-reading the file.
+    CHECK(lib.Get(path, &error) == shader);
+
+    // Presets resolve by name, and an unknown one fails without a picture.
+    auto ripple = lib.Get("@ripple", &error);
+    CHECK(ripple != nullptr);
+    CHECK(lib.Get("@no-such-preset", &error) == nullptr);
+
+    // A missing path is an error, but its cache entry is retried on reload:
+    // creating the file next to a scene must not need a process restart.
+    CHECK(lib.Get(missingPath, &error) == nullptr);
+    write(missingPath, "{\"format\":\"cairn-shader\",\"emissive\":\"1\"}");
+    lib.ReloadChanged();
+    CHECK(lib.Get(missingPath, &error) != nullptr);
+
+    // A file edit is picked up only when its timestamp changes.
+    write(path, "{\"format\":\"cairn-shader\",\"emissive\":\"1 +\"}");
+    std::error_code ec;
+    auto stamp = std::filesystem::last_write_time(path, ec);
+    if (!ec) std::filesystem::last_write_time(path, stamp + std::chrono::seconds(2), ec);
+    lib.ReloadChanged();
+    CHECK(lib.Get(path, &error) == nullptr);
+    CHECK(!error.empty());
+}
+
+// A flat unlit quad: albedo and a program's emissive are the only things that
+// move a pixel, which keeps the cross-backend comparison free of the texture
+// filtering differences that make exact per-pixel equality the wrong test for
+// textured surfaces.
+static void TestMaterialShaderBackends() {
+    const std::string dir =
+        (std::filesystem::temp_directory_path() / "cairn-test-material-shader-backends").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    std::filesystem::create_directories(dir + "/Assets/Shaders");
+    // Reading order: top-left red, top-right green, bottom-left white,
+    // bottom-right yellow. Enough distinct edges to measure both UV axes.
+    WriteTestBmpSheet(dir + "/Assets/Textures/quadrants.bmp",
+                      255, 0, 0, 0, 255, 0, 255, 255, 255, 255, 255, 0, 64, 64);
+    auto write = [](const std::string& file, const std::string& text) {
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out << text;
+    };
+    write(dir + "/Assets/Shaders/du.cshader", "{\"format\":\"cairn-shader\",\"du\":\"0.1\",\"dv\":\"0\"}");
+    write(dir + "/Assets/Shaders/dv.cshader", "{\"format\":\"cairn-shader\",\"du\":\"0\",\"dv\":\"0.1\"}");
+    write(dir + "/Assets/Shaders/broken.cshader", "{\"format\":\"cairn-shader\",\"du\":\"1 +\"}");
+    EngineShaderLibrary().ReloadChanged();
+
+    auto build = [&](Engine& engine, int backend, const std::string& shader, bool textured) {
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(160, 120);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        scene.tonemap = 0;  // Tonemap::None: a flat quad's colours stay literal
+        scene.exposure = 1.0f;
+
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 6);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->skyEnabled = false;
+        cc->clearColor = Color(0, 0, 1, 1);
+
+        GameObject* quad = scene.CreateEntity("Quad");
+        quad->transform().scale = Vec3(4, 4, 1);
+        auto* mr = quad->AddComponent<MeshRenderer>();
+        mr->mesh = MeshRenderer::MeshSource::Quad;
+        mr->unlit = true;
+        mr->cullMode = MeshRenderer::CullMode::Off;  // the camera sees the back face
+        mr->albedoColor = textured ? Color(1, 1, 1, 1) : Color(0.1f, 0.1f, 0.1f, 1);
+        mr->emissiveColor = Color(1, 1, 1, 1);
+        if (textured) mr->albedoTexturePath = "Assets/Textures/quadrants.bmp";
+        if (!shader.empty()) mr->shaderPath = shader;
+    };
+    auto mean = [](Engine& engine) {
+        const FrameTarget& t = engine.frame();
+        double sum = 0.0;
+        for (size_t i = 0; i < t.color.size(); i += 4)
+            sum += (double)t.color[i] + (double)t.color[i + 1] + (double)t.color[i + 2];
+        return sum / ((double)t.color.size() * 0.75);
+    };
+    auto frameOf = [](Engine& engine) { return engine.frame().color; };
+
+    // ---- emissive programs, frame means -----------------------------------
+    auto emissiveScene = [&](int backend, const std::string& shader, float strength,
+                             std::vector<uint8_t>* pixels) {
+        Engine engine;
+        build(engine, backend, shader, /*textured=*/false);
+        MeshRenderer* mr = engine.scene().objects.back()->GetComponent<MeshRenderer>();
+        mr->shaderParams = Vec4(strength, 1, 1, 1);
+        engine.RenderGameFrame();
+        if (pixels) *pixels = frameOf(engine);
+        return mean(engine);
+    };
+
+    const double baseSw = emissiveScene(2, "", 1.0f, nullptr);
+    const double baseGpu = emissiveScene(1, "", 1.0f, nullptr);
+    CHECK(std::fabs(baseSw - baseGpu) < 1.0);
+
+    const double fresnelSw = emissiveScene(2, "@fresnel", 2.0f, nullptr);
+    const double fresnelGpu = emissiveScene(1, "@fresnel", 2.0f, nullptr);
+    // A rim light must actually add light (the quad covers about a quarter of
+    // the frame), and both backends must add the same amount.
+    CHECK(fresnelSw > baseSw + 20.0);
+    CHECK(fresnelGpu > baseGpu + 20.0);
+    CHECK(std::fabs(fresnelSw - fresnelGpu) < 1.5);
+
+    // Time reaches both: pulse starts at half strength and rises with play
+    // time, so the same number of fixed steps shifts both means together.
+    auto pulseAt = [&](int backend, bool advance) {
+        Engine engine;
+        build(engine, backend, "@pulse", /*textured=*/false);
+        engine.scene().objects.back()->GetComponent<MeshRenderer>()->shaderParams =
+            Vec4(1, 1, 1, 1);
+        if (advance) {
+            engine.Play();
+            for (int i = 0; i < 30; ++i) engine.Step();
+        }
+        engine.RenderGameFrame();
+        return mean(engine);
+    };
+    const double pulseSw0 = pulseAt(2, false), pulseGpu0 = pulseAt(1, false);
+    const double pulseSw1 = pulseAt(2, true), pulseGpu1 = pulseAt(1, true);
+    CHECK(pulseSw1 > pulseSw0 + 10.0);
+    CHECK(pulseGpu1 > pulseGpu0 + 10.0);
+    CHECK(std::fabs((pulseSw1 - pulseSw0) - (pulseGpu1 - pulseGpu0)) < 1.5);
+
+    // ---- UV displacement, measured on a quadrant texture ------------------
+    struct Edges {
+        int minX = -1, maxX = -1, minY = -1, maxY = -1;
+        int duEdge = -1;  // red -> green boundary on the upper row
+        int dvEdge = -1;  // red -> white boundary in the left column
+        int width() const { return maxX - minX + 1; }
+        int height() const { return maxY - minY + 1; }
+    };
+    auto edges = [](Engine& engine) {
+        const FrameTarget& t = engine.frame();
+        const int w = t.width, h = t.height;
+        auto at = [&](int x, int y, int c) {
+            return (int)t.color[((size_t)y * (size_t)w + (size_t)x) * 4 + (size_t)c];
+        };
+        Edges e;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                if (at(x, y, 0) > 128 || at(x, y, 1) > 128) {
+                    if (e.minX < 0 || x < e.minX) e.minX = x;
+                    if (x > e.maxX) e.maxX = x;
+                    if (e.minY < 0 || y < e.minY) e.minY = y;
+                    if (y > e.maxY) e.maxY = y;
+                }
+        if (e.minX < 0) return e;
+        const int row = e.minY + (e.height() + 3) / 4;
+        for (int x = e.minX; x <= e.maxX; ++x)
+            if (at(x, row, 1) > 200 && at(x, row, 0) < 80) { e.duEdge = x; break; }
+        const int col = e.minX + (e.width() + 3) / 4;
+        for (int y = e.minY; y <= e.maxY; ++y)
+            if (at(col, y, 0) > 200 && at(col, y, 1) > 200 && at(col, y, 2) > 200) {
+                e.dvEdge = y;
+                break;
+            }
+        return e;
+    };
+    auto uvScene = [&](int backend, const std::string& shader) {
+        Engine engine;
+        build(engine, backend, shader, /*textured=*/true);
+        engine.RenderGameFrame();
+        return edges(engine);
+    };
+
+    const Edges noneSw = uvScene(2, ""), noneGpu = uvScene(1, "");
+    CHECK(noneSw.minX >= 0 && noneGpu.minX >= 0);
+    CHECK(std::abs(noneSw.minX - noneGpu.minX) <= 1);
+    CHECK(noneSw.duEdge > noneSw.minX && noneSw.dvEdge > noneSw.minY);
+    CHECK(noneGpu.duEdge == noneSw.duEdge && noneGpu.dvEdge == noneSw.dvEdge);
+
+    const Edges duSw = uvScene(2, "Assets/Shaders/du.cshader");
+    const Edges duGpu = uvScene(1, "Assets/Shaders/du.cshader");
+    const Edges dvSw = uvScene(2, "Assets/Shaders/dv.cshader");
+    const Edges dvGpu = uvScene(1, "Assets/Shaders/dv.cshader");
+
+    const int expectedDu = (int)std::lround(noneSw.width() * 0.1f);
+    const int expectedDv = (int)std::lround(noneSw.height() * 0.1f);
+    CHECK(std::abs((noneSw.duEdge - duSw.duEdge) - expectedDu) <= 3);
+    CHECK(std::abs((noneSw.dvEdge - dvSw.dvEdge) - expectedDv) <= 3);
+    CHECK(std::abs((noneGpu.duEdge - duGpu.duEdge) - expectedDu) <= 3);
+    CHECK(std::abs((noneGpu.dvEdge - dvGpu.dvEdge) - expectedDv) <= 3);
+    // One axis at a time: du must not move the vertical edge, dv not the
+    // horizontal one, and both backends must land on the same pixel.
+    CHECK(std::abs(duSw.dvEdge - noneSw.dvEdge) <= 1);
+    CHECK(std::abs(dvSw.duEdge - noneSw.duEdge) <= 1);
+    CHECK(std::abs(duSw.duEdge - duGpu.duEdge) <= 1);
+    CHECK(std::abs(dvSw.dvEdge - dvGpu.dvEdge) <= 1);
+
+    // ---- a broken program renders like no program -------------------------
+    // The software path is the reference, so its frames are byte-comparable.
+    Engine good;
+    build(good, 2, "", /*textured=*/false);
+    good.RenderGameFrame();
+    const std::vector<uint8_t> reference = frameOf(good);
+    Engine broken;
+    build(broken, 2, "Assets/Shaders/broken.cshader", /*textured=*/false);
+    broken.RenderGameFrame();
+    CHECK(frameOf(broken) == reference);
+    std::string error;
+    CHECK(EngineShaderLibrary().Get(dir + "/Assets/Shaders/broken.cshader", &error) == nullptr);
+    CHECK(!error.empty());
+}
+
 int main() {
     Log::SetEchoStdout(false);
     TestMath();
@@ -4869,6 +5208,9 @@ int main() {
     TestTriggerAndEnabled();
     TestScripts();
     TestPbrMaterials();
+    TestMaterialShaderCompiler();
+    TestMaterialShaderLibrary();
+    TestMaterialShaderBackends();
     TestTextureCache();
     TestAssetDatabase();
     TestEntityIdentity();

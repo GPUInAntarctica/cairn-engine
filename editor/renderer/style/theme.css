@@ -601,6 +601,10 @@ button.tab { font-family: var(--ui); background: transparent; border: 0; border-
 /* Colour is a fixed-width swatch plus a fluid alpha slider, so a colour row
    reads as a pair rather than as one ambiguous control. */
 .prop-color { display: flex; gap: var(--sp-1-5); align-items: center; min-width: 0; }
+/* Shader picker: a text field with a datalist of presets and files. The
+   wrapper exists only so the field fills the value column like any input. */
+.shader-field { display: flex; min-width: 0; }
+.shader-field input { flex: 1; min-width: 0; }
 .add-component-row { padding: var(--sp-2) var(--sp-2-5); }
 
 /* ---- controls ------------------------------------------------------------

@@ -70,9 +70,11 @@
 | 0.2.2 | 构建：插件在“头文件真正所在的 Node 安装”上编译（Windows CI 的 `npm run build` 不再误报缺头文件） | `nodeIncludeDir()` 只看了运行脚本的解释器旁边的两个位置，而 Node 安装的形状不止一种（`<root>/bin/node`、`<root>/node.exe`、`<root>/<arch>/node.exe`）：Windows 的构建在引擎 DLL 已经产出之后才停在这一步，看起来像缺 SDK，其实是搜索面太窄。现在 `findNodeDevInstall({execPaths, env})` 从解释器**与 PATH 上每个 `node`** 的祖先目录向上找，并读 `NODE_ROOT_DIR` / `npm_config_nodedir` / `NVM_HOME` / Windows 安装路径 / node-gyp 缓存；`node_api.h` 是标记（N-API 插件真正编译的那一个），`node.lib` 从同一批根上读，Windows 的链接于是与头文件同源。失败时列出搜过的每个根目录，成功时打印 `[cairn] node -> headers ... / lib ...`。`test/build.js` 增至 19 项（版本化布局、`bin/` 布局、Windows 平铺布局、导入库、缺失与已搜清单），四次变异各自被抓住；Windows CI 另在构建前打印 Node 安装布局，便于下次对齐 |
 | 0.2.3 | 性能：GPU 帧的时间花在 GPU 上，而不是读回像素上 | Vulkan 后端离屏渲染，每帧经同一块暂存缓冲区读回，而 `CreateBuffer` 只要了 `HOST_VISIBLE \| HOST_COHERENT`——在桌面 GPU 上这就是未缓存的 BAR 堆，主机读 1920x1080 的颜色与深度约 0.5 GB/s。1080p 的 31.5 ms 一帧里 30.8 ms 是两次 `std::memcpy`，而 fence 等待量到 0.00 ms（GPU 早已完成），四段（record / submit / wait / copy）插桩把 98% 的时间钉在 copy 上；一块地面加一个立方体因此在 Vulkan 上 31.8 fps，反而低于软件光栅器的 41.9 fps。现在读回缓冲区**偏好** `HOST_CACHED`：选择是 `HOST_VISIBLE \| HOST_COHERENT \| HOST_CACHED` 与 `HOST_VISIBLE \| HOST_COHERENT` 两趟搜索，没有缓存堆的设备分配到的内存与从前逐位相同。同一场景 640x360 / 1280x720 / 1920x1080 = 0.2 / 0.7 / 1.5 ms（17 / 20 / 21 倍），软件参考 720p 仍为 11.1 ms。画面不变：同一张 1280x720 游戏帧两条路 SHA-256 相同（`70d6c55405f05a71c5292bc6…`），耗时 0.63 ms 对 14.34 ms，三条跨后端比对测试原样通过。选择逻辑抽成纯函数 `engine/src/vulkan_memory.h`（`SelectType` / `SelectStagingType`），后端所有分配点（缓冲区、图像、贴图）都走它且原有取舍不变；`TestVulkanReadbackMemory` 用六个合成堆（设备本地、两种主机堆，以及各只带一个必需属性的三个诱饵）钉住缓存堆优先、未要求缓存时选一致堆、不可映射的堆永不被选、没有缓存堆时偏好被降级、没有设备本地堆时报“无答案”而不是退回主机堆，`TestVulkanReadbackSeesLatestFrame` 钉住缓存映射的新风险（同一位置两帧逐像素相同、相机移动后颜色与深度都变、回到原位第一帧原样重现）。六次变异各自被抓住（2 / 4 / 12 / 3 / 4 / 4 项失败）；GPU 路径在 `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` 下无消息（同一个层对故意泄漏缓冲区的独立程序会报 VUID）。CLI 529 项不变 |
 
+| 0.2.4 | 渲染质量：材质着色器（逐片元的表达式程序，两条后端逐条指令一致） | 材质此前只能配置、不能编程：反照率、平铺、金属度、粗糙度、自发光都是固定参数，做一个水波、瀑布滚动或边缘光只能烘一张序列图或改引擎重编；引擎自己的 GLSL 阶段在构建期编成 SPIR-V，工程无法添加一个。现在 `MeshRenderer.shaderPath` 可以指向工程里的 `.cshader`（或内置 `@ripple` / `@scroll` / `@fresnel` / `@pulse`），`shaderParams` 是一个 Vec4，程序里读作 `p0`–`p3`，所以选了预设不调参数也有画面。**程序是标量栈字节码，不是 GPU 语言**：`.cshader` 里 `du` / `dv` / `emissive` 三条表达式，变量是 `u`、`v`、`time`、`ndotv`、几何法线、视线与四个参数，函数是常规标量函数；`material_shader.cpp` 解析成 `(opcode,a,b,c)` 指令并在 CPU 上解释给软件光栅器，`mesh.frag` 用同一份上传到 storage buffer 的指令解释给 GPU——于是软件路径仍是"GPU 实际执行的那个程序"的参考实现，而不是两种指望它们一致的方言。限制是刻意的：64 条指令、栈深 16、无分支无循环无采样，既不会让一段工程表达式卡住一帧，也让两个解释器能逐行对照。语义钉死：`du`/`dv` 在乘 `tiling` **之前**加到网格 UV 上，反照率与法线贴图共用这个偏移，位移不会让两者错位；`emissive` 乘材质的 `emissiveColor`，在光照分支之后、雾之前加上，因此 `unlit` 材质也会发光。三个护栏防止一条表达式污染整帧：除数为 `\|b\| < 1e-8` 时结果是 0，`sqrt` / `pow` 的底数夹到 0（所以 `pow(-2,2) == 0` 而不是 NaN），未知操作码清空栈、输出"无效果"。`time` 取播放时间：编辑模式为 0、只在 `Update` 里推进，所以截图可重复、两条后端拿到同一个钟。`shader_library.{h,cpp}` 按修改时间缓存，坏程序只在日志里报一次并退回固定功能材质，时间戳变了才重编；加载失败的路径在 `assetsReload` 时重试，先写场景后创建文件不需要重启进程。编辑器把 `shaderPath` 作为新的反射种类 `EditorPropKind::Shader` 画成带 datalist 的文本框（四个预设 + `Assets` 下所有 `.cshader`），中英标签都补齐。测试看画面而不只看解析器：`TestMaterialShaderCompiler` 钉住运算、参数顺序、每个函数、三个护栏、指令/栈上限、文档格式与重复求值逐位相同；`TestMaterialShaderLibrary` 覆盖预设、mtime 缓存、缺失重试与被拒文件；`TestMaterialShaderBackends` 在两条后端上渲染平坦 unlit 四边形——`@fresnel` 让两端帧均值各升高 20 级以上且两端相差 <1.5，`@pulse` 随时间推进在两端移动同样的量，硬边四象限贴图把 `du`/`dv` 量成边缘位置、两端落在同一像素且位移是四边形边长的预期比例。平坦基线两端最大差 12、均值 0.104，菲涅尔帧最大差 16、均值 0.147（带贴图时滤波差异让早先的比较毫无意义：均值 45、最大 123，这就是新增光照测试改用无贴图表面的原因）。坏程序在参考路径上与没有程序逐字节相同。七次变异各自被抓住并回退（`pow` 夹底 1 项、缺失重试 1 项、CPU UV 偏移 4 项、GPU UV 偏移 4 项、GPU 程序长度清零 8 项、GPU 时钟清零 2 项、GPU 自发光项丢弃 4 项）；GPU 路径在 `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` 下无消息（承载程序的 storage buffer 已在销毁时释放）。参考 [docs/shaders.md](shaders.md) |
+
 每个版本的细节与验证记录见 [CHANGELOG](../CHANGELOG.md)。
 
-## 当前优先级（0.2.3 之后）
+## 当前优先级（0.2.4 之后）
 
 定的三条主线，按此排序：
 
@@ -81,7 +83,9 @@
    3D 侧刚补上 GPU 网格的正面朝向与 unlit（0.1.35：默认立方体此前在 Vulkan 上是里外翻的），
    2D 精灵在 GPU 编辑器帧里的错位也修掉了（0.2.0：线段顶点盖掉了精灵顶点），方向光阴影在
    GPU 上缺失也修掉了（0.2.1：着色器读的是深度图的镜像行），网格内边与精灵对角线的一像素
-   暗缝一并关掉；下一个可见缺口是点/聚光阴影、实时光源数量，以及轮廓边缘的半像素约定。
+   暗缝一并关掉；0.2.4 起材质可以携带自己的表达式程序（`du`/`dv`/`emissive`，两条后端执行同一份
+   字节码），水波、滚动、边缘光与呼吸泛光不必再烘序列图。下一个可见缺口是点/聚光阴影、
+   实时光源数量，以及轮廓边缘的半像素约定。
 2. **AI 自己画素材做游戏（Agent 原生）。** `drawing.md` 的闭环已经能画精灵/瓦片/图集，
    图集会播、能按名字播、也由参数与过渡驱动（0.1.25 切帧、0.1.27 走帧、0.1.28 命名、
    0.1.29 状态机、0.1.30 逐帧时长、0.1.31 动画事件、0.1.32 剪辑自带贴图）：下一步是过渡的插值（交叉淡入与混合树），

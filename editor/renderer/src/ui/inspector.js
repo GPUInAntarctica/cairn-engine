@@ -282,6 +282,7 @@ export class Inspector {
             case 'color': return colorRow(md.label, read, commit);
             case 'enum': return enumRow(md.label, read, md.options, commit);
             case 'asset': return assetRow(md.label, read, md.assetKind, commit);
+            case 'shader': return shaderRow(md.label, read, commit);
             case 'object': return textRow(md.label, read, commit);
             case 'json': return jsonRow(md.label, read, commit);
             default: return textRow(md.label, read, commit);
@@ -451,6 +452,46 @@ function textRow(label, read, commit) {
     row._refresh = () => { input.value = read() ?? ''; };
     return row;
 }
+
+// A shader is either a built-in preset ("@ripple") or a project .cshader file.
+// The field accepts both, so a custom shader needs no editor dialog; the
+// datalist lists what is available without constraining what can be typed.
+const SHADER_PRESETS = ['@ripple', '@scroll', '@fresnel', '@pulse'];
+
+function shaderRow(label, read, commit) {
+    const listId = `shader-list-${++shaderRow.serial}`;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.spellcheck = false;
+    input.setAttribute('list', listId);
+    input.placeholder = t('shader.placeholder');
+    input.value = read() ?? '';
+
+    const list = document.createElement('datalist');
+    list.id = listId;
+    for (const preset of SHADER_PRESETS) {
+        const option = document.createElement('option');
+        option.value = preset;
+        option.label = t(`shader.preset.${preset.slice(1)}`);
+        list.appendChild(option);
+    }
+    for (const file of listAssets(['.cshader'])) {
+        const option = document.createElement('option');
+        option.value = file;
+        list.appendChild(option);
+    }
+
+    const wrap = document.createElement('span');
+    wrap.className = 'shader-field';
+    wrap.appendChild(input);
+    wrap.appendChild(list);
+
+    input.addEventListener('change', () => commit(input.value.trim()));
+    const row = propRow(label, wrap, false);
+    row._refresh = () => { input.value = read() ?? ''; };
+    return row;
+}
+shaderRow.serial = 0;
 
 // A structured property holds JSON text: an edit that does not parse is
 // rejected and the field repaints with what the engine still has.

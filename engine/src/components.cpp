@@ -151,6 +151,8 @@ const std::vector<PropertyDef>& MeshRendererDefs() {
         Field<MeshRenderer, &MeshRenderer::roughness>("roughness", "Roughness (-1 = from shininess)", EditorPropKind::Float),
         AssetField<MeshRenderer, &MeshRenderer::normalMapPath>("normalMapPath", "Normal Map", "texture"),
         Field<MeshRenderer, &MeshRenderer::normalStrength>("normalStrength", "Normal Strength", EditorPropKind::Float),
+        Field<MeshRenderer, &MeshRenderer::shaderPath>("shaderPath", "Shader", EditorPropKind::Shader),
+        Field<MeshRenderer, &MeshRenderer::shaderParams>("shaderParams", "Shader Params", EditorPropKind::Vec4),
         Field<MeshRenderer, &MeshRenderer::emissiveColor>("emissiveColor", "Emissive", EditorPropKind::Color),
         Field<MeshRenderer, &MeshRenderer::unlit>("unlit", "Unlit", EditorPropKind::Bool),
         EnumField<MeshRenderer, &MeshRenderer::cullMode>("cullMode", "Cull Mode", kCullModes, 3),

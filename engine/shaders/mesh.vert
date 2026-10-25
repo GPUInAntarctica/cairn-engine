@@ -28,6 +28,7 @@ layout(std140, set = 0, binding = 0) uniform FrameUBO {
     vec4 skyBottom;
     vec4 viewport;         // x width, y height, z aspect, w orthoSize
     vec4 clearColor;       // rgb, used when the sky is disabled
+    vec4 timeParams;       // x animation clock for material shaders
 } frame;
 
 struct DrawUbo {

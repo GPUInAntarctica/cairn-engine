@@ -61,6 +61,10 @@ struct CameraView {
     Color ambient{0.26f, 0.28f, 0.33f};
     Tonemap tonemap = Tonemap::ACES;
     float exposure = 1.0f;
+    // Animation clock handed to material shader programs (`time`). It follows
+    // play time, so a screenshot of a stopped scene is reproducible and
+    // runtime.step advances it.
+    float time = 0.0f;
     // Directional shadow mapping: 0 disables, 1-4 cascades.
     int shadowCascades = 2;
     int shadowResolution = 1024;   // per cascade

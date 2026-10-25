@@ -96,6 +96,12 @@ export const dict = {
     'comp.script.pickClass': '脚本类',
     'entity.tag': '标签',
     'entity.static': '静态',
+    // 材质着色器选择器（MeshRenderer.shaderPath）
+    'shader.placeholder': '@预设 或 Assets/Shaders/name.cshader',
+    'shader.preset.ripple': '波纹',
+    'shader.preset.scroll': '滚动',
+    'shader.preset.fresnel': '菲涅尔边缘光',
+    'shader.preset.pulse': '呼吸泛光',
     'insp.sceneSettings': '场景设置',
     'insp.gravity': '重力',
     'insp.ambient': '环境光',
