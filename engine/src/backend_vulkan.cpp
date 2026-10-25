@@ -11,7 +11,6 @@
 
 #include "cairn/log.h"
 #include "vk_loader.h"
-#include "vulkan_memory.h"
 
 #ifdef CAIRN_HAS_VULKAN
 
@@ -23,6 +22,7 @@
 #include <utility>
 
 #include "shaders_spirv.h"
+#include "vulkan_memory.h"
 
 namespace Cairn {
 namespace {

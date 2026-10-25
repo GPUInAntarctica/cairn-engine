@@ -170,6 +170,73 @@ const find = (execPaths, env = {}) =>
     check(r.searched.length > 0, 'the absence report lists the roots that were searched');
 }
 
+// ---------------------------------------------------------------------------
+console.log('build: Vulkan headers are optional');
+// ---------------------------------------------------------------------------
+// The backend is compiled without CAIRN_HAS_VULKAN on machines that have no
+// headers, and CMake turns the option off when they or glslc are missing. An
+// include of <vulkan/vulkan.h> - directly or through vulkan_memory.h - at file
+// scope turns that optional backend into a hard build dependency, which is what
+// stopped CI on a runner without the Vulkan SDK. vk_loader.h guards its own
+// include and is deliberately not part of the pattern. vulkan_memory.h is the
+// one gateway that names <vulkan/vulkan.h> directly; it is allowed to, because
+// every translation unit that includes the gateway must guard that include.
+function unguardedVulkanIncludes(source, isGateway = false) {
+    const stack = [];
+    const found = [];
+    source.split('\n').forEach((line, index) => {
+        const text = line.trim();
+        if (/^#ifdef\b/.test(text)) {
+            stack.push({ guard: text.slice(6).trim() === 'CAIRN_HAS_VULKAN', inElse: false });
+        } else if (/^#ifndef\b/.test(text)) {
+            stack.push({ guard: false, inElse: false });
+        } else if (/^#if\b/.test(text)) {
+            const cond = text.slice(3);
+            stack.push({
+                guard: /defined\s*\(?\s*CAIRN_HAS_VULKAN\b/.test(cond) && !/!\s*defined/.test(cond),
+                inElse: false,
+            });
+        } else if (/^#elif\b/.test(text)) {
+            const frame = stack[stack.length - 1];
+            if (frame) {
+                const cond = text.slice(5);
+                frame.guard = /defined\s*\(?\s*CAIRN_HAS_VULKAN\b/.test(cond) && !/!\s*defined/.test(cond);
+                frame.inElse = false;
+            }
+        } else if (/^#else\b/.test(text)) {
+            const frame = stack[stack.length - 1];
+            if (frame) frame.inElse = true;
+        } else if (/^#endif\b/.test(text)) {
+            stack.pop();
+        } else if (/#include\s*[<"](?:vulkan\/vulkan\.h|vulkan_memory\.h)[>"]/.test(text)) {
+            if (isGateway && /<vulkan\/vulkan\.h>/.test(text)) return;
+            if (!stack.some(f => f.guard && !f.inElse)) found.push({ line: index + 1, text });
+        }
+    });
+    return found;
+}
+
+const engineRoot = path.join(root, 'engine');
+const vulkanViolations = [];
+for (const sub of ['src', 'tests', 'include']) {
+    const dir = path.join(engineRoot, sub);
+    for (const file of fs.readdirSync(dir)) {
+        if (!/\.(?:cpp|cc|h|hpp)$/.test(file)) continue;
+        const full = path.join(dir, file);
+        for (const hit of unguardedVulkanIncludes(fs.readFileSync(full, 'utf8'),
+                                                 file === 'vulkan_memory.h'))
+            vulkanViolations.push(`${path.relative(root, full)}:${hit.line}`);
+    }
+}
+check(vulkanViolations.length === 0,
+    'every Vulkan include is behind CAIRN_HAS_VULKAN', vulkanViolations.slice(0, 6).join(', '));
+check(unguardedVulkanIncludes('#include <vulkan/vulkan.h>\n').length === 1,
+    'an unguarded include is detected');
+check(unguardedVulkanIncludes('#ifdef CAIRN_HAS_VULKAN\n#include "vulkan_memory.h"\n#endif\n').length === 0,
+    'a guarded include is accepted');
+check(unguardedVulkanIncludes('#ifdef CAIRN_HAS_VULKAN\n#else\n#include "vulkan_memory.h"\n#endif\n').length === 1,
+    'the else branch of the guard is not protected');
+
 fs.rmSync(scratch, { recursive: true, force: true });
 
 console.log(`build: ${checks - failures}/${checks} checks passed`);

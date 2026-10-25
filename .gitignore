@@ -6,6 +6,7 @@ build/
 engine/build/
 engine/build-asan/
 engine/build-dbg/
+engine/build-novulkan/
 editor/renderer/dist/
 *.node
 *.so

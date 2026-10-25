@@ -2,6 +2,15 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.7] - 2026-10-25
+
+### Build: a machine without Vulkan headers builds again
+- **`npm run build` stopped at `fatal error: vulkan/vulkan.h: No such file or directory`.** The backend is optional by construction: CMake defines `CAIRN_HAS_VULKAN` only when both the headers and `glslc` are found, and `backend_vulkan.cpp` has a stub that reports the backend unavailable so the software rasterizer takes over. The memory-selection header added in 0.2.3 (`vulkan_memory.h`) was included above that `#ifdef`, and it names `<vulkan/vulkan.h>` itself, so a build without the Vulkan SDK still reached the include and failed in the engine library before the addon or renderer were built. Every CI job hit it. The include now sits inside the guard, beside the other Vulkan-only headers.
+- **The invariant is checked without a compiler.** `test/build.js` walks `engine/src`, `engine/tests` and `engine/include` with a small preprocessor-aware scan: an include of `<vulkan/vulkan.h>` or `vulkan_memory.h` must sit inside a `CAIRN_HAS_VULKAN` branch, and the `#else` of that branch does not count. `vulkan_memory.h` may name the Vulkan header itself because every file that includes it has to be guarded; `vk_loader.h` guards its own include. Three synthetic cases pin the scanner (unguarded, guarded, else branch), bringing the build suite from 19 to **23 checks**.
+- **The failure was reproduced and the fix verified against it.** Compiling `backend_vulkan.cpp` with an include path that omits `/usr/include/vulkan` reports the same missing header with the include outside the guard, and compiles cleanly with it inside; the compiler's dependency output lists no `vulkan/vulkan.h` at all in the fallback configuration and exactly one in the Vulkan configuration, and the engine unit tests pass in the no-Vulkan tree. Moving the include back out is also caught by the build suite.
+- **CI now builds the fallback explicitly.** The Linux job configures a second tree with `-DCAIRN_ENABLE_VULKAN=OFF` and builds it, so a runner image that later ships the headers cannot hide a regression in the stub path.
+- **`engine/CMakeLists.txt` carries 0.2.7.** It had stayed at 0.2.5 while `package.json` moved on, so the shared library's version did not track the release.
+
 ## [0.2.6] - 2026-10-25
 
 ### Editor: transform drags follow the pointer, on one axis at a time
