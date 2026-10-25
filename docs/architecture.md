@@ -32,9 +32,9 @@ Cairn 由四个主要部分组成：**C++ 引擎运行时**、**N-API 插件**�
 两条光栅化路径共用同一个前端：`GatherScene()` 产出 `FrameDrawList`（不透明网格、2D 项、阴影投射体、调试线、灯光、级联矩阵），`FitCascadeSet()` 拟合阴影视锥，之后才分派到某个后端。
 
 - **Vulkan（默认）。** `RenderBackend::Auto` 在运行时探测到可用的 Vulkan 1.3 设备时走 GPU，否则静默回退软件；`RenderBackend::Vulkan` 强制 GPU，失败会记日志并回退。GPU 帧最后用 `vkCmdCopyImageToBuffer` 阻塞回读，因此宿主拿到的始终是一份可 blit 的像素。
-- **软件。** `RenderBackend::Software` 强制 CPU 光栅化，MSAA 与逐像素阴影统计（`RenderStats::shadowedPixels`）只在这条路径上有定义；像素级断言的测试都固定走这条路径。
+- **软件。** `RenderBackend::Software` 强制 CPU 光栅化，用逐像素覆盖率抗锯齿；像素级断言的测试都固定走这条路径作为参考实现。
 
-两条路径共用 `FrameDrawList` 里的几何、材质、灯光与级联矩阵，因此剔除、排序与阴影视锥拟合不会在两边漂移。差异集中在光栅化本身：MSAA 与逐像素阴影统计（GPU 上阴影由硬件解析，统计量恒为 0），以及 y 轴翻转——Vulkan 的裁剪空间 y 向下，所有顶点阶段翻转 y、面朝向随之取顺时针，阴影查找也必须用同一套坐标（`shadow.vert` 翻转后，采样不能再翻一次）。
+两条路径共用 `FrameDrawList` 里的几何、材质、灯光与级联矩阵，因此剔除、排序与阴影视锥拟合不会在两边漂移。差异集中在光栅化本身：MSAA 只在 Vulkan 上生效，以及 y 轴翻转——Vulkan 的裁剪空间 y 向下，所有顶点阶段翻转 y、面朝向随之取顺时针，阴影查找也必须用同一套坐标（`shadow.vert` 翻转后，采样不能再翻一次）。`RenderStats::shadowedPixels` 两条后端都有定义：软件侧在着色时按同一判据累加，Vulkan 侧由片元阶段的原子计数在 fence 之后回读。
 
 场景设置 `renderBackend`（auto/vulkan/software）与 `msaa` 决定选择；环境变量 `CAIRN_RENDER_BACKEND` 可在进程级覆盖（测试套件用它把渲染固定在 CPU 上，避免数百次阻塞回读抢占显卡）。
 

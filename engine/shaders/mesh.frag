@@ -79,6 +79,14 @@ layout(std430, set = 0, binding = 5) readonly buffer ShaderCode {
     ShaderInsn code[];
 } shaders;
 
+// One atomic counter for the whole frame: fragment invocations whose shadow
+// lookup darkened the pixel. The backend clears it before recording and reads
+// it after the fence, so `RenderStats::shadowedPixels` means the same thing on
+// both backends (the software rasterizer counts the same predicate in C++).
+layout(std430, set = 0, binding = 6) buffer ShadowCounter {
+    uint shadowedPixels;
+} shadowCounter;
+
 // Opcodes, matching enum class ShaderOp in material_shader.h.
 const int kOpConst = 0;
 const int kOpU = 1;
@@ -358,6 +366,8 @@ void main() {
         float viewDepth = dot(P - frame.camPosOrtho.xyz, frame.camForward.xyz);
         float ndotl = max(dot(geomN, shadow.shadowToLight.xyz), 0.0);
         shadowFactor = sampleShadow(P, viewDepth, ndotl);
+        // Same threshold as the software path, so "shadowed" is one predicate.
+        if (shadowFactor < 0.98) atomicAdd(shadowCounter.shadowedPixels, 1u);
     }
 
     vec3 N = vNormal;

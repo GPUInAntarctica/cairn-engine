@@ -97,7 +97,7 @@ struct RenderStats {
     int frustumCulled = 0;  // mesh renderers skipped by frustum culling
     int drawCalls2D = 0;    // sprites + text items drawn
     int lightCount = 0;     // lights collected this frame
-    int shadowedPixels = 0; // pixels darkened by the shadow map (software only)
+    int shadowedPixels = 0; // shaded pixels whose shadow lookup darkened them (both backends)
     int postPasses = 0;     // post-processing effects applied this frame (0-4)
     const char* backend = "software";  // backend that actually ran this frame
     // Which camera produced the frame: "scene" (the scene's MainCamera),

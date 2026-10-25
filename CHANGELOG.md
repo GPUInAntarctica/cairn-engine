@@ -2,6 +2,15 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.5] - 2026-10-25
+
+### Statistics: `shadowedPixels` counts on the GPU too
+- **A frame drawn on Vulkan reported `shadowedPixels: 0` even with shadows on.** The software rasterizer incremented a counter in `ShadeAndStore` whenever a pixel's shadow lookup came back below 0.98, and the GPU path had no equivalent - so the CLI's frame result, the profiler and anything watching the statistic described a property of the backend rather than of the scene. The 0.2.1 shadow test had to infer its region from the difference between two frames instead, and the roadmap carried the counter as a known hole.
+- **The fragment stage now increments one atomic in a frame-wide storage buffer.** `mesh.frag` declares a 4-byte SSBO at set 0 / binding 6 and calls `atomicAdd` under exactly the software path's predicate: shadows enabled, the material receives shadows, and the sampled factor is below 0.98. The host clears the counter immediately before recording and reads it back after the fence that already synchronises the frame, so the number is per-frame and cannot accumulate across frames. The buffer is host-visible and coherent like the other upload buffers, so no staging copy or extra submission is involved; the cost is one atomic per shadowed fragment.
+- **The device feature is now declared.** The SPIR-V writes a storage buffer from the fragment stage, which requires `fragmentStoresAndAtomics`; it is queried alongside the descriptor-indexing features the bindless path already needs and enabled on the device, and a device without it fails initialization explicitly instead of failing pipeline creation with a validation error.
+- **The two counts agree to within the rasterization difference.** On a floor-plus-box scene at 200x150 the software path reports 1163 shadowed pixels and Vulkan 965; at 320x240 it is 2841 against 2507. The gap is the set of pixels the two rasterizers shade along silhouettes and depth boundaries, the same gap the 0.2.1 shadow-mask test measures, so `TestShadowedPixelCount` treats the count as a region statistic: both above 200 and within 30%. With `receiveShadows` off, and with shadows disabled, both report zero. Rendering the same frame twice returns the same number on both paths, which is what pins the host-side clear.
+- **Four mutations, each caught and reverted.** Dropping the `atomicAdd` (2 checks), dropping the host clear (1), widening the threshold to `2.0` so every lit pixel counts (1), and reporting the old constant zero (2). The result of the run is unchanged where it was already correct: `render.gameFrame` and `render.screenshot` keep the same fields, and the software number is byte-for-byte the number 0.2.4 reported. The Vulkan path was rerun under `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` with no messages.
+
 ## [0.2.4] - 2026-10-25
 
 ### Materials: a program a material can carry, run identically by both backends

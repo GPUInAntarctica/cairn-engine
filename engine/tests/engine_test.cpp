@@ -1034,6 +1034,87 @@ static void TestShadowsAcrossBackends() {
         CHECK(std::abs(gpuY - cpuY) < 3.0);
     }
 }
+// `RenderStats::shadowedPixels` is part of the CLI's frame result and of the
+// profiler, so it must describe the same thing whichever backend drew the
+// frame. The software path counts a pixel when its shadow lookup comes back
+// below 0.98; mesh.frag increments one atomic under the same predicate, and
+// the backend clears that counter before recording and reads it after the
+// fence. A missing clear would double the second frame; a missing increment
+// would report zero.
+static void TestShadowedPixelCount() {
+    const int w = 200, h = 150;
+    struct Counts {
+        int shadowed = 0;
+        int repeated = 0;   // the frame after, to prove the counter resets
+        const char* backend = "";
+    };
+    auto render = [&](int backend, int cascades, bool receive) {
+        Engine engine;
+        engine.SetViewportSize(w, h);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.shadows = cascades;
+        scene.shadowResolution = 512;
+        scene.shadowDistance = 60.0f;
+        scene.msaa = 1;  // fragment invocations, not samples, drive the GPU count
+        scene.ambient = Color(0.28f, 0.28f, 0.30f, 1.0f);
+        scene.background = Color(0, 0, 0, 1);
+
+        GameObject* ground = scene.CreateEntity("Ground");
+        ground->transform().scale = Vec3(30, 1, 30);
+        auto* groundMr = ground->AddComponent<MeshRenderer>();
+        groundMr->mesh = MeshRenderer::MeshSource::Plane;
+        groundMr->albedoColor = Color(0.8f, 0.8f, 0.8f, 1.0f);
+        groundMr->receiveShadows = receive;
+
+        GameObject* box = scene.CreateEntity("Box");
+        box->transform().position = Vec3(0, 1.2f, 0);
+        box->transform().scale = Vec3(1.4f, 1.4f, 1.4f);
+        box->AddComponent<MeshRenderer>()->receiveShadows = receive;
+
+        GameObject* sun = scene.CreateEntity("Sun");
+        sun->transform().SetEulerDegrees(Vec3(-55, -130, 0));
+        auto* light = sun->AddComponent<LightComponent>();
+        light->type = LightComponent::LightType::Directional;
+        light->castShadows = true;
+        light->intensity = 1.2f;
+
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 2.2f, 8);
+        auto* camera = cam->AddComponent<CameraComponent>();
+        camera->skyEnabled = false;
+        camera->clearColor = Color(0, 0, 0, 1);
+
+        const RenderStats first = engine.RenderGameFrame();
+        const RenderStats second = engine.RenderGameFrame();
+        return Counts{first.shadowedPixels, second.shadowedPixels, first.backend};
+    };
+
+    const Counts cpu = render(2, 2, true);
+    CHECK(std::string(cpu.backend) == "software");
+    CHECK(cpu.shadowed > 200);          // the box casts a real shadow on the plane
+    CHECK(cpu.repeated == cpu.shadowed);
+
+    const Counts gpu = render(1, 2, true);
+    if (std::string(gpu.backend) == "vulkan") {
+        CHECK(gpu.shadowed > 200);
+        CHECK(gpu.repeated == gpu.shadowed);
+        // The two rasterizers shade slightly different pixel sets along
+        // silhouettes; the count is a region statistic, not a pixel hash.
+        CHECK(std::abs(gpu.shadowed - cpu.shadowed) < cpu.shadowed * 3 / 10);
+    }
+
+    // Nothing receive shadows, and no shadow pass: both report zero, so the
+    // counter cannot be a count of shaded pixels in general.
+    CHECK(render(2, 2, false).shadowed == 0);
+    CHECK(render(2, 0, true).shadowed == 0);
+    if (std::string(gpu.backend) == "vulkan") {
+        CHECK(render(1, 2, false).shadowed == 0);
+        CHECK(render(1, 0, true).shadowed == 0);
+    }
+}
+
 // Every frame on the Vulkan path ends with a host-side copy out of the staging
 // buffer the pixels were read into. The memory that buffer lands in decides
 // what that copy costs: an uncached heap delivers the read one cache line at a
@@ -5180,6 +5261,7 @@ int main() {
     TestBindlessTextureSlots();
     TestShadows();
     TestShadowsAcrossBackends();
+    TestShadowedPixelCount();
     TestVulkanReadbackMemory();
     TestVulkanReadbackSeesLatestFrame();
     TestInteriorEdgeAntialiasing();

@@ -173,6 +173,9 @@ struct VulkanBackend::Impl {
     Buffer frameUbo, lightsUbo, shadowUbo, drawUbo, sceneVerts, sceneIndices;
     // Material shader bytecode for this frame, addressed by DrawUbo::misc.y.
     Buffer shaderCode;
+    // One atomic counter: fragment invocations whose shadow lookup darkened the
+    // pixel. The host clears it before recording and reads it after the fence.
+    Buffer shadowCount;
     // Sprites/text and debug lines are separate vertex streams: they have
     // different strides (48 vs 28 bytes), so sharing one buffer let a frame
     // with editor lines overwrite the quad vertices at the same offset.
@@ -464,6 +467,7 @@ struct VulkanBackend::Impl {
         DestroyBuffer(&shadowUbo);
         DestroyBuffer(&drawUbo);
         DestroyBuffer(&shaderCode);
+        DestroyBuffer(&shadowCount);
         DestroyBuffer(&sceneVerts);
         DestroyBuffer(&sceneIndices);
         DestroyBuffer(&verts2D);
@@ -615,6 +619,10 @@ bool VulkanBackend::Initialize(std::string* error) {
     if (!have2.features.shaderSampledImageArrayDynamicIndexing || !have12.descriptorIndexing ||
         !have12.shaderSampledImageArrayNonUniformIndexing)
         return fail("device lacks descriptor-indexing features for the bindless texture path");
+    // The fragment stage increments the frame's shadow-pixel counter, which is
+    // a storage-buffer write from the fragment stage.
+    if (!have2.features.fragmentStoresAndAtomics)
+        return fail("device lacks fragment storage atomics for the shadow pixel counter");
     if (I.physProps.limits.maxPerStageDescriptorSampledImages < 2 * Impl::kBindlessSlots)
         return fail("device cannot bind both bindless texture arrays in one stage");
 
@@ -631,6 +639,7 @@ bool VulkanBackend::Initialize(std::string* error) {
     features12.pNext = &features13;
     VkPhysicalDeviceFeatures coreFeatures{};
     coreFeatures.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
+    coreFeatures.fragmentStoresAndAtomics = VK_TRUE;
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     dci.pNext = &features12;
     dci.pEnabledFeatures = &coreFeatures;
@@ -672,6 +681,7 @@ bool VulkanBackend::Initialize(std::string* error) {
         {&I.shadowUbo, sizeof(ShadowUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT},
         {&I.drawUbo, 65536ull * 8, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT},
         {&I.shaderCode, 128 * 1024, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT},
+        {&I.shadowCount, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT},
         {&I.verts2D, 256 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT},
         {&I.debugVerts, 256 * 1024, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT},
         {&I.readback, 64, VK_BUFFER_USAGE_TRANSFER_DST_BIT},
@@ -783,21 +793,21 @@ bool VulkanBackend::Initialize(std::string* error) {
     // is the bindless texture arrays the scene path samples. The post chain
     // still uses the two-sampler texLayout as its own set 0.
     {
-        VkDescriptorSetLayoutBinding binds[6]{};
-        for (uint32_t i = 0; i < 6; ++i) {
+        VkDescriptorSetLayoutBinding binds[7]{};
+        for (uint32_t i = 0; i < 7; ++i) {
             binds[i].binding = i;
             binds[i].descriptorType = (i == 3)   ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
                                      : (i == 4) ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
-                                     : (i == 5) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                                     : (i >= 5) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
                                                 : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             binds[i].descriptorCount = 1;
-            binds[i].stageFlags = (i == 5) ? VK_SHADER_STAGE_FRAGMENT_BIT
+            binds[i].stageFlags = (i >= 5) ? VK_SHADER_STAGE_FRAGMENT_BIT
                                            : ((i <= 0 || i == 4)
                                                   ? (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
                                                   : VK_SHADER_STAGE_FRAGMENT_BIT);
         }
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 6;
+        ci.bindingCount = 7;
         ci.pBindings = binds;
         if (I.fn.CreateDescriptorSetLayout(I.device, &ci, nullptr, &I.frameLayout) != VK_SUCCESS)
             return fail("descriptor layout failed");
@@ -836,7 +846,8 @@ bool VulkanBackend::Initialize(std::string* error) {
         sizes[2].descriptorCount =
             (uint32_t)(2 * Impl::kBindlessSlots + kChunks + 2 * Impl::kPostSlots);
         sizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        sizes[3].descriptorCount = kChunks;  // the shader-code buffer, one per frame set
+        // The shader-code buffer and the shadow counter, one each per frame set.
+        sizes[3].descriptorCount = 2 * kChunks;
         VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         // Frame-set windows, the bindless set and the post sets.
         ci.maxSets = (uint32_t)(kChunks + 1 + Impl::kPostSlots);
@@ -1629,6 +1640,10 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
     }
 
     // ---- record ------------------------------------------------------------
+    // Clear the shadow counter before the GPU writes it. Nothing from the
+    // previous frame is in flight: every frame submits and waits on the same
+    // fence before returning, so a host write here cannot race a pass.
+    if (I.shadowCount.mapped) *static_cast<uint32_t*>(I.shadowCount.mapped) = 0u;
     fn.ResetCommandPool(device, pool, 0);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -1791,25 +1806,27 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
     // the per-draw dynamic offset is relative to that window.
     const VkDeviceSize kWindow = (VkDeviceSize)I.drawUboChunk * stride;
     for (size_t w = 0; w < I.frameSets.size(); ++w) {
-        VkDescriptorBufferInfo infos[6]{};
+        VkDescriptorBufferInfo infos[7]{};
         infos[0] = {I.frameUbo.handle, 0, sizeof(FrameUbo)};
         infos[1] = {I.lightsUbo.handle, 0, sizeof(LightsUbo)};
         infos[2] = {I.shadowUbo.handle, 0, sizeof(ShadowUbo)};
         infos[3] = {I.drawUbo.handle, (VkDeviceSize)w * kWindow, kWindow};
         infos[4] = {I.drawUbo.handle, (VkDeviceSize)w * kWindow, kWindow};
         infos[5] = {I.shaderCode.handle, 0, VK_WHOLE_SIZE};
+        infos[6] = {I.shadowCount.handle, 0, VK_WHOLE_SIZE};
         // With cascades off the binding still needs a valid image; the 1x1
         // white array stands in (the shader short-circuits on count == 0).
         VkDescriptorImageInfo shadowImage{};
         shadowImage.sampler = I.nearestClamp;
         shadowImage.imageView = shadows ? I.shadowMap.view : I.whiteArrayView;
         shadowImage.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        VkWriteDescriptorSet writes[6]{};
-        const VkDescriptorType types[6] = {
+        VkWriteDescriptorSet writes[7]{};
+        const VkDescriptorType types[7] = {
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
-        for (uint32_t i = 0; i < 6; ++i) {
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
+        for (uint32_t i = 0; i < 7; ++i) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = I.frameSets[w];
             writes[i].dstBinding = i;
@@ -1820,7 +1837,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             else
                 writes[i].pBufferInfo = &infos[i];
         }
-        fn.UpdateDescriptorSets(device, 6, writes, 0, nullptr);
+        fn.UpdateDescriptorSets(device, 7, writes, 0, nullptr);
     }
     // Draw `n` lives in window n / drawUboChunk at offset (n % drawUboChunk) * stride.
     // Set 1 is the one bindless table, identical for every draw.
@@ -2269,7 +2286,14 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             if (d.mesh) stats->triangles += (int)(d.mesh->indices.size() / 3);
         for (const auto& item : list.items2D) stats->triangles += (int)(item.vertCount / 3);
         stats->lightCount = (int)std::min<size_t>(list.lights.size(), kMaxLights);
-        stats->shadowedPixels = 0;  // resolved on the GPU, not counted per pixel
+        // The fragment stage increments one atomic per shaded pixel whose
+        // shadow lookup darkened it; the fence above has made the host copy
+        // current. This is the same predicate the software path counts.
+        stats->shadowedPixels = I.shadowCount.mapped
+                                    ? (int)std::min<uint32_t>(
+                                          *static_cast<const uint32_t*>(I.shadowCount.mapped),
+                                          (uint32_t)INT32_MAX)
+                                    : 0;
         stats->postPasses = postPasses;
         stats->backend = "vulkan";
     }

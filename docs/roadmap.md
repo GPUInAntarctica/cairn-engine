@@ -71,10 +71,11 @@
 | 0.2.3 | 性能：GPU 帧的时间花在 GPU 上，而不是读回像素上 | Vulkan 后端离屏渲染，每帧经同一块暂存缓冲区读回，而 `CreateBuffer` 只要了 `HOST_VISIBLE \| HOST_COHERENT`——在桌面 GPU 上这就是未缓存的 BAR 堆，主机读 1920x1080 的颜色与深度约 0.5 GB/s。1080p 的 31.5 ms 一帧里 30.8 ms 是两次 `std::memcpy`，而 fence 等待量到 0.00 ms（GPU 早已完成），四段（record / submit / wait / copy）插桩把 98% 的时间钉在 copy 上；一块地面加一个立方体因此在 Vulkan 上 31.8 fps，反而低于软件光栅器的 41.9 fps。现在读回缓冲区**偏好** `HOST_CACHED`：选择是 `HOST_VISIBLE \| HOST_COHERENT \| HOST_CACHED` 与 `HOST_VISIBLE \| HOST_COHERENT` 两趟搜索，没有缓存堆的设备分配到的内存与从前逐位相同。同一场景 640x360 / 1280x720 / 1920x1080 = 0.2 / 0.7 / 1.5 ms（17 / 20 / 21 倍），软件参考 720p 仍为 11.1 ms。画面不变：同一张 1280x720 游戏帧两条路 SHA-256 相同（`70d6c55405f05a71c5292bc6…`），耗时 0.63 ms 对 14.34 ms，三条跨后端比对测试原样通过。选择逻辑抽成纯函数 `engine/src/vulkan_memory.h`（`SelectType` / `SelectStagingType`），后端所有分配点（缓冲区、图像、贴图）都走它且原有取舍不变；`TestVulkanReadbackMemory` 用六个合成堆（设备本地、两种主机堆，以及各只带一个必需属性的三个诱饵）钉住缓存堆优先、未要求缓存时选一致堆、不可映射的堆永不被选、没有缓存堆时偏好被降级、没有设备本地堆时报“无答案”而不是退回主机堆，`TestVulkanReadbackSeesLatestFrame` 钉住缓存映射的新风险（同一位置两帧逐像素相同、相机移动后颜色与深度都变、回到原位第一帧原样重现）。六次变异各自被抓住（2 / 4 / 12 / 3 / 4 / 4 项失败）；GPU 路径在 `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` 下无消息（同一个层对故意泄漏缓冲区的独立程序会报 VUID）。CLI 529 项不变 |
 
 | 0.2.4 | 渲染质量：材质着色器（逐片元的表达式程序，两条后端逐条指令一致） | 材质此前只能配置、不能编程：反照率、平铺、金属度、粗糙度、自发光都是固定参数，做一个水波、瀑布滚动或边缘光只能烘一张序列图或改引擎重编；引擎自己的 GLSL 阶段在构建期编成 SPIR-V，工程无法添加一个。现在 `MeshRenderer.shaderPath` 可以指向工程里的 `.cshader`（或内置 `@ripple` / `@scroll` / `@fresnel` / `@pulse`），`shaderParams` 是一个 Vec4，程序里读作 `p0`–`p3`，所以选了预设不调参数也有画面。**程序是标量栈字节码，不是 GPU 语言**：`.cshader` 里 `du` / `dv` / `emissive` 三条表达式，变量是 `u`、`v`、`time`、`ndotv`、几何法线、视线与四个参数，函数是常规标量函数；`material_shader.cpp` 解析成 `(opcode,a,b,c)` 指令并在 CPU 上解释给软件光栅器，`mesh.frag` 用同一份上传到 storage buffer 的指令解释给 GPU——于是软件路径仍是"GPU 实际执行的那个程序"的参考实现，而不是两种指望它们一致的方言。限制是刻意的：64 条指令、栈深 16、无分支无循环无采样，既不会让一段工程表达式卡住一帧，也让两个解释器能逐行对照。语义钉死：`du`/`dv` 在乘 `tiling` **之前**加到网格 UV 上，反照率与法线贴图共用这个偏移，位移不会让两者错位；`emissive` 乘材质的 `emissiveColor`，在光照分支之后、雾之前加上，因此 `unlit` 材质也会发光。三个护栏防止一条表达式污染整帧：除数为 `\|b\| < 1e-8` 时结果是 0，`sqrt` / `pow` 的底数夹到 0（所以 `pow(-2,2) == 0` 而不是 NaN），未知操作码清空栈、输出"无效果"。`time` 取播放时间：编辑模式为 0、只在 `Update` 里推进，所以截图可重复、两条后端拿到同一个钟。`shader_library.{h,cpp}` 按修改时间缓存，坏程序只在日志里报一次并退回固定功能材质，时间戳变了才重编；加载失败的路径在 `assetsReload` 时重试，先写场景后创建文件不需要重启进程。编辑器把 `shaderPath` 作为新的反射种类 `EditorPropKind::Shader` 画成带 datalist 的文本框（四个预设 + `Assets` 下所有 `.cshader`），中英标签都补齐。测试看画面而不只看解析器：`TestMaterialShaderCompiler` 钉住运算、参数顺序、每个函数、三个护栏、指令/栈上限、文档格式与重复求值逐位相同；`TestMaterialShaderLibrary` 覆盖预设、mtime 缓存、缺失重试与被拒文件；`TestMaterialShaderBackends` 在两条后端上渲染平坦 unlit 四边形——`@fresnel` 让两端帧均值各升高 20 级以上且两端相差 <1.5，`@pulse` 随时间推进在两端移动同样的量，硬边四象限贴图把 `du`/`dv` 量成边缘位置、两端落在同一像素且位移是四边形边长的预期比例。平坦基线两端最大差 12、均值 0.104，菲涅尔帧最大差 16、均值 0.147（带贴图时滤波差异让早先的比较毫无意义：均值 45、最大 123，这就是新增光照测试改用无贴图表面的原因）。坏程序在参考路径上与没有程序逐字节相同。七次变异各自被抓住并回退（`pow` 夹底 1 项、缺失重试 1 项、CPU UV 偏移 4 项、GPU UV 偏移 4 项、GPU 程序长度清零 8 项、GPU 时钟清零 2 项、GPU 自发光项丢弃 4 项）；GPU 路径在 `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` 下无消息（承载程序的 storage buffer 已在销毁时释放）。参考 [docs/shaders.md](shaders.md) |
+| 0.2.5 | 统计：GPU 帧也统计 `shadowedPixels` | 同一个场景开阴影，软件帧报出数字、GPU 帧恒为 0：这个数字只在软件光栅器的 `ShadeAndStore` 里累加（阴影查找回来 <0.98 就 +1），Vulkan 路径没有对应计数，于是 CLI 的帧结果、profiler 与任何盯这个字段的东西描述的是后端而不是场景。0.2.1 的阴影测试因此只能靠"开关阴影后哪些像素变了"反推区域，路线图也一直把这个洞列在"下一步候选"里。现在 `mesh.frag` 在 set 0 / binding 6 声明一个 4 字节的 storage buffer，在**与软件路径完全相同的判据**下 `atomicAdd`：阴影开启、材质接收阴影、采样因子 <0.98。宿主在录制前把计数器清零、在帧本来就有的 fence 之后读回，所以它是逐帧数字，不会跨帧累加；缓冲区与其他上传缓冲区一样是 host-visible + coherent，没有多一次暂存拷贝或提交，代价只是每个被遮挡片元一次原子操作。SPIR-V 从片元阶段写 storage buffer，需要 `fragmentStoresAndAtomics`：它与 bindless 路径已有的 descriptor-indexing 一起查询并在设备上启用，缺少它的设备在初始化时明确失败，而不是等到建管线时被校验层拦下。两条后端的数字落在光栅化差异之内：地面+立方体 200x150 软件 1163、Vulkan 965，320x240 是 2841 对 2507；差距来自两条光栅器在轮廓与深度边界上着色的像素集合不同（与 0.2.1 阴影掩码测试量到的是同一类差），因此 `TestShadowedPixelCount` 把它当区域统计：两边都 >200 且相差 <30%；`receiveShadows` 关闭与 `shadows = 0` 时两边都报 0；同一帧连画两次数字不变，这一条钉住宿主清零。四次变异各自被抓住（去掉 `atomicAdd` 2 项、去掉清零 1 项、阈值放宽到 2.0 让所有受光像素都计数 1 项、退回恒为 0 的旧行为 2 项）；`render.gameFrame` / `render.screenshot` 字段不变，软件侧数字与 0.2.4 逐位相同；GPU 路径在 `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation` 下无消息 |
 
 每个版本的细节与验证记录见 [CHANGELOG](../CHANGELOG.md)。
 
-## 当前优先级（0.2.4 之后）
+## 当前优先级（0.2.5 之后）
 
 定的三条主线，按此排序：
 
@@ -707,16 +708,11 @@
 - **仍开着。** 同一个 3D 游戏帧上两条后端还剩 862/120000 个像素不同，剩下的是轮廓边缘的半像素
   约定（GPU 的采样点落在软件判定为「外」的那一侧），不是几何也不是阴影；点光源与聚光各让一张
   320x240 的帧有约 0.5% 的像素相差 >2 级，后处理链（bloom、暗角、对比度、饱和度）约 0.8%、
-  平均不到 1 级。`RenderStats.shadowedPixels` 仍只由软件路径计算，GPU 帧即便开着阴影也报 0；
-  新用例比的是图而不是这个数，这个统计值需要一条 GPU 侧的计数。
+  平均不到 1 级。0.2.5 起 `RenderStats.shadowedPixels` 两条后端都有定义（GPU 侧由片元阶段的
+  原子计数在 fence 后回读），同一场景的阴影面积可以直接读数字，不必再靠两次截图相减。
 
 **下一步候选（按价值排序）**
 
-- **GPU 帧的 `shadowedPixels` 恒为 0。** 这个统计值只在软件光栅器里累加（着色时数被判为
-  被遮挡的像素），Vulkan 路径没有对应的计数，所以同一场景开阴影、软件帧报 2552、GPU 帧报 0。
-  0.2.1 的 `TestShadowsAcrossBackends` 因此比的是「开关阴影后变了哪些像素」，不读这个字段。
-  补它要在 CPU 侧按 `mesh.frag` 的级联选择与采样逻辑重算一遍（或让着色器回读计数），前者与
-  参考实现天然一致，代价是每帧多一次逐像素的深度比较。
 - **GPU 的 mip 链与 CPU 的 mip 链内容不同（已定位，未修）。** `Texture::GenerateMipmaps` 对
   sRGB 贴图的 2×2 均值是“解码到线性 → 平均 → 重新编码”（`engine/src/texture.cpp:150`），
   而 `backend_vulkan.cpp` 在向 GPU 上传时用同一段暂存内存重建粗层，直接对编码后的字节求均值
