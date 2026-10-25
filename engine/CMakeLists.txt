@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(cairn-engine VERSION 0.2.2 LANGUAGES CXX)
+project(cairn-engine VERSION 0.2.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -183,4 +183,11 @@ enable_testing()
 add_executable(cairn_engine_test tests/engine_test.cpp)
 target_link_libraries(cairn_engine_test PRIVATE cairn_engine)
 target_include_directories(cairn_engine_test PRIVATE src)
+# The tests exercise the Vulkan backend's device-memory selection against
+# synthetic device properties, which needs the same headers the backend
+# compiles with. A build without the Vulkan headers simply skips those checks.
+if(CAIRN_VULKAN_ENABLED)
+    target_compile_definitions(cairn_engine_test PRIVATE CAIRN_HAS_VULKAN=1)
+    target_include_directories(cairn_engine_test PRIVATE ${Vulkan_INCLUDE_DIRS})
+endif()
 add_test(NAME engine COMMAND cairn_engine_test)

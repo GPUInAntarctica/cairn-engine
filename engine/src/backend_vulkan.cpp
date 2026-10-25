@@ -11,6 +11,7 @@
 
 #include "cairn/log.h"
 #include "vk_loader.h"
+#include "vulkan_memory.h"
 
 #ifdef CAIRN_HAS_VULKAN
 
@@ -127,6 +128,12 @@ struct VulkanBackend::Impl {
         VkDeviceMemory memory = VK_NULL_HANDLE;
         void* mapped = nullptr;
         VkDeviceSize capacity = 0;
+        // True when the allocation landed in HOST_CACHED memory, which is what
+        // makes a host read of device-written bytes cheap. Recorded from the
+        // type that was actually chosen, not from the request, so a device
+        // without a cached heap keeps its uncached buffer and nobody mistakes
+        // one for the other.
+        bool hostCached = false;
     };
     struct Image {
         VkImage handle = VK_NULL_HANDLE;
@@ -238,19 +245,16 @@ struct VulkanBackend::Impl {
     ~Impl() { Destroy(); }
 
     // -------------------------------------------------------------- memory types
-    uint32_t FindMemory(uint32_t typeBits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid) {
-        for (uint32_t pass = 0; pass < 2; ++pass) {
-            const VkMemoryPropertyFlags props =
-                (pass == 0) ? (want | avoid) : want;  // second pass drops the `avoid` bits
-            for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
-                if (!(typeBits & (1u << i))) continue;
-                if ((memProps.memoryTypes[i].propertyFlags & props) == props) return i;
-            }
-        }
-        return UINT32_MAX;
-    }
+    // Selection lives in vulkan_memory.h: one ladder per kind of allocation,
+    // tested against synthetic device properties rather than the one device on
+    // the build desk.
 
-    bool CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Buffer* out) {
+    // These buffers are all host-visible: uploads, vertex and index data, and
+    // the readback. `extra` names property bits worth having on top of that;
+    // HOST_CACHED is asked for only by the buffer a frame is read back through
+    // - see the readback allocation.
+    bool CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Buffer* out,
+                      VkMemoryPropertyFlags extra = 0) {
         VkBufferCreateInfo ci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         ci.size = size;
         ci.usage = usage;
@@ -258,10 +262,8 @@ struct VulkanBackend::Impl {
         if (fn.CreateBuffer(device, &ci, nullptr, &out->handle) != VK_SUCCESS) return false;
         VkMemoryRequirements req{};
         fn.GetBufferMemoryRequirements(device, out->handle, &req);
-        const uint32_t type = FindMemory(req.memoryTypeBits,
-                                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                         0);
+        const uint32_t type = VkMemory::SelectStagingType(memProps, req.memoryTypeBits,
+                                                          (extra & VkMemory::kHostCached) != 0);
         if (type == UINT32_MAX) {
             fn.DestroyBuffer(device, out->handle, nullptr);
             out->handle = VK_NULL_HANDLE;
@@ -276,6 +278,7 @@ struct VulkanBackend::Impl {
         if (fn.MapMemory(device, out->memory, 0, VK_WHOLE_SIZE, 0, &ptr) != VK_SUCCESS) return false;
         out->mapped = ptr;
         out->capacity = size;
+        out->hostCached = VkMemory::HasProperty(memProps, type, VkMemory::kHostCached);
         return true;
     }
 
@@ -286,10 +289,15 @@ struct VulkanBackend::Impl {
         *b = Buffer{};
     }
 
-    bool EnsureBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Buffer* b) {
-        if (b->capacity >= size && b->handle) return true;
+    bool EnsureBuffer(VkDeviceSize size, VkBufferUsageFlags usage, Buffer* b,
+                      VkMemoryPropertyFlags extra = 0) {
+        // A request asking for cached memory has to reallocate when the live
+        // buffer does not have it: a big enough buffer is not a big enough
+        // buffer if it sits in the wrong heap.
+        const bool wantCached = (extra & VkMemory::kHostCached) != 0;
+        if (b->capacity >= size && b->handle && b->hostCached == wantCached) return true;
         DestroyBuffer(b);
-        return CreateBuffer(size, usage, b);
+        return CreateBuffer(size, usage, b, extra);
     }
 
     bool CreateImage(int w, int h, int layers, VkFormat format, VkImageUsageFlags usage, Image* out) {
@@ -311,8 +319,9 @@ struct VulkanBackend::Impl {
         // Render targets and sampled images want device-local memory. Asking for
         // HOST_VISIBLE here is a trap: on a discrete GPU no image memory type is
         // both, so the fallback silently puts every attachment in system RAM.
-        uint32_t type = FindMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
-        if (type == UINT32_MAX) type = FindMemory(req.memoryTypeBits, 0, 0);
+        uint32_t type = VkMemory::SelectType(memProps, req.memoryTypeBits,
+                                            VkMemory::kDeviceLocal);
+        if (type == UINT32_MAX) type = VkMemory::SelectType(memProps, req.memoryTypeBits, 0);
         VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         ai.allocationSize = req.size;
         ai.memoryTypeIndex = type;
@@ -710,13 +719,19 @@ bool VulkanBackend::Initialize(std::string* error) {
         I.fn.CreateImage(I.device, &ci, nullptr, &I.whiteTex.handle);
         VkMemoryRequirements req{};
         I.fn.GetImageMemoryRequirements(I.device, I.whiteTex.handle, &req);
-        const uint32_t type = I.FindMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+        // Host-visible is preferred, not required: a discrete GPU has no memory
+        // type that is both, so the first pass never matches and the second
+        // asks for device-local alone. A device with no device-local image
+        // memory falls through to the host-visible search just below.
+        const uint32_t type = VkMemory::SelectType(I.memProps, req.memoryTypeBits,
+                                                   VkMemory::kDeviceLocal,
+                                                   VkMemory::kHostVisible);
         VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         ai.allocationSize = req.size;
         ai.memoryTypeIndex = type != UINT32_MAX
                                  ? type
-                                 : I.FindMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, 0);
+                                 : VkMemory::SelectType(I.memProps, req.memoryTypeBits,
+                                                        VkMemory::kHostVisible);
         I.fn.AllocateMemory(I.device, &ai, nullptr, &I.whiteTex.memory);
         I.fn.BindImageMemory(I.device, I.whiteTex.handle, I.whiteTex.memory, 0);
         VkCommandBufferAllocateInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -1216,7 +1231,11 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             if (!I.CreateImage(hw, hh, 1, VK_FORMAT_R8G8B8A8_UNORM, colorUse, img)) return;
     }
     // The staging buffer has to hold the color copy plus the depth readback.
-    I.EnsureBuffer((VkDeviceSize)w * h * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &I.readback);
+    // Cached memory: the frame ends by copying those pixels out of here on the
+    // host, and through an uncached heap that read is the expensive part of the
+    // frame - far more than the rendering that produced them.
+    I.EnsureBuffer((VkDeviceSize)w * h * 8, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &I.readback,
+                   VkMemory::kHostCached);
     // The single-sample color target the frame is read back from.
     Impl::Image& sceneColor = (chosen > 1) ? I.colorResolve : I.colorResolve;
     Impl::Image& colorTarget = (chosen > 1) ? I.colorMS : I.colorResolve;
@@ -1587,8 +1606,9 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             if (fn.CreateImage(device, &ci, nullptr, &img.handle) != VK_SUCCESS) continue;
             VkMemoryRequirements req{};
             fn.GetImageMemoryRequirements(device, img.handle, &req);
-            uint32_t type = I.FindMemory(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
-            if (type == UINT32_MAX) type = I.FindMemory(req.memoryTypeBits, 0, 0);
+            uint32_t type = VkMemory::SelectType(I.memProps, req.memoryTypeBits,
+                                                VkMemory::kDeviceLocal);
+            if (type == UINT32_MAX) type = VkMemory::SelectType(I.memProps, req.memoryTypeBits, 0);
             VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
             ai.allocationSize = req.size;
             ai.memoryTypeIndex = type;

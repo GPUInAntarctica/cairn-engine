@@ -6,6 +6,10 @@
 #include "cairn/physics.h"
 #include "scene_internal.h"
 
+#ifdef CAIRN_HAS_VULKAN
+#include "vulkan_memory.h"
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -1028,6 +1032,154 @@ static void TestShadowsAcrossBackends() {
         CHECK(std::abs(gpuY - cpuY) < 3.0);
     }
 }
+// Every frame on the Vulkan path ends with a host-side copy out of the staging
+// buffer the pixels were read into. The memory that buffer lands in decides
+// what that copy costs: an uncached heap delivers the read one cache line at a
+// time across PCIe, which at 1080p was several times the cost of the frame
+// that produced the pixels - so the backend asks for cached memory when the
+// device offers it, and this test pins the asking.
+static void TestVulkanReadbackMemory() {
+#ifdef CAIRN_HAS_VULKAN
+    using namespace Cairn::VkMemory;
+    // Six heaps: device-local, the two host heaps a desktop GPU exposes, and
+    // three decoys that each carry one of the three properties the readback
+    // buffer needs but not the others. A selection that drops a requirement
+    // lands in a decoy instead of failing.
+    const VkMemoryPropertyFlags host =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    VkPhysicalDeviceMemoryProperties mem{};
+    mem.memoryTypeCount = 6;
+    mem.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    mem.memoryTypes[1].propertyFlags = host;                          // the heap in use today
+    mem.memoryTypes[2].propertyFlags =
+        host | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+    mem.memoryTypes[3].propertyFlags = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;   // not visible
+    mem.memoryTypes[4].propertyFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT; // not visible
+    mem.memoryTypes[5].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;  // not coherent
+    const uint32_t typeBits = 0x3F;
+
+    CHECK(SelectStagingType(mem, typeBits, true) == 2);
+    CHECK(SelectStagingType(mem, typeBits, false) == 1);
+    // A device whose buffer is only compatible with the uncached heap still
+    // gets a buffer: the request degrades instead of failing.
+    CHECK(SelectStagingType(mem, 0x2, true) == 1);
+    // Host-visible is not optional. The readback buffer has to be readable
+    // through the mapping, so a cached-but-unmappable heap is never the answer.
+    CHECK(SelectStagingType(mem, 0x8, true) == UINT32_MAX);
+    // ...nor a coherent-but-unmappable one, which is the same requirement
+    // stated for a device that exposes no cached heap at all.
+    CHECK(SelectStagingType(mem, 0x10, true) == UINT32_MAX);
+    CHECK(SelectStagingType(mem, 0x10, false) == UINT32_MAX);
+    // Coherency is not optional either: a visible-but-non-coherent heap would
+    // need an explicit invalidate before the copy, and this path issues none.
+    CHECK(SelectStagingType(mem, 0x20, true) == UINT32_MAX);
+    CHECK(SelectStagingType(mem, 0x20, false) == UINT32_MAX);
+    // The choice is a pure function of the device: same question, same answer.
+    CHECK(SelectStagingType(mem, typeBits, true) == SelectStagingType(mem, typeBits, true));
+    // The preference is a second pass, not a requirement: a device with no
+    // cached heap allocates the staging buffer it always did.
+    VkPhysicalDeviceMemoryProperties noCache = mem;
+    noCache.memoryTypeCount = 2;
+    CHECK(SelectStagingType(noCache, 0x3, true) == 1);
+
+    // The image and texture paths ask for a device-local heap and would rather
+    // a host-visible one, which is the same two passes: the preference wins
+    // when a type carries both, and is dropped when none does.
+    VkPhysicalDeviceMemoryProperties preferBoth = mem;
+    preferBoth.memoryTypes[4].propertyFlags =
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    CHECK(SelectType(preferBoth, 0x3F, kDeviceLocal, kHostVisible) == 4);
+    // A buffer whose typeBits allow the device-local heap only still lands
+    // there: the preference does not narrow the search.
+    CHECK(SelectType(mem, 0x1, kDeviceLocal, kHostVisible) == 0);
+    // Without the required bits there is no answer at all, and the caller has
+    // to treat that as a failure rather than take whatever it can get. A device
+    // with no device-local heap reports that, not a random host heap.
+    VkPhysicalDeviceMemoryProperties noLocal = mem;
+    noLocal.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+    noLocal.memoryTypes[4].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    CHECK(SelectType(noLocal, 0x3F, kDeviceLocal) == UINT32_MAX);
+#else
+    // No build-wide dependencies: the build without Vulkan headers reports it.
+    CHECK(VulkanBackendAvailable() == false);
+#endif
+}
+
+// The cached heap can only be used if the copy still sees the frame that was
+// just rendered. A staging buffer that served a stale mapping would freeze the
+// viewport: every frame would read back the first one's pixels and the camera
+// would look stuck. So the frame is rendered with and without a camera move -
+// the repeats have to be identical and the different one has to differ, in
+// colour and in depth alike.
+static void TestVulkanReadbackSeesLatestFrame() {
+    const int w = 160, h = 120;
+    Engine engine;
+    engine.SetViewportSize(w, h);
+    Scene& scene = engine.scene();
+    scene.renderBackend = 1;  // forced Vulkan; degrades to software without a device
+    scene.ambient = Color(0.25f, 0.25f, 0.28f, 1.0f);
+    scene.background = Color(0.05f, 0.05f, 0.06f, 1.0f);
+    GameObject* ground = scene.CreateEntity("Ground");
+    ground->transform().scale = Vec3(30, 1, 30);
+    auto* gm = ground->AddComponent<MeshRenderer>();
+    gm->mesh = MeshRenderer::MeshSource::Plane;
+    gm->albedoColor = Color(0.7f, 0.7f, 0.7f, 1.0f);
+    GameObject* box = scene.CreateEntity("Box");
+    box->transform().position = Vec3(0, 1.0f, 0);
+    box->transform().scale = Vec3(1.5f, 1.5f, 1.5f);
+    box->AddComponent<MeshRenderer>();
+    GameObject* cam = scene.CreateEntity("Main");
+    cam->tag = "MainCamera";
+    cam->transform().position = Vec3(0, 2.0f, 8);
+    auto* camera = cam->AddComponent<CameraComponent>();
+    camera->skyEnabled = false;
+
+    auto countDiff = [](const FrameTarget& a, const FrameTarget& b, int colourTol, float depthTol) {
+        size_t colour = 0, depth = 0;
+        for (size_t i = 0; i + 3 < a.color.size() && i + 3 < b.color.size(); i += 4) {
+            if (std::abs((int)a.color[i] - (int)b.color[i]) > colourTol ||
+                std::abs((int)a.color[i + 1] - (int)b.color[i + 1]) > colourTol ||
+                std::abs((int)a.color[i + 2] - (int)b.color[i + 2]) > colourTol)
+                ++colour;
+            const size_t d = i / 4;
+            if (d < a.depth.size() && d < b.depth.size() && std::abs(a.depth[d] - b.depth[d]) > depthTol)
+                ++depth;
+        }
+        return std::make_pair(colour, depth);
+    };
+
+    RenderStats stats = engine.RenderGameFrame();
+    if (std::string(stats.backend) != "vulkan") return;  // no device: nothing to pin
+    const FrameTarget first = engine.frame();
+    CHECK(first.color.size() == (size_t)w * h * 4);
+    CHECK(first.depth.size() == (size_t)w * h);
+
+    // Rendering the same frame again reads back the same pixels. A cached
+    // mapping that tore between frames would show up as noise here.
+    engine.RenderGameFrame();
+    const auto repeat = countDiff(first, engine.frame(), 0, 0.0f);
+    CHECK(repeat.first == 0);
+    CHECK(repeat.second == 0);
+
+    // A moved camera reads back a different frame, in both buffers the readback
+    // fills. The move covers ground as well as distance, so neither buffer can
+    // stay the same by accident.
+    cam->transform().position = Vec3(2.5f, 2.0f, 3.0f);
+    engine.RenderGameFrame();
+    const size_t pixels = first.color.size() / 4;
+    const auto moved = countDiff(first, engine.frame(), 2, 0.02f);
+    CHECK(moved.first > pixels / 16);
+    CHECK(moved.second > pixels / 32);
+
+    // Back where it started reads back the first frame again: the buffer holds
+    // exactly what this frame produced, nothing carried over.
+    cam->transform().position = Vec3(0, 2.0f, 8);
+    engine.RenderGameFrame();
+    const auto back = countDiff(first, engine.frame(), 0, 1e-6f);
+    CHECK(back.first == 0);
+    CHECK(back.second == 0);
+}
+
 
 // Analytic edge coverage must fill a pixel once. Two triangles of one surface
 // meet on a diagonal; the pixel under that edge is partly in each of them. The
@@ -4689,6 +4841,8 @@ int main() {
     TestBindlessTextureSlots();
     TestShadows();
     TestShadowsAcrossBackends();
+    TestVulkanReadbackMemory();
+    TestVulkanReadbackSeesLatestFrame();
     TestInteriorEdgeAntialiasing();
     TestPostProcessing();
     TestPhysics();

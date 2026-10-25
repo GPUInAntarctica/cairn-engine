@@ -234,7 +234,11 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.2.1**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+Cairn is at version **0.2.3**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+
+**What 0.2.3 changes.** The Vulkan backend renders offscreen and reads every frame back through one staging buffer. That buffer asked for `HOST_VISIBLE | HOST_COHERENT` memory only, which on a desktop GPU is the uncached BAR heap: the host copy of the colour and depth buffers ran at about 0.5 GB/s. At 1080p, 30.8 ms of a 31.5 ms frame were two `memcpy` calls while the fence wait measured 0.00 ms — the GPU had long finished. A ground plane and a cube therefore ran slower on Vulkan (31.8 fps) than on the software rasterizer (41.9 fps). The buffer now asks for `HOST_CACHED` as a preference, falling back to the old flags on devices without such a heap; the same scene costs 0.2 ms at 640x360, 0.7 ms at 1280x720 and 1.5 ms at 1920x1080 — 17x, 20x and 21x — against 11.1 ms for the software reference at 720p. The pixels did not move: a 1280x720 game frame hashes to the same SHA-256 either way (`70d6c554…`) while taking 0.63 ms against 14.34 ms. The selection is now a pure function in `engine/src/vulkan_memory.h`, tested against six synthetic heaps and six mutations.
+
+**0.2.2** made `npm run build` find Node's headers on every install shape (`<root>/bin/node`, `<root>/node.exe`, versioned NVM layouts), so the Windows CI job no longer stops after the engine DLL with a missing `node_api.h`.
 
 **What 0.2.1 fixes.** Three faults in what reaches the frame, all found by comparing the two pictures pixel by pixel:
 
