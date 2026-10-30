@@ -52,7 +52,7 @@ Contract every command follows:
 | `editor/main/` | main-process modules shared by the editor and the CLI |
 | `editor/main/imaging.js` | headless raster core (layers, drawing, PNG/BMP, normal maps) |
 | `editor/renderer/` | editor UI (ES modules, no framework) |
-| `test/` | `smoke.js` (engine end-to-end), `cli.js` (CLI end-to-end), `editor.js` (viewport transform maths), `build.js` (build-script staging and the Vulkan-optional source scan) |
+| `test/` | `smoke.js` (engine end-to-end), `cli.js` (CLI end-to-end), `editor.js` (viewport transform maths), `build.js` (build-script staging, the Vulkan-optional source scan and release-version consistency) |
 | `docs/` | architecture, editor manual, scripting API, building, CLI |
 
 ## Rules when changing the engine or the CLI

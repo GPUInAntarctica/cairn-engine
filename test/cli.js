@@ -77,7 +77,10 @@ console.log('cli: discovery');
 // ---------------------------------------------------------------------------
 const version = expectOk(['engine.version']);
 check(version && typeof version.engine === 'string', 'reports the engine version', version);
-check(version && version.cli === require(path.join(root, 'package.json')).version, 'reports the CLI version', version);
+const packageVersion = require(path.join(root, 'package.json')).version;
+check(version && version.cli === packageVersion, 'reports the CLI version', version);
+check(version && version.engine === packageVersion,
+    'the addon reports the release version, not a stale literal', version);
 
 const schema = expectOk(['engine.schema']);
 const commandNames = schema.groups.flatMap(g => g.commands.map(c => c.name));
@@ -104,10 +107,21 @@ console.log('cli: project + scene lifecycle');
 const projectDir = path.join(scratch, 'AgentGame');
 const created = expectOk(['project.create', '--name', 'AgentGame', '--parent', scratch, '--template', 'project-3d']);
 check(created && created.project.path === projectDir, 'project.create returns the project path', created);
+check(created && created.project.name === 'AgentGame' && created.project.template === 'project-3d',
+    'project.create keeps the requested name and template', created);
+check(created && created.project.engineVersion === packageVersion
+        && !Number.isNaN(Date.parse(created.project.createdAt)),
+    'project.create records the release version and creation time', created);
+const projectDoc = JSON.parse(fs.readFileSync(path.join(projectDir, 'project.cproj'), 'utf8'));
+check(projectDoc.name === 'AgentGame' && projectDoc.template === 'project-3d'
+        && projectDoc.engineVersion === packageVersion && projectDoc.createdAt === created.project.createdAt,
+    'project.cproj on disk matches what project.create reported', projectDoc);
 
 const info = expectOk(['--project', projectDir, 'project.info']);
 check(info && info.template === 'project-3d' && info.scenes.includes('Main.cscene'),
     'project.info lists scenes', info);
+check(info && info.name === 'AgentGame' && info.engineVersion === packageVersion,
+    'project.info reports the same metadata', info);
 check(info && info.scripts.includes('Rotator.cpp'), 'project.info lists script sources', info);
 
 const assets = expectOk(['--project', projectDir, 'assets.list', '--kind', 'texture']);

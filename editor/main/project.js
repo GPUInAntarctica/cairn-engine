@@ -10,6 +10,10 @@ const path = require('path');
 const preferences = require('./preferences');
 
 const TEMPLATES_DIR = path.join(__dirname, '..', '..', 'templates');
+// A project records the release that created it. package.json is what the CLI
+// and the installer report; test/build.js keeps it in step with the CMake
+// project version and with the engine version the addon exports.
+const ENGINE_VERSION = require('../../package.json').version;
 
 function projectFile(dir) { return path.join(dir, 'project.cproj'); }
 
@@ -104,18 +108,20 @@ function createProject(options, prefs) {
         for (const sub of ['Assets/Scenes', 'Assets/Scripts', 'Assets/Textures', 'Library']) {
             fs.mkdirSync(path.join(projectDir, sub), { recursive: true });
         }
+
+        // Template content first; project metadata is written last so no
+        // template file can replace the name, version or creation time.
+        const templateDir = path.join(TEMPLATES_DIR, templateId);
+        if (fs.existsSync(templateDir)) copyDir(templateDir, projectDir);
+
         fs.writeFileSync(projectFile(projectDir), JSON.stringify({
             format: 'cairn-project',
             version: 1,
             name,
             template: templateId,
-            engineVersion: '0.2.5',
+            engineVersion: ENGINE_VERSION,
             createdAt: new Date().toISOString(),
         }, null, 2));
-
-        // Template content.
-        const templateDir = path.join(TEMPLATES_DIR, templateId);
-        if (fs.existsSync(templateDir)) copyDir(templateDir, projectDir);
 
         // Seed texture assets (procedural, so the repo carries no binaries).
         const textures = path.join(projectDir, 'Assets', 'Textures');

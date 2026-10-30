@@ -9,3 +9,4 @@
 #include "jobs.h"
 #include "scripting.h"
 #include "profiler.h"
+#include "version.h"

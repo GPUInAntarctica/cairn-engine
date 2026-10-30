@@ -237,7 +237,38 @@ check(unguardedVulkanIncludes('#ifdef CAIRN_HAS_VULKAN\n#include "vulkan_memory.
 check(unguardedVulkanIncludes('#ifdef CAIRN_HAS_VULKAN\n#else\n#include "vulkan_memory.h"\n#endif\n').length === 1,
     'the else branch of the guard is not protected');
 
-fs.rmSync(scratch, { recursive: true, force: true });
+// ---------------------------------------------------------------------------
+console.log('build: one release version');
+// ---------------------------------------------------------------------------
+// package.json drives the installer, engine/CMakeLists.txt names the shared
+// library, and engine/include/cairn/version.h is what the addon reports. They
+// are three files, so they can drift - and did, with the addon still saying
+// 0.2.5 and CMake saying 0.2.5 while the package said 0.2.6. The release
+// version is checked from the files themselves, which needs no compiler.
+const pkgVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+const cmakeProject = fs.readFileSync(path.join(engineRoot, 'CMakeLists.txt'), 'utf8');
+const cmakeVersion = (cmakeProject.match(/project\s*\(\s*cairn-engine\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)/) || [])[1];
+const versionHeader = fs.readFileSync(path.join(engineRoot, 'include', 'cairn', 'version.h'), 'utf8');
+const headerParts = ['MAJOR', 'MINOR', 'PATCH']
+    .map(part => (versionHeader.match(new RegExp(`#define CAIRN_VERSION_${part} (\\d+)`)) || [])[1]);
+const headerVersion = headerParts.join('.');
+const headerString = (versionHeader.match(/#define CAIRN_VERSION_STRING "([^"]+)"/) || [])[1];
+check(/^[0-9]+\.[0-9]+\.[0-9]+$/.test(pkgVersion), 'package.json carries a semantic version', pkgVersion);
+check(cmakeVersion === pkgVersion,
+    'engine/CMakeLists.txt carries the package version', `${cmakeVersion} vs ${pkgVersion}`);
+check(headerVersion === pkgVersion && headerString === pkgVersion,
+    'cairn/version.h carries the package version', `${headerVersion} / ${headerString} vs ${pkgVersion}`);
+const addonVersion = fs.readFileSync(path.join(root, 'addon', 'cairn_addon.cc'), 'utf8')
+    .split('\n').find(line => line.includes('"engineVersion"'));
+check(addonVersion && addonVersion.includes('kEngineVersion'),
+    'the addon reports the version header rather than a literal', addonVersion && addonVersion.trim());
+check(addonVersion && !/"engineVersion"\s*,\s*Napi::String::New\(env,\s*"/.test(addonVersion),
+    'the addon has no hardcoded version');
+const projectSource = fs.readFileSync(path.join(root, 'editor', 'main', 'project.js'), 'utf8');
+check(/engineVersion:\s*ENGINE_VERSION\b/.test(projectSource)
+        && /require\('\.\.\/\.\.\/package\.json'\)\.version/.test(projectSource),
+    'new projects record the package version');
 
+fs.rmSync(scratch, { recursive: true, force: true });
 console.log(`build: ${checks - failures}/${checks} checks passed`);
 process.exit(failures === 0 ? 0 : 1);

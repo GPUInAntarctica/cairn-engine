@@ -2,6 +2,14 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.8] - 2026-10-30
+
+### Project metadata and the release version
+- **`project.create` wrote the metadata before the template, and the template overwrote it.** Both `templates/project-2d` and `templates/project-3d` carried a placeholder `project.cproj` (`name: "New Project"`, `engineVersion: "0.1.0"`, `createdAt: ""`), and `createProject` wrote the requested document first and then copied the template over the same path. Every new project therefore reported the placeholder name, a version from before the 0.2 line, and an empty creation time, in the editor, in `project.info` and in the CLI result. Template content is now copied first and the project document is written last, so no template file can replace the name, template, version or creation time; the two placeholder files are gone, because the project document is generated rather than shipped. Reproduced with `project.create --name Demo --template project-3d`, which reported `New Project` / `0.1.0` / `""` before the change and the requested values after it.
+- **The addon reported a version two releases old.** `InitModule` exported the literal `"0.2.5"`, so the welcome screen, the About dialog and `cairn engine.version` disagreed with `package.json`; `editor/main/project.js` carried the same literal for new projects. The engine now has `engine/include/cairn/version.h` with `CAIRN_VERSION_MAJOR/MINOR/PATCH`, `CAIRN_VERSION_STRING` and `Cairn::kEngineVersion`; the addon exports that constant, and new projects record the `package.json` version. Both are included from `<cairn/cairn.h>`, so gameplay code can read the release it was built against.
+- **The three version files are checked against each other.** `test/build.js` parses `package.json`, the `project(cairn-engine VERSION ...)` line in `engine/CMakeLists.txt` and the macros in `cairn/version.h`, requires all three to agree, and rejects a quoted literal on the addon's `engineVersion` export or a project writer that does not use the package version. The build suite goes from 23 to **29 checks**; drifting any one of the three files, or restoring the hardcoded addon literal, fails them.
+- **The project lifecycle is pinned end to end.** The CLI suite now checks the name, template, engine version and parseable creation time that `project.create` returns, reads `project.cproj` back from disk to compare it with the result, and requires `project.info` and `engine.version` to report the same release. A template carrying a stale `project.cproj`, with the write moved back before the copy, fails four of the new checks. CLI 529 -> **534 checks**.
+
 ## [0.2.7] - 2026-10-25
 
 ### Build: a machine without Vulkan headers builds again
