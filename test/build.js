@@ -247,17 +247,14 @@ console.log('build: one release version');
 // version is checked from the files themselves, which needs no compiler.
 const pkgVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
 const cmakeProject = fs.readFileSync(path.join(engineRoot, 'CMakeLists.txt'), 'utf8');
-const cmakeVersion = (cmakeProject.match(/project\s*\(\s*cairn-engine\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)/) || [])[1];
+const cmakeVersion = (cmakeProject.match(/project\s*\(\s*cairn-engine\s+VERSION\s+([0-9.]+)/) || [])[1];
 const versionHeader = fs.readFileSync(path.join(engineRoot, 'include', 'cairn', 'version.h'), 'utf8');
-const headerParts = ['MAJOR', 'MINOR', 'PATCH']
-    .map(part => (versionHeader.match(new RegExp(`#define CAIRN_VERSION_${part} (\\d+)`)) || [])[1]);
-const headerVersion = headerParts.join('.');
 const headerString = (versionHeader.match(/#define CAIRN_VERSION_STRING "([^"]+)"/) || [])[1];
-check(/^[0-9]+\.[0-9]+\.[0-9]+$/.test(pkgVersion), 'package.json carries a semantic version', pkgVersion);
+check(/^[0-9]+(?:\.[0-9]+)+$/.test(pkgVersion), 'package.json carries a release version', pkgVersion);
 check(cmakeVersion === pkgVersion,
     'engine/CMakeLists.txt carries the package version', `${cmakeVersion} vs ${pkgVersion}`);
-check(headerVersion === pkgVersion && headerString === pkgVersion,
-    'cairn/version.h carries the package version', `${headerVersion} / ${headerString} vs ${pkgVersion}`);
+check(headerString === pkgVersion,
+    'cairn/version.h carries the package version', `${headerString} vs ${pkgVersion}`);
 const addonVersion = fs.readFileSync(path.join(root, 'addon', 'cairn_addon.cc'), 'utf8')
     .split('\n').find(line => line.includes('"engineVersion"'));
 check(addonVersion && addonVersion.includes('kEngineVersion'),

@@ -230,6 +230,25 @@ GameObject* Scene::CreateEntity(const std::string& name, GameObject* parent) {
 
 void Scene::DestroyEntityNow(GameObject* go) {
     if (!go) return;
+    // Remove any cached physics pairs involving this subtree before components
+    // are freed, otherwise the next PhysicsStep will dereference dangling
+    // Component* pointers in its exit/notify path.
+    {
+        struct Purger {
+            Scene* scene;
+            void run(GameObject* o) {
+                if (!o) return;
+                for (Component* c : o->GetComponentList()) {
+                    for (auto it = scene->physicsPairs.begin(); it != scene->physicsPairs.end();) {
+                        if (it->second.a == c || it->second.b == c) it = scene->physicsPairs.erase(it);
+                        else ++it;
+                    }
+                }
+                for (GameObject* child : o->transform().m_children) run(child);
+            }
+        };
+        Purger{this}.run(go);
+    }
     // Release gameplay script instances before the components go away so
     // OnDestroy runs and nothing leaks.
     for (Component* c : go->GetComponentList()) {

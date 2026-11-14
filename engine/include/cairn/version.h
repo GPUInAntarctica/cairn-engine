@@ -9,7 +9,7 @@
 #define CAIRN_VERSION_MAJOR 0
 #define CAIRN_VERSION_MINOR 2
 #define CAIRN_VERSION_PATCH 8
-#define CAIRN_VERSION_STRING "0.2.8"
+#define CAIRN_VERSION_STRING "0.2.8.1"
 
 namespace Cairn {
 

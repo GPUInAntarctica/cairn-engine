@@ -2,6 +2,11 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.8.1] - 2026-10-30
+
+### Physics: destroy no longer leaves dangling contacts
+- **Destroying an entity that had active physics contacts could crash the next `PhysicsStep`.** `Scene::DestroyEntityNow` freed components and removed GameObjects from the scene but did not clear `Scene::physicsPairs`. Those cached pairs still held raw `Component*` pointers. On the next step, the exit/notification path read freed memory (for example `GameObject::GetComponentList()` on a destroyed object), which showed up as sporadic segmentation faults (reproduced in practice while killing a contact enemy after a combo). `DestroyEntityNow` now purges all physics-pair entries that reference any component in the destroyed subtree before releasing them, so deferred physics work cannot touch freed colliders.
+
 ## [0.2.8] - 2026-10-30
 
 ### Project metadata and the release version
