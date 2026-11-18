@@ -235,7 +235,9 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.2.9**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+Cairn is at version **0.2.10**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+
+**What 0.2.10 changes.** Spot lights cast shadows. Only the primary directional light had a shadow map, so a flashlight, a lamp or a stage spot lit straight through props and walls. Each shadow-casting spot light now gets a perspective map fitted to its outer cone, rendered into the same depth array the cascades use (spot layers follow the cascade layers), and sampled with a bias converted for perspective depth on both backends. Up to four spots cast per frame, `castShadows` and `receiveShadows` gate it, and `shadowedPixels` counts spot occlusion like directional occlusion. A cross-backend test renders the same spot-lit scene with and without an empty cascade in front of the spot layer, so the layer indexing is pinned as well as the picture.
 
 **What 0.2.9 changes.** A gameplay script that throws no longer takes the editor or the CLI down with it. Scripts run in the host process, so an exception used to unwind through the addon: the editor stopped responding and a CLI batch aborted with exit 134 before it could report anything. Every callback the engine makes into a script (start, update, fixed update, collision/trigger events, destroy, inspector metadata and construction) now runs through a boundary that logs `script <Class>::<Method> threw: <message>` and continues the frame. The editor drains the engine log every frame, opens the Console tab when a build fails, shows warnings as well as errors, and puts an error-count badge on the tab when the console is not visible; the same lines come back from `cairn runtime.logs --level error` after a contained throw. The engine and CLI suites cover a throwing `OnStart`/`OnUpdate` end to end.
 

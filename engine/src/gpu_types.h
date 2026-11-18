@@ -15,6 +15,7 @@ namespace Cairn {
 
 static constexpr int kMaxLights = 16;          // lights evaluated per pixel
 static constexpr int kMaxCascades = 4;         // directional shadow cascades
+static constexpr int kMaxSpotShadows = 4;      // spot lights with a perspective shadow map
 
 // Material state for one draw. The software rasterizer reads it directly and
 // the Vulkan backend packs it into a UBO; fields must stay POD.
@@ -60,6 +61,10 @@ struct GpuLight {
     float cosInner = -1.0f;
     bool castShadows = false;
     float shadowBias = 0.02f;
+    // Index into FrameDrawList::spotShadows, or -1 when this light has no
+    // shadow map this frame. A spot light only casts while `castShadows` is on
+    // and the frame has a free slot.
+    int shadowSlot = -1;
 };
 
 // One 2D vertex (sprite / text quads), pre-transformed to world space.
@@ -96,6 +101,19 @@ struct FrameDrawList {
     float cascadeTexel[kMaxCascades] = {0.01f, 0.01f, 0.01f, 0.01f};
     float shadowStrength = 0.85f;
     Vec3 shadowToLight{0, 1, 0};
+
+    // Spot shadows: one perspective map per shadowing spot light, fitted by
+    // the same shared code that fits the cascades. The projection is matched to
+    // the light's outer cone, so a shadow only exists where the light reaches.
+    struct SpotShadow {
+        Mat4 matrix;
+        // near*far/(far-near): converts a world-space bias into the [0,1] depth
+        // the map stores, at distance w along the light's axis.
+        float depthScale = 1.0f;
+        float texel = 0.01f;   // world units per texel at mid range
+    };
+    int spotShadowCount = 0;
+    SpotShadow spotShadows[kMaxSpotShadows];
 
     struct OpaqueDraw {
         std::shared_ptr<Mesh> mesh;   // keeps the mesh alive until submit

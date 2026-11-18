@@ -43,8 +43,10 @@ layout(std140, set = 0, binding = 2) uniform ShadowUBO {
     vec4 cascadeSplits;   // far boundary of each cascade (view depth)
     vec4 cascadeRange;    // ortho world depth span per cascade
     vec4 cascadeTexel;    // world units per shadow texel
-    vec4 shadowParams;    // x count, y strength, z map size, w unused
+    vec4 shadowParams;    // x cascade count, y strength, z map size, w spot count
     vec4 shadowToLight;   // xyz towards the shadow-casting light
+    mat4 spotMatrix[4];   // one perspective projection per shadowing spot
+    vec4 spotParams[4];   // x depthScale (near*far/(far-near)), y texel world units
 } shadow;
 
 layout(set = 0, binding = 3) uniform sampler2DArray shadowMaps;
@@ -332,6 +334,38 @@ float sampleShadow(vec3 P, float viewDepth, float ndotl) {
     return 1.0 - (1.0 - lit) * shadow.shadowParams.y;
 }
 
+// Spot maps live in the same array after the cascades. The projection is
+// perspective, so the authored world-space bias becomes depth units as
+// depthScale / w^2; SampleSpotShadow on the software path uses the same
+// expression, which is what keeps both pictures on the same pixels.
+float sampleSpotShadow(int slot, vec3 P, float ndotl) {
+    if (slot < 0 || slot >= int(shadow.shadowParams.w)) return 1.0;
+    vec4 clip = shadow.spotMatrix[slot] * vec4(P, 1.0);
+    if (clip.w <= 1e-4) return 1.0;
+    vec3 ndc = clip.xyz / clip.w;
+    if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z > 1.0 || ndc.z < -1.0) return 1.0;
+
+    float worldBias = shadow.spotParams[slot].y * (1.5 + 2.0 * (1.0 - clamp(ndotl, 0.0, 1.0)));
+    float bias = shadow.spotParams[slot].x * worldBias / (clip.w * clip.w);
+    float refDepth = ndc.z * 0.5 + 0.5;
+    float size = shadow.shadowParams.z;
+    float fx = (ndc.x * 0.5 + 0.5) * size;
+    float fy = (1.0 - (ndc.y * 0.5 + 0.5)) * size;
+    int ix = int(fx), iy = int(fy);
+    int layer = int(shadow.shadowParams.x) + slot;
+    float hits = 0.0, taps = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            vec2 uv = vec2((float(ix + dx) + 0.5) / size, (float(iy + dy) + 0.5) / size);
+            float d = textureLod(shadowMaps, vec3(uv, float(layer)), 0.0).r;
+            if (refDepth - bias <= d) hits += 1.0;
+            taps += 1.0;
+        }
+    }
+    float lit = hits / taps;
+    return 1.0 - (1.0 - lit) * shadow.shadowParams.y;
+}
+
 void main() {
     DrawUbo draw = draws[vInstance];
     vec3 P = vWorld;
@@ -414,7 +448,16 @@ void main() {
             if (!lightFalloff(i, P, L, atten)) continue;
             float NdotL = dot(N, L);
             if (NdotL <= 0.0) continue;
-            float shadowTerm = lights[i].posType.w < 0.5 ? shadowFactor : 1.0;
+            float shadowTerm = 1.0;
+            if (lights[i].posType.w < 0.5) {
+                shadowTerm = shadowFactor;
+            } else if (lights[i].posType.w > 1.5 && lights[i].cone.z >= 0.0 && draw.flags.y > 0.5) {
+                // Spot maps cover the outer cone only; LightFalloff already
+                // rejected everything the map cannot reach.
+                float spotNdotL = max(dot(geomN, -lights[i].dirInten.xyz), 0.0);
+                shadowTerm = sampleSpotShadow(int(lights[i].cone.z), P, spotNdotL);
+                if (shadowTerm < 0.98) atomicAdd(shadowCounter.shadowedPixels, 1u);
+            }
             float s = lights[i].dirInten.w * atten * shadowTerm * NdotL;
             vec3 H = L + V;
             float hl = length(H);

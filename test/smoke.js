@@ -389,6 +389,36 @@ check(throwLogs.some(l => l.text.includes('Thrower::OnUpdate threw: update boom'
     'the OnUpdate exception is logged and does not stop later frames');
 engine.stop();
 
+// Spot shadows: a spot light gets a perspective map of its own cone instead of
+// reading the directional cascades. The engine tests compare the two backends
+// pixel for pixel; this checks the addon exposes the resulting stat and that
+// the light's castShadows switch gates it.
+engine.newScene('SpotShadows');
+engine.setViewCamera({ position: [0, 3, 9], yaw: 0, pitch: -12 });
+const spotGround = engine.createPrimitive('Cube', 'SpotGround', 0);
+engine.setComponentProp(spotGround, 'Transform', 'position', [0, -0.5, 0]);
+engine.setComponentProp(spotGround, 'Transform', 'scale', [30, 1, 30]);
+engine.setComponentProp(spotGround, 'MeshRenderer', 'receiveShadows', true);
+const spotOccluder = engine.createPrimitive('Cube', 'SpotOccluder', 0);
+engine.setComponentProp(spotOccluder, 'Transform', 'position', [0, 1.2, 0]);
+engine.setComponentProp(spotOccluder, 'Transform', 'scale', [1.4, 1.4, 1.4]);
+const spot = engine.createEntity('Spot', 0);
+check(engine.addComponent(spot, 'Light'), 'add a spot light');
+engine.setComponentProp(spot, 'Transform', 'position', [4, 5, 0]);
+engine.setComponentProp(spot, 'Transform', 'rotation', [-51.3, 90, 0]);
+engine.setComponentProp(spot, 'Light', 'type', 2);
+engine.setComponentProp(spot, 'Light', 'intensity', 3.0);
+engine.setComponentProp(spot, 'Light', 'range', 25.0);
+engine.setComponentProp(spot, 'Light', 'spotAngle', 35.0);
+engine.setComponentProp(spot, 'Light', 'castShadows', true);
+engine.setSceneSetting('ambient', [0.2, 0.2, 0.23, 1]);
+const spotFrame = engine.renderGameFrame();
+check(spotFrame.lightCount === 1, 'the spot light is collected');
+check(spotFrame.shadowedPixels > 0, `the spot shadow darkens pixels (${spotFrame.shadowedPixels})`);
+engine.setComponentProp(spot, 'Light', 'castShadows', false);
+const spotNoCast = engine.renderGameFrame();
+check(spotNoCast.shadowedPixels === 0, 'castShadows off leaves the spot unshadowed');
+
 fs.rmSync(projectDir, { recursive: true, force: true });
 
 if (failures === 0) {

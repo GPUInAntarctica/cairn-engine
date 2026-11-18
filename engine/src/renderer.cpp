@@ -91,11 +91,25 @@ struct ShadowSampler {
         const std::vector<std::vector<float>>* maps = nullptr;
     };
 
+// Spot maps are perspective projections, so the world-space bias converts to
+// depth units with near*far/(far-near) / w^2 instead of 1 / range. Keeping the
+// conversion here and in mesh.frag identical is what makes a spot shadow land
+// on the same pixels on both backends.
+struct SpotShadowSampler {
+    int count = 0;
+    int size = 512;
+    const Mat4* matrices = nullptr;
+    const float* depthScales = nullptr;
+    const float* texels = nullptr;
+    const std::vector<std::vector<float>>* maps = nullptr;
+};
+
 struct Renderer::Impl {
     std::vector<RasterVert> triVerts;     // 3 per triangle job
     std::vector<MaterialGpu> triMats;     // 1 per triangle job
     std::vector<GpuLight> lights;
     ShadowSampler shadows;  // read by workers
+    SpotShadowSampler spotShadows;  // read by workers
     std::atomic<int> shadowedPixels{0};
     Vec3 camPos;
     Vec3 camRight, camUp, camForward;
@@ -138,6 +152,17 @@ struct Renderer::Impl {
     float cascadeTexel[kMaxCascades] = {0.01f, 0.01f, 0.01f, 0.01f};
     std::vector<std::vector<float>> cascadeDepth;
     std::vector<uint8_t> shadowScratch;   // unused color target for the depth pass
+    // Spot shadows: one perspective map per shadow-casting spot light, fitted
+    // to the light's outer cone. Same shared code fits them as the cascades;
+    // only the depth rendering and the depth-bias conversion differ.
+    static constexpr int kMaxSpotShadows = Cairn::kMaxSpotShadows;
+    int spotShadowCount = 0;
+    int spotShadowSize = 512;
+    Mat4 spotMatrix[kMaxSpotShadows];
+    float spotDepthScale[kMaxSpotShadows] = {1, 1, 1, 1};
+    float spotTexel[kMaxSpotShadows] = {0.01f, 0.01f, 0.01f, 0.01f};
+    Vec3 spotEye[kMaxSpotShadows];
+    std::vector<std::vector<float>> spotDepth;
     // Post-processing scratch (ping/pong), reused across frames: half res for
     // the bloom chain, full res when FXAA needs a source copy.
     std::vector<uint8_t> scratchA, scratchB;
@@ -626,9 +651,58 @@ struct Renderer::Impl {
         }
     }
 
-    // Software depth pass: rasterizes the fitted cascades into CPU float maps.
+    // ------------------------------------------------------------------
+    // Spot shadows: one perspective map per shadow-casting spot light. The
+    // projection matches the outer cone, so the map covers exactly the region
+    // the light can reach; points outside it are lit by definition. The slot is
+    // stamped on every light so both backends can find the map from the light
+    // inside their shading loop.
+    void FitSpotShadows(FrameDrawList& list) {
+        spotShadowCount = 0;
+        list.spotShadowCount = 0;
+        spotShadowSize = std::clamp(list.cascadeSize, 256, 4096);
+        bool warned = false;
+        for (size_t i = 0; i < list.lights.size(); ++i) {
+            GpuLight& li = list.lights[i];
+            li.shadowSlot = -1;
+            if (li.type != 2 || !li.castShadows) continue;
+            if (spotShadowCount >= kMaxSpotShadows) {
+                if (!warned) {
+                    warned = true;
+                    Log::Warning("spot shadow limit (%d) reached; further spot lights cast none",
+                                 (int)kMaxSpotShadows);
+                }
+                continue;
+            }
+            // Spot angles are half-angles: the falloff code compares the angle
+            // against cos(spotAngle). A small margin keeps the PCF taps inside
+            // the map right at the cone edge.
+            const float halfAngle = std::acos(std::clamp(li.cosOuter, -0.999f, 0.999f)) * 1.02f;
+            const float fov = std::clamp(halfAngle * 2.0f, 0.02f, 3.0f);
+            const float nearZ = 0.05f;
+            const float farZ = std::max(nearZ + 0.1f, li.range);
+            const Vec3 up = std::fabs(li.dir.y) > 0.99f ? Vec3(0, 0, 1) : Vec3(0, 1, 0);
+            const Mat4 view = Mat4::LookAt(li.pos, li.pos + li.dir, up);
+            const Mat4 proj = Mat4::Perspective(fov, 1.0f, nearZ, farZ);
+            const int slot = spotShadowCount;
+            spotMatrix[slot] = proj * view;
+            spotDepthScale[slot] = farZ * nearZ / (farZ - nearZ);
+            spotTexel[slot] =
+                2.0f * std::tan(fov * 0.5f) * (nearZ + farZ) * 0.5f / (float)spotShadowSize;
+            spotEye[slot] = li.pos;
+            li.shadowSlot = slot;
+            list.spotShadows[slot].matrix = spotMatrix[slot];
+            list.spotShadows[slot].depthScale = spotDepthScale[slot];
+            list.spotShadows[slot].texel = spotTexel[slot];
+            ++spotShadowCount;
+        }
+        list.spotShadowCount = spotShadowCount;
+    }
+
+    // Software depth pass: rasterizes the fitted cascades and spot maps into
+    // CPU float maps.
     void RenderShadowPassSoftware(const FrameDrawList& list) {
-        if (cascadeCount <= 0) return;
+        if (cascadeCount <= 0 && spotShadowCount <= 0) return;
         // Save the main frame state so the depth-only pass can reuse the
         // rasterizer with a different target.
         std::vector<uint8_t>* savedColor = color;
@@ -654,6 +728,30 @@ struct Renderer::Impl {
             for (const auto& caster : list.casters) {
                 if (!caster.mesh) continue;
                 if (!IntersectsShadowVolume(cascadeMatrix[c], caster.bounds)) continue;
+                MaterialGpu mat;
+                mat.cullMode = caster.cullMode;
+                mat.castShadows = true;
+                mat.depthOnly = true;
+                EmitMesh(*caster.mesh, caster.model, mat);
+            }
+            const int jobs = (int)(triVerts.size() / 3);
+            RasterizeParallel(0, jobs);
+        }
+
+        spotDepth.resize((size_t)kMaxSpotShadows);
+        for (int s = 0; s < spotShadowCount; ++s) {
+            spotDepth[s].assign((size_t)spotShadowSize * spotShadowSize, 1.0f);
+            W = H = spotShadowSize;
+            color = &shadowScratch;
+            depth = &spotDepth[s];
+            viewProj = spotMatrix[s];
+            camPos = spotEye[s];
+
+            triVerts.clear();
+            triMats.clear();
+            for (const auto& caster : list.casters) {
+                if (!caster.mesh) continue;
+                if (!IntersectsShadowVolume(spotMatrix[s], caster.bounds)) continue;
                 MaterialGpu mat;
                 mat.cullMode = caster.cullMode;
                 mat.castShadows = true;
@@ -708,6 +806,55 @@ struct Renderer::Impl {
         s.maps = &cascadeDepth;
         s.dir = shadowToLight;
         return s;
+    }
+
+    SpotShadowSampler spotShadowSampler() const {
+        SpotShadowSampler s;
+        s.count = spotShadowCount;
+        s.size = spotShadowSize;
+        s.matrices = spotMatrix;
+        s.depthScales = spotDepthScale;
+        s.texels = spotTexel;
+        s.maps = &spotDepth;
+        return s;
+    }
+
+    // 3x3 PCF through a spot's perspective map. `worldPos` is the shaded
+    // point; the light supplies which map to read this frame.
+    float SampleSpotShadow(const SpotShadowSampler& s, const GpuLight& li, const Vec3& worldPos,
+                           float ndotl) const {
+        if (s.count <= 0 || li.shadowSlot < 0 || li.shadowSlot >= s.count) return 1.0f;
+        const int slot = li.shadowSlot;
+        const std::vector<float>& map = (*s.maps)[slot];
+        if (map.empty()) return 1.0f;
+        const Vec4 clip = s.matrices[slot] * Vec4(worldPos, 1.0f);
+        // Perspective: w is the distance along the light axis, and it is what
+        // the depth derivative is taken in.
+        if (clip.w <= 1e-4f) return 1.0f;
+        const Vec3 ndc = clip.XYZ() / clip.w;
+        if (std::fabs(ndc.x) > 1.0f || std::fabs(ndc.y) > 1.0f || ndc.z > 1.0f || ndc.z < -1.0f) return 1.0f;
+
+        const float worldBias = s.texels[slot] *
+                                (1.5f + 2.0f * (1.0f - std::clamp(ndotl, 0.0f, 1.0f)));
+        // depth(w) = far/(far-near) - near*far/((far-near)*w), so a world bias
+        // scales by near*far/(far-near) over w squared.
+        const float bias = s.depthScales[slot] * worldBias / (clip.w * clip.w);
+        const float refDepth = ndc.z * 0.5f + 0.5f;
+        const float fx = (ndc.x * 0.5f + 0.5f) * (float)s.size;
+        const float fy = (1.0f - (ndc.y * 0.5f + 0.5f)) * (float)s.size;
+        const int ix = (int)fx, iy = (int)fy;
+        int hits = 0, taps = 0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int x = std::clamp(ix + dx, 0, s.size - 1);
+                const int y = std::clamp(iy + dy, 0, s.size - 1);
+                const float depth = map[(size_t)y * s.size + x];
+                if (refDepth - bias <= depth) ++hits;
+                ++taps;
+            }
+        }
+        const float lit = (float)hits / (float)taps;
+        return 1.0f - (1.0f - lit) * shadowStrength;
     }
 
     // 3x3 PCF with a slope-scaled bias; returns 1 (lit) outside the map.
@@ -1149,16 +1296,30 @@ struct Renderer::Impl {
             float lr = diffuseAlbedo.x * ambient.r;
             float lg = diffuseAlbedo.y * ambient.g;
             float lb = diffuseAlbedo.z * ambient.b;
+            // Spot lights carry their own perspective map; its slope-scaled
+            // bias reads the geometric normal, like the sun's.
+            Vec3 spotN = N;
+            if (spotShadows.count > 0) {
+                spotN = (v[0].nw * l[0] + v[1].nw * l[1] + v[2].nw * l[2]) * w;
+                spotN = spotN.LengthSq() > 1e-9f ? spotN.Normalized() : Vec3(0, 1, 0);
+            }
             for (const GpuLight& li : lights) {
                 Vec3 L;
                 float atten = 1.0f;
                 if (!LightFalloff(li, P, &L, &atten)) continue;
                 const float NdotL = Vec3::Dot(N, L);
                 if (NdotL <= 0.0f) continue;
-                // Only directional lights are shadowed by the cascade map;
-                // point and spot lights keep their own falloff untouched.
-                const float shadow = li.type == 0 ? shadowFactor : 1.0f;
-                const float s = li.intensity * atten * shadow * NdotL;
+                // The cascade map only covers the primary directional light;
+                // each spot light reads its own perspective map.
+                float lightShadow = 1.0f;
+                if (li.type == 0) {
+                    lightShadow = shadowFactor;
+                } else if (li.type == 2 && mat.receiveShadows) {
+                    lightShadow = SampleSpotShadow(spotShadows, li, P,
+                                                    std::max(0.0f, Vec3::Dot(spotN, L)));
+                    if (lightShadow < 0.98f) shadowedPixels.fetch_add(1, std::memory_order_relaxed);
+                }
+                const float s = li.intensity * atten * lightShadow * NdotL;
                 // Schlick Fresnel from the half-vector.
                 Vec3 H = (L + V);
                 float hl = H.Length();
@@ -1944,6 +2105,7 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
         R.casterBounds.reserve(list.casters.size());
         for (const auto& caster : list.casters) R.casterBounds.push_back(caster.bounds);
         R.FitCascadeSet(list, cam);
+        R.FitSpotShadows(list);
     }
 
     // ---- Backend selection. `Auto` prefers the GPU and degrades silently to
@@ -1994,12 +2156,13 @@ RenderStats Renderer::RenderScene(Scene& scene, const CameraView& cam,
         R.shadowScratch.size() < (size_t)R.cascadeSize * R.cascadeSize * 4) {
         R.shadowScratch.assign((size_t)R.cascadeSize * R.cascadeSize * 4, 0);
     }
-    if (R.cascadeCount > 0) {
+    if (R.cascadeCount > 0 || R.spotShadowCount > 0) {
         CAIRN_PROFILE("shadows");
         R.cascadeDepth.resize((size_t)kMaxCascades);
         R.RenderShadowPassSoftware(list);
     }
     R.shadows = R.shadowSampler();
+    R.spotShadows = R.spotShadowSampler();
     R.shadowedPixels.store(0, std::memory_order_relaxed);
     // Textures referenced this frame are pinned in the draw list; the software
     // rasterizer reads them through the same MaterialGpu pointers.

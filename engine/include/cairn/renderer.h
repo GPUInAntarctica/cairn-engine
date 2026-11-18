@@ -4,8 +4,9 @@
 //   vulkan   - offscreen GPU rendering via a dynamically loaded Vulkan loader
 //              (optional at build time; falls back to software when the
 //              machine has no Vulkan 1.3 driver).
-// 3D path: PBR (GGX + Lambert), sky gradient, fog, cascaded shadow maps,
-// debug lines. 2D path: alpha-blended sprites/text with optional normal maps.
+// 3D path: PBR (GGX + Lambert), sky gradient, fog, cascaded directional
+// shadows and per-spot perspective shadow maps, debug lines. 2D path:
+// alpha-blended sprites/text with optional normal maps.
 #pragma once
 
 #include "cairn/math.h"

@@ -68,8 +68,13 @@ struct ShadowUbo {
     float texel[4];
     float params[4];
     float toLight[4];
+    // Spot maps occupy array layers after the cascades; their projection is
+    // perspective, so the depth bias uses depthScale / w^2.
+    float spotMatrix[kMaxSpotShadows][16];
+    float spotParams[kMaxSpotShadows][4];  // x depthScale, y texel world units
 };
-static_assert(sizeof(ShadowUbo) == 4 * 64 + 5 * 16, "ShadowUBO layout must match mesh.frag");
+static_assert(sizeof(ShadowUbo) == 4 * 64 + 5 * 16 + kMaxSpotShadows * 64 + kMaxSpotShadows * 16,
+              "ShadowUBO layout must match mesh.frag");
 
 struct DrawUbo {
     float model[16];
@@ -1263,22 +1268,32 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
     Impl::Image& depthTarget = (chosen > 1) ? I.depthMS : I.depthResolve;
     Impl::Image& depthRead = I.depthResolve;
 
-    // ---- shadow cascades ---------------------------------------------------
+    // ---- shadow maps -------------------------------------------------------
+    // Cascades first, then one perspective layer per spot light: the fragment
+    // stage indexes a spot's layer as cascadeCount + slot.
     int cascades = std::clamp(list.cascadeCount, 0, kMaxCascades);
+    int spots = std::clamp(list.spotShadowCount, 0, kMaxSpotShadows);
     const int cascadeSize = std::clamp(list.cascadeSize, 256, 4096);
-    if (cascades > 0) {
+    const int shadowLayers = cascades + spots;
+    if (shadowLayers > 0) {
         const bool need = I.shadowMap.handle == VK_NULL_HANDLE || I.shadowMap.w != cascadeSize ||
-                          I.shadowMap.layers != cascades;
+                          I.shadowMap.layers != shadowLayers;
         if (need) {
             I.DestroyImage(&I.shadowMap);
-            if (!I.CreateImage(cascadeSize, cascadeSize, cascades, VK_FORMAT_D32_SFLOAT,
+            if (!I.CreateImage(cascadeSize, cascadeSize, shadowLayers, VK_FORMAT_D32_SFLOAT,
                                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
                                    VK_IMAGE_USAGE_SAMPLED_BIT,
-                               &I.shadowMap))
+                               &I.shadowMap)) {
                 cascades = 0;
+                spots = 0;
+            }
         }
     }
-    const bool shadows = cascades > 0 && I.shadowMap.handle != VK_NULL_HANDLE;
+    const bool shadows = (cascades + spots) > 0 && I.shadowMap.handle != VK_NULL_HANDLE;
+    if (!shadows) {
+        cascades = 0;
+        spots = 0;
+    }
 
     // ---- mesh + texture residency -----------------------------------------
     // Total geometry the frame references. Growing the buffers invalidates
@@ -1495,7 +1510,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             d[0] = gl.pos.x; d[1] = gl.pos.y; d[2] = gl.pos.z; d[3] = (float)gl.type;
             d[4] = gl.dir.x; d[5] = gl.dir.y; d[6] = gl.dir.z; d[7] = gl.intensity;
             d[8] = gl.color.r; d[9] = gl.color.g; d[10] = gl.color.b; d[11] = gl.range;
-            d[12] = gl.cosOuter; d[13] = gl.cosInner; d[14] = 0.0f; d[15] = 0.0f;
+            d[12] = gl.cosOuter; d[13] = gl.cosInner; d[14] = (float)gl.shadowSlot; d[15] = 0.0f;
         }
         l.count = count;
         std::memcpy(I.lightsUbo.mapped, &l, sizeof(l));
@@ -1512,9 +1527,15 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         s.params[0] = (float)count;
         s.params[1] = list.shadowStrength;
         s.params[2] = (float)cascadeSize;
+        s.params[3] = (float)spots;
         s.toLight[0] = list.shadowToLight.x;
         s.toLight[1] = list.shadowToLight.y;
         s.toLight[2] = list.shadowToLight.z;
+        for (int i = 0; i < spots; ++i) {
+            std::memcpy(s.spotMatrix[i], list.spotShadows[i].matrix.m, sizeof(s.spotMatrix[i]));
+            s.spotParams[i][0] = list.spotShadows[i].depthScale;
+            s.spotParams[i][1] = list.spotShadows[i].texel;
+        }
         std::memcpy(I.shadowUbo.mapped, &s, sizeof(s));
     }
 
@@ -1898,7 +1919,11 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         VkRect2D cascadeScissor{{0, 0}, {static_cast<uint32_t>(cascadeSize),
                                           static_cast<uint32_t>(cascadeSize)}};
         const uint32_t firstCaster = opaqueCount + item2DCount;
-        for (int c = 0; c < cascades; ++c) {
+        for (int c = 0; c < cascades + spots; ++c) {
+            // Cascades come first, then the spot layers; each pass is one layer
+            // with its own projection, pushed as a constant.
+            const Mat4& shadowMatrix =
+                c < cascades ? list.cascadeMatrix[c] : list.spotShadows[c - cascades].matrix;
             // The array is left readable by the main pass; move the layer back
             // to a depth attachment for this frame's pass.
             I.Transition(cmd, I.shadowMap, VK_IMAGE_ASPECT_DEPTH_BIT,
@@ -1928,11 +1953,11 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             // The cascade matrix is the same for every caster in this pass, so it
             // is pushed once; the per-caster model comes from draws[].
             fn.CmdPushConstants(cmd, I.scenePipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 64,
-                                list.cascadeMatrix[c].m);
+                                shadowMatrix.m);
             for (size_t i = 0; i < list.casters.size();) {
                 const uint32_t slot = (uint32_t)(firstCaster + i);
                 if (slot >= drawData.size()) break;
-                if (!IntersectsShadowVolume(list.cascadeMatrix[c], list.casters[i].bounds)) {
+                if (!IntersectsShadowVolume(shadowMatrix, list.casters[i].bounds)) {
                     ++i;
                     continue;
                 }
@@ -1952,7 +1977,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
                     for (; j < list.casters.size() && j < windowEnd; ++j) {
                         const uint32_t s2 = (uint32_t)(firstCaster + j);
                         if (s2 >= drawData.size()) break;
-                        if (!IntersectsShadowVolume(list.cascadeMatrix[c], list.casters[j].bounds))
+                        if (!IntersectsShadowVolume(shadowMatrix, list.casters[j].bounds))
                             break;
                         if (list.casters[j].mesh.get() != list.casters[i].mesh.get()) break;
                         if (CullModeFor(list.casters[j].cullMode) != cull) break;

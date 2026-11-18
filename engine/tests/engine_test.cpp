@@ -1062,6 +1062,135 @@ static void TestShadowsAcrossBackends() {
         CHECK(std::abs(gpuY - cpuY) < 3.0);
     }
 }
+// A spot light casts through a perspective map of its own cone. The GPU binds
+// the spot layer after the directional cascades, so the test renders both
+// without any cascade and with an empty cascade in front: a layer offset that
+// forgets the cascade count would find the wrong map in the second setup.
+static void TestSpotShadowsAcrossBackends() {
+    const int w = 200, h = 150;
+    struct Shot {
+        std::vector<uint8_t> color;
+        std::string backend;
+        int shadowed = 0;
+    };
+    auto render = [&](int backend, int cascades, bool cast, bool receive) {
+        Engine engine;
+        engine.SetViewportSize(w, h);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.shadows = cascades;
+        scene.shadowResolution = 512;
+        scene.ambient = Color(0.20f, 0.20f, 0.23f, 1.0f);
+        scene.background = Color(0, 0, 0, 1);
+
+        GameObject* ground = scene.CreateEntity("Ground");
+        ground->transform().scale = Vec3(30, 1, 30);
+        auto* groundMr = ground->AddComponent<MeshRenderer>();
+        groundMr->mesh = MeshRenderer::MeshSource::Plane;
+        groundMr->albedoColor = Color(0.8f, 0.8f, 0.8f, 1.0f);
+        groundMr->receiveShadows = receive;
+
+        GameObject* box = scene.CreateEntity("Box");
+        box->transform().position = Vec3(0, 1.2f, 0);
+        box->transform().scale = Vec3(1.4f, 1.4f, 1.4f);
+        auto* boxMr = box->AddComponent<MeshRenderer>();
+        // Only the ground receives, so switching the ground's flag off removes
+        // the spot shadow from the frame without leaving the box's own shadow.
+        boxMr->receiveShadows = false;
+
+        // An intensity-0 sun still allocates its cascade: it puts the spot
+        // layer at index 1 without contributing any light.
+        if (cascades > 0) {
+            GameObject* sun = scene.CreateEntity("EmptySun");
+            sun->transform().SetEulerDegrees(Vec3(-55, -130, 0));
+            auto* sl = sun->AddComponent<LightComponent>();
+            sl->type = LightComponent::LightType::Directional;
+            sl->castShadows = true;
+            sl->intensity = 0.0f;
+        }
+
+        GameObject* spot = scene.CreateEntity("Spot");
+        spot->transform().position = Vec3(0, 6, 0);
+        spot->transform().SetEulerDegrees(Vec3(-90, 0, 0));
+        auto* light = spot->AddComponent<LightComponent>();
+        light->type = LightComponent::LightType::Spot;
+        light->castShadows = cast;
+        light->intensity = 2.5f;
+        light->range = 25.0f;
+        light->spotAngle = 35.0f;
+        light->spotInnerAngle = 20.0f;
+
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 3.0f, 9);
+        auto* camera = cam->AddComponent<CameraComponent>();
+        camera->skyEnabled = false;
+        camera->clearColor = Color(0, 0, 0, 1);
+
+        RenderStats stats = engine.RenderGameFrame();
+        Shot shot;
+        shot.color = engine.frame().color;
+        shot.backend = stats.backend;
+        shot.shadowed = stats.shadowedPixels;
+        return shot;
+    };
+    auto shadowMask = [&](const std::vector<uint8_t>& on, const std::vector<uint8_t>& off,
+                          int* count, double* cx, double* cy) {
+        int n = 0;
+        double sx = 0, sy = 0;
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const size_t i = ((size_t)y * w + x) * 4;
+                int d = 0;
+                for (int c = 0; c < 3; ++c)
+                    d = std::max(d, std::abs((int)on[i + c] - (int)off[i + c]));
+                if (d > 8) {
+                    ++n;
+                    sx += x;
+                    sy += y;
+                }
+            }
+        }
+        *count = n;
+        *cx = n ? sx / n : -1.0;
+        *cy = n ? sy / n : -1.0;
+    };
+
+    for (int cascades : {0, 1}) {
+        const auto cpuOn = render(2, cascades, true, true);
+        const auto cpuOff = render(2, cascades, false, true);
+        int cpuCount = 0;
+        double cpuX = 0, cpuY = 0;
+        shadowMask(cpuOn.color, cpuOff.color, &cpuCount, &cpuX, &cpuY);
+        CHECK(cpuOn.backend == "software");
+        CHECK(cpuCount > 120);       // the reference draws a visible spot shadow
+        CHECK(cpuY > h * 0.5);       // ...on the ground below the occluder
+        CHECK(cpuOn.shadowed > cpuOff.shadowed);   // and the stat counts the same pixels
+        if (cascades == 0) CHECK(cpuOff.shadowed == 0);
+
+        // receiveShadows is a property of the receiver, not of the light.
+        const auto cpuIgnore = render(2, cascades, true, false);
+        const auto cpuNoCast = render(2, cascades, false, false);
+        int ignored = 0;
+        double ix = 0, iy = 0;
+        shadowMask(cpuIgnore.color, cpuNoCast.color, &ignored, &ix, &iy);
+        CHECK(ignored == 0);
+
+        const auto gpuOn = render(1, cascades, true, true);
+        if (gpuOn.backend == "vulkan") {
+            const auto gpuOff = render(1, cascades, false, true);
+            int gpuCount = 0;
+            double gpuX = 0, gpuY = 0;
+            shadowMask(gpuOn.color, gpuOff.color, &gpuCount, &gpuX, &gpuY);
+            CHECK(gpuCount > 120);
+            CHECK(gpuOn.shadowed > gpuOff.shadowed);
+            CHECK(std::abs(gpuCount - cpuCount) < cpuCount / 3);
+            CHECK(std::abs(gpuX - cpuX) < 4.0);
+            CHECK(std::abs(gpuY - cpuY) < 4.0);
+        }
+    }
+}
+
 // `RenderStats::shadowedPixels` is part of the CLI's frame result and of the
 // profiler, so it must describe the same thing whichever backend drew the
 // frame. The software path counts a pixel when its shadow lookup comes back
@@ -5289,6 +5418,7 @@ int main() {
     TestBindlessTextureSlots();
     TestShadows();
     TestShadowsAcrossBackends();
+    TestSpotShadowsAcrossBackends();
     TestShadowedPixelCount();
     TestVulkanReadbackMemory();
     TestVulkanReadbackSeesLatestFrame();
