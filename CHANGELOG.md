@@ -2,6 +2,14 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.15] - 2026-11-18
+
+### Animation: transitions can cross-fade between clips
+- **Every animation change was a hard cut.** `transitions` could choose when to change state, but the new clip appeared at full opacity on the very next frame; a walk-to-run or wind-up-to-attack change snapped. The roadmap asks for deterministic interpolation, where the weight is a function of accumulated play time rather than a wall clock.
+- **`fade` on a transition cross-fades.** An entry can now carry `fade: 0.2` (seconds). When it fires, the outgoing clip is snapshotted at the cell it was drawing, with its own sheet, and drawn first at full opacity; the incoming clip is drawn over it with weight `fadeElapsed / fadeElapsed + duration` driven only by `Update(dt)`. The snapshot means the old clip cannot advance under the fade even if the new one has many cells. Without `fade` the cut is immediate, as before, and a manual write to `clip` is also a hard cut. Nothing new is reflected in the inspector: the toggle lives inside the existing `transitions` JSON, so scene files and batches carry it unchanged.
+- **The GPU now uses sprite tint alpha.** A crossfade needs the incoming quad drawn at partial alpha, and `sprite.frag` ignored `draw.color.a` entirely (it wrote only texture alpha), so the GPU showed the incoming clip at full strength. The software path already blended with tint alpha; multiplying `tex.a` by `draw.color.a` brings the shader in line and fixes `SpriteRenderer.color.a` on the GPU for every sprite, not just fades.
+- **Tests.** `TestSpriteCrossfade` builds a four-cell sheet, transitions from a red cell to a green one and samples the centre pixel on both backends: red before the tick and at the tick (zero weight), an interior colour halfway, green at the end; it also checks a transition without `fade` still cuts, and that repeating the same `Update(dt)` sequence repeats the pixels. Mutations: dropping the outgoing quad fails four engine checks (and one smoke check), making `FadeWeight()` always 1 fails four, and reverting the shader alpha fails two GPU checks. The smoke suite drives the same table through the addon's reflection API with two separate sheets and reads the frame back through PNG pixels. CLI 546 checks unchanged.
+
 ## [0.2.14] - 2026-11-18
 
 ### Rendering: 32 real-time lights per frame

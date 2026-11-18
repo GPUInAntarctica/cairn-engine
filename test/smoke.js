@@ -22,6 +22,7 @@ function check(cond, label) {
 }
 
 const addon = require(path.join(root, 'build', 'cairn_engine_addon.node'));
+const imaging = require(path.join(root, 'editor', 'main', 'imaging.js'));
 
 // ---------------------------------------------------------------------------
 // Temporary scratch project.
@@ -475,6 +476,64 @@ engine.pollLogs();
 engine.renderGameFrame();
 check(engine.pollLogs().filter(l => l.text.includes('light limit (32) reached')).length === 1,
     'one warning names the light budget');
+
+// A transition with `fade` keeps the outgoing clip visible as a second quad
+// until the clock runs out. Drive the table through the addon's reflection API
+// and read the frame back, so the contract is checked end to end, not just in
+// the engine's own scene object.
+engine.newScene('Crossfade');
+engine.setViewCamera({ position: [0, 0, 8], yaw: 0, pitch: 0 });
+const fadeSprite = engine.createEntity('FadeSprite', 0);
+check(engine.addComponent(fadeSprite, 'SpriteRenderer'),
+    'add a sprite renderer for the crossfade');
+check(engine.addComponent(fadeSprite, 'SpriteAnimator'),
+    'add an animator for the crossfade');
+engine.setComponentProp(fadeSprite, 'Transform', 'scale', [100, 100, 1]);
+const fadeTexturesDir = path.join(projectDir, 'Assets', 'Textures');
+fs.mkdirSync(fadeTexturesDir, { recursive: true });
+for (const [name, rgb] of [['idleFade.png', [255, 0, 0]], ['runFade.png', [0, 255, 0]]]) {
+    const pixels = Buffer.alloc(8 * 8 * 4);
+    for (let i = 0; i < 64; ++i) {
+        pixels[i * 4] = rgb[0]; pixels[i * 4 + 1] = rgb[1];
+        pixels[i * 4 + 2] = rgb[2]; pixels[i * 4 + 3] = 255;
+    }
+    fs.writeFileSync(path.join(fadeTexturesDir, name), imaging.encodePng(pixels, 8, 8));
+}
+engine.setComponentProp(fadeSprite, 'SpriteRenderer', 'texturePath', 'Assets/Textures/idleFade.png');
+engine.setComponentProp(fadeSprite, 'SpriteAnimator', 'columns', 2);
+engine.setComponentProp(fadeSprite, 'SpriteAnimator', 'rows', 2);
+engine.setComponentProp(fadeSprite, 'SpriteAnimator', 'fps', 1);
+engine.setComponentProp(fadeSprite, 'SpriteAnimator', 'clips', [
+  { name: 'idle', firstFrame: 0, lastFrame: 0, texturePath: 'Assets/Textures/idleFade.png' },
+  { name: 'run', firstFrame: 0, lastFrame: 0, texturePath: 'Assets/Textures/runFade.png' },
+]);
+engine.setComponentProp(fadeSprite, 'SpriteAnimator', 'clip', 'idle');
+engine.setComponentProp(fadeSprite, 'SpriteAnimator', 'params', { go: false });
+engine.setComponentProp(fadeSprite, 'SpriteAnimator', 'transitions', [
+  { from: 'idle', to: 'run', when: { param: 'go', op: 'is', value: true }, fade: 0.2 },
+]);
+engine.play();
+const fadeShot = path.join(projectDir, 'fade.png');
+const sampleFade = () => {
+    engine.renderGameFrame();
+    engine.saveFramePNG(fadeShot);
+    const img = imaging.loadImage(fadeShot);
+    const p = imaging.samplePixel(img.layers[0].data, img.width, img.height, 240, 135);
+    return [p.r, p.g, p.b];
+};
+const distance = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+const idle = sampleFade();
+engine.setComponentProp(fadeSprite, 'SpriteAnimator', 'params', { go: true });
+engine.update(0.0);
+const tick = sampleFade();
+check(distance(tick, idle) < 12, 'the incoming clip has no weight on the transition tick');
+engine.update(0.1);
+const half = sampleFade();
+engine.update(0.1);
+const end = sampleFade();
+check(distance(end, idle) > 40, 'the finished fade shows the incoming clip');
+check(distance(half, idle) > 12 && distance(half, idle) < distance(end, idle),
+    'the halfway frame is between the two clips');
 
 fs.rmSync(projectDir, { recursive: true, force: true });
 

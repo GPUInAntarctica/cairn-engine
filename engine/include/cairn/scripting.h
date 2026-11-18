@@ -435,7 +435,10 @@ public:
 // The table is also a state machine when it is given the other two: `params`
 // are the values it reads (a bool, a number, or a trigger) and `transitions`
 // says which state to enter for which parameters. `clip` is then the current
-// state, and writing it by hand is a manual override.
+// state, and writing it by hand is a manual override. A transition can carry
+// `fade` (seconds of play time): the old clip keeps drawing on top of a fading
+// quad while the new one comes in, so a change of state can cross-fade instead
+// of cutting. Without it the cut is immediate, as before.
 //
 // A clip can also write a parameter as it plays, with `events`: entries of
 // {"at", "set"} fire when the cell `at` is entered and write the object `set`
@@ -502,6 +505,22 @@ public:
         Json durations;      // per-cell seconds; null when there is no table
         Json events;         // per-cell writes; null when there is no table
     };
+
+    // A crossfade in progress: the clip that was left, frozen at the cell it
+    // was drawing, and a clock advanced only by Update(dt). Both are runtime
+    // state, never reflected fields, so a scene file describes the transition
+    // and the frame is a pure function of the accumulated dt sequence.
+    bool fading = false;
+    Clip previous;
+    int previousCell = 0;
+    float fadeElapsed = 0.0f;
+    float fadeLength = 0.0f;
+
+    // Weight of the new clip during a crossfade; 1 when there is none.
+    float FadeWeight() const {
+        if (!fading || !(fadeLength > 0.0f)) return 1.0f;
+        return Clamp(fadeElapsed / fadeLength, 0.0f, 1.0f);
+    }
 
     // A usable entry is an object with a non-empty name; anything else in the
     // array is skipped rather than taken for a clip.
@@ -652,8 +671,11 @@ public:
 
     // uvRect of cell `f` inside `region` (the sprite's uvRect): cells are equal
     // slices of the region, `f` counted row-major from its top-left corner.
-    Vec4 CellRect(int f, const Vec4& region) const {
-        const Clip c = ActiveClip();
+    Vec4 CellRect(int f, const Vec4& region) const { return CellRectOf(ActiveClip(), f, region); }
+
+    // The same cell arithmetic for a clip that is no longer active, which is
+    // what a crossfade draws for the clip it is fading out.
+    Vec4 CellRectOf(const Clip& c, int f, const Vec4& region) const {
         const int cols = c.columns > 0 ? c.columns : 1;
         const int rows_ = c.rows > 0 ? c.rows : 1;
         const float cw = region.z / (float)cols;
@@ -679,7 +701,21 @@ public:
     // keeps the loop below bounded. Cells are stepped one at a time, because
     // each of them has its own time and a long `dt` can pass through several.
     void AdvanceAnimation(float dt) {
-        if (clip != activeClip) Restart();   // a new clip starts at its own first cell
+        if (clip != activeClip) {
+            // A manual clip change is a hard cut; only a transition with a
+            // positive `fade` starts a crossfade.
+            fading = false;
+            fadeLength = 0.0f;
+            fadeElapsed = 0.0f;
+            Restart();   // a new clip starts at its own first cell
+        }
+        if (fading) {
+            fadeElapsed += dt;
+            if (fadeElapsed >= fadeLength) {
+                fadeElapsed = fadeLength;
+                fading = false;
+            }
+        }
         const Clip c = ActiveClip();
         const int count = FrameCountOf(c);
         if (!playing) return;
@@ -802,6 +838,20 @@ public:
             if (to.empty()) continue;
             if (!ConditionsHold(t["when"])) continue;
             if (t["waitForExit"].asBool(false) && !Finished()) continue;
+            // Snapshot the outgoing clip before `clip` changes, so the fading
+            // quad keeps its own cells and sheet even if the new clip uses a
+            // different one. A transition without `fade` still cuts instantly.
+            const float fade = (float)t["fade"].asNumber(0.0);
+            fading = fade > 0.0f;
+            if (fading) {
+                previous = ActiveClip();
+                previousCell = DrawnCell();
+                fadeLength = fade;
+                fadeElapsed = 0.0f;
+            } else {
+                fadeLength = 0.0f;
+                fadeElapsed = 0.0f;
+            }
             clip = to;
             // Entering the state runs its first cell's events, and the trigger is
             // spent after them: an event that names the trigger which just fired

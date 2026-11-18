@@ -160,7 +160,10 @@ void main() {
     vec3 albedo = srgbToLinearFast3(draw.color.rgb);
     if (draw.flags.z > 0.5) albedo *= srgbToLinearFast3(tex.rgb);
     else albedo *= tex.rgb;
-    float alpha = tex.a;  // never color-space decoded
+    // The sprite tint's alpha is coverage, just as it is on the software path:
+    // a faded sprite (or a crossfade's incoming clip) has to blend with it.
+    // Texture alpha is never colour-space decoded.
+    float alpha = tex.a * draw.color.a;
 
     float shadowFactor = 1.0;
     if (shadow.shadowParams.x > 0.5 && draw.flags.y > 0.5) {

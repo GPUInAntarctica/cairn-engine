@@ -1802,11 +1802,20 @@ struct Renderer::Impl {
     // and the draw path both come through here, so they cannot disagree about
     // which texture - and therefore which texel size - is on screen.
     std::string SpriteTexturePath(const SpriteRenderer& sp, const SpriteAnimator* anim) {
-        if (anim && anim->enabled) {
-            const std::string own = anim->ActiveClip().texturePath;
-            if (!own.empty()) return own;
-        }
+        if (!anim || !anim->enabled) return sp.texturePath;
+        return SpriteTexturePathOf(sp, anim->ActiveClip());
+    }
+
+    // The same two choices for an explicit clip: a crossfade has to draw the
+    // outgoing clip's own cells and sheet, not the active one's.
+    std::string SpriteTexturePathOf(const SpriteRenderer& sp, const SpriteAnimator::Clip& clip) {
+        if (!clip.texturePath.empty()) return clip.texturePath;
         return sp.texturePath;
+    }
+
+    Vec4 SpriteUvRectOf(const SpriteAnimator& anim, const SpriteRenderer& sp,
+                        const SpriteAnimator::Clip& clip, int cell) {
+        return anim.CellRectOf(clip, cell, sp.uvRect);
     }
 
     SpriteExtent SpriteLocalExtent(const SpriteRenderer& sp, const Vec4& rect, float texW, float texH) {
@@ -1973,9 +1982,23 @@ struct Renderer::Impl {
                 else tex = textures.GetBuiltin("checker");
                 const float texW = tex ? (float)tex->width() : 0.0f;
                 const float texH = tex ? (float)tex->height() : 0.0f;
-                const Vec4 rect = SpriteUvRect(*sp, go->GetComponent<SpriteAnimator>());
+                auto* anim = go->GetComponent<SpriteAnimator>();
+                const Vec4 rect = SpriteUvRect(*sp, anim);
                 const SpriteExtent e = SpriteLocalExtent(*sp, rect, texW, texH);
                 bounds = AABB(Vec3(e.x0, e.y0, 0), Vec3(e.x1, e.y1, 0));
+                if (anim && anim->enabled && anim->fading) {
+                    // The outgoing sheet can be a different size, so the cull
+                    // must cover both quads or the fade is clipped at an edge.
+                    const std::string oldSheet = SpriteTexturePathOf(*sp, anim->previous);
+                    auto oldTex = oldSheet.empty() ? std::shared_ptr<Texture>()
+                                                   : textures.Get(EngineResolvePath(oldSheet));
+                    const Vec4 oldRect = SpriteUvRectOf(*anim, *sp, anim->previous, anim->previousCell);
+                    const SpriteExtent oldExtent = SpriteLocalExtent(
+                        *sp, oldRect, oldTex ? (float)oldTex->width() : 0.0f,
+                        oldTex ? (float)oldTex->height() : 0.0f);
+                    bounds.Expand(AABB(Vec3(oldExtent.x0, oldExtent.y0, 0),
+                                       Vec3(oldExtent.x1, oldExtent.y1, 0)));
+                }
             } else {
                 auto* tr = go->GetComponent<TextRenderer>();
                 float w = tr->fontSize * 0.6f * static_cast<float>(std::max<size_t>(1, tr->text.size()));
@@ -2008,19 +2031,22 @@ struct Renderer::Impl {
             GameObject* go = item.go;
             if (!item.isText) {
                 auto* sr = go->GetComponent<SpriteRenderer>();
+                auto* anim = go->GetComponent<SpriteAnimator>();
                 std::shared_ptr<Texture> tex = item.tex;   // resolved with the cull
                 if (!tex) continue;
                 list->liveTextures.push_back(tex);  // pin against LRU eviction mid-frame
+                const float fadeIn = anim && anim->enabled ? anim->FadeWeight() : 1.0f;
                 // The drawn size is the atlas rect measured in texels, divided
                 // by the pixels-per-unit: a sprite cut out of a sheet is as big
                 // as its frame, not as the whole texture.
-                const Vec4 r = SpriteUvRect(*sr, go->GetComponent<SpriteAnimator>());
+                const Vec4 r = SpriteUvRect(*sr, anim);
                 const SpriteExtent e =
                     SpriteLocalExtent(*sr, r, (float)tex->width(), (float)tex->height());
                 MaterialGpu mat;
                 mat.albedo = tex.get();
                 mat.albedoSRGB = tex->isSRGB();
                 mat.color = sr->color;
+                mat.color.a *= fadeIn;
                 mat.blend = true;
                 mat.spriteLighting = true;
                 mat.pixelPerfect = sr->pixelPerfect;
@@ -2055,11 +2081,49 @@ struct Renderer::Impl {
                 q[1] = world.TransformPoint(Vec3(e.x1, e.y0, 0));
                 q[2] = world.TransformPoint(Vec3(e.x1, e.y1, 0));
                 q[3] = world.TransformPoint(Vec3(e.x0, e.y1, 0));
+                if (anim && anim->enabled && anim->fading) {
+                    // The outgoing clip is frozen at its transition cell and
+                    // drawn first, fully opaque; the incoming clip is laid
+                    // over it with weight w. That gives old*(1-w)+new*w on
+                    // both paths, whatever order the draw items are sorted in
+                    // afterwards.
+                    const std::string oldSheet = SpriteTexturePathOf(*sr, anim->previous);
+                    std::shared_ptr<Texture> oldTex = oldSheet.empty()
+                        ? std::shared_ptr<Texture>() : textures.Get(EngineResolvePath(oldSheet));
+                    if (!oldTex) oldTex = textures.GetBuiltin("checker");
+                    list->liveTextures.push_back(oldTex);
+                    const Vec4 oldRect =
+                        SpriteUvRectOf(*anim, *sr, anim->previous, anim->previousCell);
+                    const SpriteExtent oldExtent = SpriteLocalExtent(
+                        *sr, oldRect, (float)oldTex->width(), (float)oldTex->height());
+                    MaterialGpu oldMat = mat;
+                    oldMat.albedo = oldTex.get();
+                    oldMat.albedoSRGB = oldTex->isSRGB();
+                    oldMat.color = sr->color;
+                    Vec2 oldUv[4] = {
+                        {oldRect.x, oldRect.y + oldRect.w},
+                        {oldRect.x + oldRect.z, oldRect.y + oldRect.w},
+                        {oldRect.x + oldRect.z, oldRect.y},
+                        {oldRect.x, oldRect.y},
+                    };
+                    Vec3 oldQ[4] = {
+                        world.TransformPoint(Vec3(oldExtent.x0, oldExtent.y0, 0)),
+                        world.TransformPoint(Vec3(oldExtent.x1, oldExtent.y0, 0)),
+                        world.TransformPoint(Vec3(oldExtent.x1, oldExtent.y1, 0)),
+                        world.TransformPoint(Vec3(oldExtent.x0, oldExtent.y1, 0)),
+                    };
+                    FrameDrawList::Item2D oldItem;
+                    oldItem.mat = oldMat;
+                    oldItem.firstVert = AppendQuad(list, oldQ, oldUv);
+                    oldItem.vertCount = 6;
+                    list->items2D.push_back(oldItem);
+                }
                 FrameDrawList::Item2D out;
                 out.mat = mat;
                 out.firstVert = AppendQuad(list, q, uv);
                 out.vertCount = 6;
                 list->items2D.push_back(out);
+
             } else {
                 auto* tr = go->GetComponent<TextRenderer>();
                 AppendTextQuads(*tr, go->transform().WorldMatrix(), list);

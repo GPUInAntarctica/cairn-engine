@@ -28,6 +28,12 @@
 
 using namespace Cairn;
 
+// Defined with the other BMP fixture writers further down; the crossfade test
+// needs a four-cell sheet before those helpers appear in this file.
+static void WriteTestBmpSheet(const std::string&, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t,
+                              uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t,
+                              int, int);
+
 static int g_failures = 0;
 #define CHECK(cond)                                                          \
     do {                                                                     \
@@ -1204,6 +1210,118 @@ static void TestSpotShadowsAcrossBackends() {
             CHECK(std::abs(gpuX - cpuX) < 4.0);
             CHECK(std::abs(gpuY - cpuY) < 4.0);
         }
+    }
+}
+
+// A transition with `fade` crossfades the outgoing clip into the incoming one
+// over that many seconds of *play* time. The outgoing cell and sheet are
+// snapshotted at the transition, so the two quads stay independent even when
+// the clips come from different cells; without `fade` the cut is still
+// immediate. Both backends composite the same two quads in the same order.
+static void TestSpriteCrossfade() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-crossfade").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/frames.bmp";
+    WriteTestBmpSheet(dir + "/" + tex, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 16, 16);
+
+    // Samples at: before the transition, at the transition tick, halfway
+    // through the fade, and at its end. A hard cut skips the blend entirely.
+    auto render = [&](int backend, bool withFade) {
+        Engine engine;
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(128, 128);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        scene.ambient = Color(1, 1, 1, 1);
+        scene.tonemap = 0;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 2.0f;
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        GameObject* go = scene.CreateEntity("Sprite");
+        auto* sr = go->AddComponent<SpriteRenderer>();
+        sr->texturePath = tex;
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = 4.0f;
+        auto* anim = go->AddComponent<SpriteAnimator>();
+        anim->columns = 2;
+        anim->rows = 2;
+        anim->fps = 1.0f;
+        auto clipEntry = [](const char* name, int cell) {
+            Json e = Json::MakeObject();
+            e.set("name", Json(name));
+            e.set("firstFrame", Json(cell));
+            e.set("lastFrame", Json(cell));
+            return e;
+        };
+        Json clips = Json::MakeArray();
+        clips.push(clipEntry("idle", 0));
+        clips.push(clipEntry("run", 1));
+        anim->clips = std::move(clips);
+        anim->clip = "idle";
+        anim->params = Json::MakeObject();
+        anim->params.set("go", Json(false));
+        Json when = Json::MakeObject();
+        when.set("param", Json("go"));
+        when.set("op", Json("is"));
+        when.set("value", Json(true));
+        Json tr = Json::MakeObject();
+        tr.set("from", Json("idle"));
+        tr.set("to", Json("run"));
+        tr.set("when", std::move(when));
+        if (withFade) tr.set("fade", Json(0.2f));
+        Json table = Json::MakeArray();
+        table.push(std::move(tr));
+        anim->transitions = std::move(table);
+
+        engine.Play();
+        auto sample = [&]() {
+            engine.RenderGameFrame();
+            const auto& fb = engine.frame().color;
+            const size_t i = ((size_t)64 * 128 + 64) * 4;
+            return std::array<int, 3>{(int)fb[i], (int)fb[i + 1], (int)fb[i + 2]};
+        };
+        std::vector<std::array<int, 3>> out;
+        out.push_back(sample());                 // red
+        anim->params.set("go", Json(true));
+        engine.Update(0.0f);
+        out.push_back(sample());                 // transition fired, no time yet
+        engine.Update(0.1f);
+        out.push_back(sample());                 // halfway
+        engine.Update(0.1f);
+        out.push_back(sample());                 // green
+        return out;
+    };
+    auto isRed = [](const std::array<int, 3>& c) {
+        return c[0] > 180 && c[1] < 60 && c[2] < 60;
+    };
+    auto isGreen = [](const std::array<int, 3>& c) {
+        return c[1] > 180 && c[0] < 60 && c[2] < 60;
+    };
+
+    for (const int backend : {2, 1}) {
+        if (backend == 1 && !VulkanBackendAvailable()) continue;
+        const auto fade = render(backend, true);
+        CHECK(fade.size() == 4);
+        CHECK(isRed(fade[0]));
+        CHECK(isRed(fade[1]));   // the new clip has zero weight at the tick
+        CHECK(fade[2][0] > 60 && fade[2][0] < 200 && fade[2][1] > 60 && fade[2][1] < 200);
+        CHECK(isGreen(fade[3]));
+
+        const auto cut = render(backend, false);
+        CHECK(isRed(cut[0]));
+        CHECK(isGreen(cut[1]));
+        CHECK(isGreen(cut[3]));
+
+        // Same dt sequence, same pixels: the crossfade clock is play time.
+        CHECK(fade == render(backend, true));
     }
 }
 
@@ -5710,6 +5828,7 @@ int main() {
     TestSpotShadowsAcrossBackends();
     TestPointShadowsAcrossBackends();
     TestLightLimitAcrossBackends();
+    TestSpriteCrossfade();
     TestShadowedPixelCount();
     TestVulkanReadbackMemory();
     TestVulkanReadbackSeesLatestFrame();

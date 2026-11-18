@@ -295,7 +295,7 @@ anim->clip = "attack";                       // a script, the CLI or the inspect
 ```json
 "params": { "moving": true, "speed": 2.5, "attack": false },
 "transitions": [
-  { "from": "idle", "to": "walk", "when": { "param": "moving", "op": "is" } },
+  { "from": "idle", "to": "walk", "when": { "param": "moving", "op": "is" }, "fade": 0.15 },
   { "from": "walk", "to": "idle", "when": [
       { "param": "moving", "op": "is", "value": false },
       { "param": "speed",  "op": "lt", "value": 0.5 } ] },
@@ -313,6 +313,7 @@ anim->params.set("moving", Json(true));      // a script, the inspector, or:
 - **A condition is `{"param", "op", "value"}`.** `is` and `not` compare the value as a bool — a bare `"op": "is"` means "is true", so `value` is only needed for `false` — `gt` and `lt` compare it as a number, and `trigger` is a one-shot bool. `when` is either one condition or a list of them that all have to hold. A parameter the animator does not have holds nothing, and an `op` that does not exist never matches, so a half-edited table stays inert instead of firing.
 - **A trigger is spent by the transition it fires.** Every `trigger` the entry watched is cleared when it runs, so one press moves the machine once and `params.attack` reads `false` afterwards — which is also how a batch confirms the press was consumed.
 - **Table order is priority.** The first entry whose `from` is the state being played (or `"*"`, the default, so a `from`-less entry fires from anywhere) and whose conditions hold is the one that runs.
+- **`fade` cross-fades into the new clip.** A positive number of seconds keeps the outgoing clip visible at its last cell while the incoming one is drawn over it with increasing weight. The clock is play time from `Update(dt)`, not wall time, so the same batch replays the same blend. The old clip's own cells and sheet are snapshotted at the transition; without `fade` the change is an immediate cut.
 - **`waitForExit` waits for the clip.** The entry only fires once the state's clip has played for a whole length — its cells over its own `fps` — which is what sends `attack` back to `idle` when it finishes. Without it the entry fires as soon as its conditions hold; a clip with no frame rate has no length, so such an entry never fires.
 - **A transition to the state already playing replays it** from its first cell, which is how a trigger restarts a one-shot clip.
 - **Each tick advances the frame and then runs the table**, so an exit time sees the clip that just finished, and the state that tick enters is the cell the frame shows — its first. Writing `clip` by hand is still a manual override, and a state entered by the machine is drawn before any of its own ticks have run.
