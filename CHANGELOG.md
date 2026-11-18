@@ -2,6 +2,14 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.16] - 2026-11-18
+
+### 2D: sprites can composite with alpha, additive or multiply
+- **A sprite could only be drawn src-over.** `SpriteRenderer` had a tint colour and alpha, but no way to say *how* it joined the frame: glows, light pools and darkening overlays all had to be baked into the texture or faked with a second scene. Unity exposes this as a material blend mode; a 2D renderer without it cannot express those effects from data.
+- **`blendMode` is a reflected enum.** `Alpha` (0, the existing behaviour), `Additive` (1) and `Multiply` (2) live on `SpriteRenderer`, so they serialize in a scene file and appear in `component.schema` and the inspector like any other enum. The GPU cannot change blend factors inside a shader, so the Vulkan backend keeps three sprite pipelines with the matching `SRC_ALPHA/ONE`, `DST_COLOR/ONE_MINUS_SRC_ALPHA` factors and binds one per 2D draw item in order — grouping by mode would reorder a scene whose modes differ. For multiply the shader folds tint alpha into the source colour so the factors produce `dst * (1-a + a*src)`, exactly the software formula.
+- **One arithmetic, two callers.** The software path routes both the whole-pixel and the per-quad antialiased blend through one `BlendRgb` helper, so the shared diagonal of a sprite is still composited once and all three modes keep the same tint-alpha meaning. `sprite.frag` reads the mode from the previously unused `misc.w` slot; no new uniform or descriptor was added.
+- **Tests.** `TestSpriteBlendModes` renders a solid red sprite over a purple clear colour on both backends and checks the centre pixel for all three modes at full and half tint alpha, which separates the three formulas and catches a missing alpha fold. `test/cli.js` pins the enum in `component.schema` and reads the same three pixels back through `image.pixel`; CLI 558 checks. Mutations: ignoring the mode in the software helper fails two checks, dropping the shader's alpha fold fails one GPU check, and binding the plain sprite pipeline for every item fails three GPU checks.
+
 ## [0.2.15] - 2026-11-18
 
 ### Animation: transitions can cross-fade between clips

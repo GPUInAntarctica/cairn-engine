@@ -375,6 +375,12 @@ public:
 // SpriteRenderer - textured quad for 2D. Texture drawn with
 // worldHeight = texturePixelHeight / pixelsPerUnit.
 // ---------------------------------------------------------------------------
+// How a sprite is composited over what is already on screen. Alpha is the
+// existing src-over blend; Additive adds the tinted colour to the framebuffer;
+// Multiply darkens it by the tinted colour. Both backends apply the same
+// factors in display space, so the modes are interchangeable in a scene file.
+enum class SpriteBlendMode : int { Alpha = 0, Additive = 1, Multiply = 2 };
+
 class SpriteRenderer : public Component {
 public:
     std::string texturePath;        // project-relative (png/jpg/bmp)
@@ -398,6 +404,7 @@ public:
     bool flipY = false;
     std::string normalMapPath;      // optional tangent-space normal map (2D lighting)
     bool pixelPerfect = false;      // nearest sampling
+    SpriteBlendMode blendMode = SpriteBlendMode::Alpha;  // 2D compositing
 
     const char* TypeName() const override { return "SpriteRenderer"; }
     ComponentTypeId TypeId() const override { return ComponentTypeId::SpriteRenderer; }

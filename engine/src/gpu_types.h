@@ -43,6 +43,7 @@ struct MaterialGpu {
     const Texture* normalMap = nullptr;
     bool pixelPerfect = false;
     bool blend = false;        // alpha blend instead of opaque overwrite
+    int blendMode = 0;         // 0 alpha, 1 additive, 2 multiply (2D quads)
     bool spriteLighting = false;  // 2D lighting using normalMap / plain sprites
     int cullMode = 1;          // 0 off, 1 back faces, 2 front faces
     bool antialias = true;     // edge coverage antialiasing

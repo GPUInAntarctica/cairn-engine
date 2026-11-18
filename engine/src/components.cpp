@@ -163,6 +163,8 @@ const std::vector<PropertyDef>& MeshRendererDefs() {
     return defs;
 }
 
+static const char* const kSpriteBlendModes[] = {"Alpha", "Additive", "Multiply"};
+
 const std::vector<PropertyDef>& SpriteRendererDefs() {
     static const std::vector<PropertyDef> defs = {
         AssetField<SpriteRenderer, &SpriteRenderer::texturePath>("texturePath", "Texture", "texture"),
@@ -176,6 +178,8 @@ const std::vector<PropertyDef>& SpriteRendererDefs() {
         Field<SpriteRenderer, &SpriteRenderer::flipY>("flipY", "Flip Y", EditorPropKind::Bool),
         AssetField<SpriteRenderer, &SpriteRenderer::normalMapPath>("normalMapPath", "Normal Map", "texture"),
         Field<SpriteRenderer, &SpriteRenderer::pixelPerfect>("pixelPerfect", "Pixel Perfect", EditorPropKind::Bool),
+        EnumField<SpriteRenderer, &SpriteRenderer::blendMode>("blendMode", "Blend Mode",
+                                                              kSpriteBlendModes, 3),
     };
     return defs;
 }

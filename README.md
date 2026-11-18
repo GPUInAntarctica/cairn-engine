@@ -235,7 +235,9 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.2.15**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+Cairn is at version **0.2.16**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+
+**What 0.2.16 changes.** Sprites can choose how they join the frame: `SpriteRenderer.blendMode` adds Alpha (the existing src-over), Additive and Multiply compositing, with tint alpha meaning the same thing on all three. The Vulkan backend binds the matching blend pipeline per sprite in draw order and the software path uses the same arithmetic, so glows, light pools and darkening overlays can be authored as data. Cross-backend and CLI pixel checks pin the modes.
 
 **What 0.2.15 changes.** Animation transitions can cross-fade: a `fade` value in seconds on a transition keeps the old cell and sheet visible while the new clip comes in, with the weight driven by accumulated play time, so the same `Update(dt)` sequence replays the same blend. A hard cut is still the default. The change also fixes sprite tint alpha on the GPU, which had been ignored in `sprite.frag`; cross-backend and addon tests pin both.
 

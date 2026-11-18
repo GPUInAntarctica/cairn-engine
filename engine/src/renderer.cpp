@@ -1198,6 +1198,26 @@ struct Renderer::Impl {
         return passes;
     }
 
+    // Display-space compositing for one pixel. The Vulkan backend uses the
+    // matching blend factors in the sprite pipelines: alpha keeps src-over,
+    // additive adds the tinted source, multiply scales the destination by the
+    // source with the same tint-alpha interpolation. Keeping the arithmetic
+    // in one place means the two paths cannot drift for a partial alpha.
+    static void BlendRgb(uint8_t* dst, const uint8_t src[3], float a, int mode) {
+        if (mode == 1) {
+            for (int ch = 0; ch < 3; ++ch)
+                dst[ch] = (uint8_t)std::clamp((float)dst[ch] + (float)src[ch] * a, 0.0f, 255.0f);
+        } else if (mode == 2) {
+            for (int ch = 0; ch < 3; ++ch)
+                dst[ch] = (uint8_t)std::clamp((float)dst[ch] * (1.0f - a + a * src[ch] / 255.0f),
+                                              0.0f, 255.0f);
+        } else {
+            for (int ch = 0; ch < 3; ++ch)
+                dst[ch] = (uint8_t)std::clamp((float)src[ch] * a + (float)dst[ch] * (1.0f - a),
+                                              0.0f, 255.0f);
+        }
+    }
+
     // ------------------------------------------------------------------
     // Per-pixel shading.
     void ShadeAndStore(int x, int y, const RasterVert* v, const float l[3], const MaterialGpu& mat,
@@ -1458,17 +1478,15 @@ struct Renderer::Impl {
                 if (aaCover[pix] <= 0.0f) std::memcpy(&aaBlendBg[pix * 4], p, 4);
                 const float share = std::min(coverage, 1.0f - aaCover[pix]);
                 const uint8_t* bg = &aaBlendBg[pix * 4];
-                const float mix = albedo[3] * share;
+                uint8_t blended[3] = {bg[0], bg[1], bg[2]};
+                BlendRgb(blended, src, albedo[3], mat.blendMode);
                 for (int ch = 0; ch < 3; ++ch) {
-                    const float v = (float)p[ch] + mix * ((float)src[ch] - (float)bg[ch]);
+                    const float v = (float)p[ch] + share * ((float)blended[ch] - (float)bg[ch]);
                     p[ch] = (uint8_t)std::clamp(v + 0.5f, 0.0f, 255.0f);
                 }
                 aaCover[pix] = std::min(1.0f, aaCover[pix] + share);
             } else {
-                const float a = albedo[3] * coverage;
-                p[0] = (uint8_t)std::clamp(src[0] * a + p[0] * (1.0f - a) + 0.5f, 0.0f, 255.0f);
-                p[1] = (uint8_t)std::clamp(src[1] * a + p[1] * (1.0f - a) + 0.5f, 0.0f, 255.0f);
-                p[2] = (uint8_t)std::clamp(src[2] * a + p[2] * (1.0f - a) + 0.5f, 0.0f, 255.0f);
+                BlendRgb(p, src, albedo[3] * coverage, mat.blendMode);
                 if (perQuad) aaCover[pix] = 1.0f;
             }
             p[3] = 255;
@@ -2047,6 +2065,7 @@ struct Renderer::Impl {
                 mat.albedoSRGB = tex->isSRGB();
                 mat.color = sr->color;
                 mat.color.a *= fadeIn;
+                mat.blendMode = (int)sr->blendMode;
                 mat.blend = true;
                 mat.spriteLighting = true;
                 mat.pixelPerfect = sr->pixelPerfect;

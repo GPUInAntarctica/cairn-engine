@@ -222,6 +222,8 @@ struct VulkanBackend::Impl {
     struct Pipelines {
         VkPipeline mesh = VK_NULL_HANDLE;
         VkPipeline sprite = VK_NULL_HANDLE;
+        VkPipeline spriteAdditive = VK_NULL_HANDLE;
+        VkPipeline spriteMultiply = VK_NULL_HANDLE;
         VkPipeline sky = VK_NULL_HANDLE;
         VkPipeline line = VK_NULL_HANDLE;
         VkPipeline shadow = VK_NULL_HANDLE;
@@ -448,7 +450,8 @@ struct VulkanBackend::Impl {
         textures.clear();
         meshes.clear();
         for (auto& kv : pipelineCache) {
-            for (VkPipeline p : {kv.second.mesh, kv.second.sprite, kv.second.sky, kv.second.line,
+            for (VkPipeline p : {kv.second.mesh, kv.second.sprite, kv.second.spriteAdditive,
+                                 kv.second.spriteMultiply, kv.second.sky, kv.second.line,
                                  kv.second.shadow, kv.second.bright, kv.second.blur,
                                  kv.second.composite, kv.second.grading, kv.second.vignette,
                                  kv.second.fxaa})
@@ -1103,6 +1106,18 @@ bool VulkanBackend::Impl::CreatePipelines(uint32_t sampleCount, Pipelines* out) 
         VK_TRUE,
         VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_OP_ADD,
         VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, kWriteRGBA};
+    // Additive adds the tinted source to the framebuffer. Multiply uses the
+    // same factors as the software path: the shader pre-scales the source by
+    // tint alpha for this mode, and DST_COLOR gives dst * src * alpha while
+    // ONE_MINUS_SRC_ALPHA keeps the uncovered part of the destination.
+    const VkPipelineColorBlendAttachmentState additiveBlend{
+        VK_TRUE,
+        VK_BLEND_FACTOR_SRC_ALPHA, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD,
+        VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, kWriteRGBA};
+    const VkPipelineColorBlendAttachmentState multiplyBlend{
+        VK_TRUE,
+        VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_OP_ADD,
+        VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_OP_ADD, kWriteRGBA};
     auto depth = [&](bool test, bool write, VkCompareOp op) {
         VkPipelineDepthStencilStateCreateInfo d{
             VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
@@ -1141,6 +1156,10 @@ bool VulkanBackend::Impl::CreatePipelines(uint32_t sampleCount, Pipelines* out) 
         noBlend, kDepthOn, true);
     add("sprite", spriteV, spriteF, scenePipeLayout, 1, &spriteInput,
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, alphaBlend, kDepthTest, false);
+    add("spriteAdditive", spriteV, spriteF, scenePipeLayout, 1, &spriteInput,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, additiveBlend, kDepthTest, false);
+    add("spriteMultiply", spriteV, spriteF, scenePipeLayout, 1, &spriteInput,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, multiplyBlend, kDepthTest, false);
     add("sky", skyV, skyF, scenePipeLayout, 1, &emptyInput, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         noBlend, kDepthOff, false);
     add("line", lineV, lineF, scenePipeLayout, 1, &lineInput, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
@@ -1177,6 +1196,8 @@ bool VulkanBackend::Impl::CreatePipelines(uint32_t sampleCount, Pipelines* out) 
             const std::string name = p->name;
             if (name == "mesh") out->mesh = made;
             else if (name == "sprite") out->sprite = made;
+            else if (name == "spriteAdditive") out->spriteAdditive = made;
+            else if (name == "spriteMultiply") out->spriteMultiply = made;
             else if (name == "sky") out->sky = made;
             else if (name == "line") out->line = made;
             else if (name == "shadow") out->shadow = made;
@@ -1609,6 +1630,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         d.flags[2] = (mat.albedo && mat.albedo->isSRGB()) ? 1.0f : 0.0f;
         d.flags[3] = mat.normalMap ? 1.0f : 0.0f;
         d.misc[0] = mat.spriteLighting ? 1.0f : 0.0f;
+        d.misc[3] = (float)mat.blendMode;
         if (mat.shader) {
             const CodeSlot slot = codeSlot(mat.shader);
             d.misc[1] = (float)slot.start;
@@ -2115,15 +2137,25 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             i = j;
         }
 
-        // Sprites and text: already depth-sorted, alpha blended in display space.
-        fn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines->second.sprite);
+        // Sprites and text: already depth-sorted, blended in display space.
+        // Blend mode is a pipeline state, and a later item must composite over
+        // an earlier one in draw order, so bind per item instead of grouping
+        // by mode (grouping would reorder a scene whose modes differ).
         {
             const VkDeviceSize vBase = 0;
             fn.CmdBindVertexBuffers(cmd, 0, 1, &I.verts2D.handle, &vBase);
             size_t itemIndex = 0;
+            VkPipeline bound = VK_NULL_HANDLE;
             for (size_t i = 0; i < list.items2D.size() && i < item2DCount; ++i) {
                 const auto& item = list.items2D[i];
                 if (item.vertCount == 0) continue;
+                VkPipeline pipe = pipelines->second.sprite;
+                if (item.mat.blendMode == 1) pipe = pipelines->second.spriteAdditive;
+                else if (item.mat.blendMode == 2) pipe = pipelines->second.spriteMultiply;
+                if (pipe != bound) {
+                    fn.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+                    bound = pipe;
+                }
                 const size_t slot = opaqueCount + itemIndex;
                 bindFrameSet(cmd, static_cast<uint32_t>(slot));
                 fn.CmdDraw(cmd, item.vertCount, 1, item.firstVert, 0);

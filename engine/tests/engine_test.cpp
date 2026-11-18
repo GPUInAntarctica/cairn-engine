@@ -33,6 +33,8 @@ using namespace Cairn;
 static void WriteTestBmpSheet(const std::string&, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t,
                               uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t, uint8_t,
                               int, int);
+static void WriteTestBmpChecker(const std::string&, int, int, uint8_t, uint8_t, uint8_t,
+                                uint8_t, uint8_t, uint8_t);
 
 static int g_failures = 0;
 #define CHECK(cond)                                                          \
@@ -1209,6 +1211,73 @@ static void TestSpotShadowsAcrossBackends() {
             CHECK(std::abs(gpuCount - cpuCount) < cpuCount / 3);
             CHECK(std::abs(gpuX - cpuX) < 4.0);
             CHECK(std::abs(gpuY - cpuY) < 4.0);
+        }
+    }
+}
+
+// Sprite blend modes are compositing choices, not material colours: alpha is
+// src-over, additive sums the tinted source into the framebuffer, multiply
+// scales the framebuffer by it. All three work with a partial tint alpha, and
+// the GPU pipelines must use the same factors as the software reference.
+static void TestSpriteBlendModes() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-sprite-blend").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/red.bmp";
+    WriteTestBmpChecker(dir + "/" + tex, 8, 8, 255, 0, 0, 255, 0, 0);
+
+    auto render = [&](int backend, int mode, float tintAlpha) {
+        Engine engine;
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(64, 64);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        scene.ambient = Color(1, 1, 1, 1);
+        scene.tonemap = 0;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 0.5f;
+        cc->clearColor = Color(0.5f, 0, 0.5f, 1);   // purple backdrop: all channels can change
+        cc->skyEnabled = false;
+
+        GameObject* go = scene.CreateEntity("Sprite");
+        auto* sr = go->AddComponent<SpriteRenderer>();
+        sr->texturePath = tex;
+        sr->pixelsPerUnit = 6.0f;   // 8-texel sprite covers the 1-unit view
+        sr->pixelPerfect = true;
+        sr->color = Color(1, 1, 1, tintAlpha);
+        sr->blendMode = (SpriteBlendMode)mode;
+        engine.Play();
+        engine.RenderGameFrame();
+        const auto& fb = engine.frame().color;
+        const size_t i = ((size_t)32 * 64 + 32) * 4;
+        return std::array<int, 3>{(int)fb[i], (int)fb[i + 1], (int)fb[i + 2]};
+    };
+    auto closeTo = [](const std::array<int, 3>& c, int r, int g, int b) {
+        return std::abs(c[0] - r) <= 4 && std::abs(c[1] - g) <= 4 && std::abs(c[2] - b) <= 4;
+    };
+
+    // [mode][alpha index 0 = opaque, 1 = half tint]
+    const int expected[3][2][3] = {
+        {{255, 0, 0}, {192, 0, 64}},    // alpha: src*a + dst*(1-a)
+        {{255, 0, 128}, {255, 0, 128}}, // additive: dst + src*a
+        {{128, 0, 0}, {128, 0, 64}},    // multiply: dst*(1-a + a*src)
+    };
+    for (int mode = 0; mode < 3; ++mode) {
+        for (int half = 0; half < 2; ++half) {
+            const float a = half ? 0.5f : 1.0f;
+            const auto cpu = render(2, mode, a);
+            CHECK(closeTo(cpu, expected[mode][half][0], expected[mode][half][1],
+                          expected[mode][half][2]));
+            if (!VulkanBackendAvailable()) continue;
+            const auto gpu = render(1, mode, a);
+            CHECK(closeTo(gpu, expected[mode][half][0], expected[mode][half][1],
+                          expected[mode][half][2]));
         }
     }
 }
@@ -5829,6 +5898,7 @@ int main() {
     TestPointShadowsAcrossBackends();
     TestLightLimitAcrossBackends();
     TestSpriteCrossfade();
+    TestSpriteBlendModes();
     TestShadowedPixelCount();
     TestVulkanReadbackMemory();
     TestVulkanReadbackSeesLatestFrame();

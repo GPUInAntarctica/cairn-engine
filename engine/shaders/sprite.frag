@@ -214,6 +214,10 @@ void main() {
     vec3 enc = clamp(vec3(linearToSrgbFast(toneMapChannel(Lo.r * ex, mode)),
                           linearToSrgbFast(toneMapChannel(Lo.g * ex, mode)),
                           linearToSrgbFast(toneMapChannel(Lo.b * ex, mode))), 0.0, 1.0);
+    // Multiply uses DST_COLOR as its source factor, so the shader folds the
+    // tint alpha into the source colour to get dst * (1-a + a*src). The other
+    // modes feed the unscaled colour to their own blend factors.
+    if (draw.misc.w > 1.5) enc *= alpha;
     // Color channels blend with the shader alpha (SRC_ALPHA pipeline state);
     // the alpha channel keeps whatever the destination holds, which is always
     // 1 - matching the software backend's p[3] = 255.

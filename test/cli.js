@@ -1699,6 +1699,45 @@ check(camEditorThere.equals(camEditorAway),
 check(!camEditorThere.equals(fs.readFileSync(camShot('game-there'))),
     'the game frame is not the editor frame');
 
+// Sprite blend modes are a compositing contract, not just a tint: alpha keeps
+// src-over, additive sums the source into the framebuffer and multiply scales
+// the framebuffer by it. A red sprite over a purple clear colour separates all
+// three with one pixel each; the software backend is what the CLI pins here.
+const blendShot = tag => path.join(scratch, `blend-${tag}.png`);
+const blendSteps = [
+    { command: 'image.new', args: { width: 8, height: 8, background: '#ff0000' } },
+    { command: 'image.save', args: { out: 'Assets/Textures/blendred.png' } },
+];
+for (const mode of [0, 1, 2]) {
+    blendSteps.push(
+        { command: 'scene.new', args: { name: `Blend${mode}` } },
+        { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+        { command: 'scene.settings.set', args: { key: 'ambient', value: [1, 1, 1, 1] } },
+        { command: 'scene.settings.set', args: { key: 'tonemap', value: 'none' } },
+        { command: 'entity.create', args: { name: 'Main', position: [0, 0, 10] }, id: `cam${mode}` },
+        { command: 'component.add', args: { id: `$ref:cam${mode}`, type: 'Camera',
+            props: { orthographic: true, orthoSize: 0.5, clearColor: [0.5, 0, 0.5, 1], skyEnabled: false } } },
+        { command: 'entity.create', args: { name: 'Sprite' }, id: `sp${mode}` },
+        { command: 'component.add', args: { id: `$ref:sp${mode}`, type: 'SpriteRenderer',
+            props: { texturePath: 'Assets/Textures/blendred.png', pixelsPerUnit: 6,
+                     pixelPerfect: true, blendMode: mode } } },
+        { command: 'render.screenshot',
+            args: { out: blendShot(mode), mode: 'game', width: 64, height: 64 }, id: `shot${mode}` },
+    );
+}
+const blendRun = runProjectBatch(writeBatch('sprite-blend.jsonl', blendSteps));
+check(blendRun.lines.every(l => l.ok !== false), 'the sprite blend batch runs clean',
+    blendRun.stdout + blendRun.stderr);
+const blendSchema = expectOk(['component.schema', 'SpriteRenderer']);
+const blendProp = blendSchema && blendSchema.components[0].schema.find(p => p.name === 'blendMode');
+check(blendProp && blendProp.kind === 'enum' && blendProp.options.length === 3,
+    'component.schema exposes the three sprite blend modes', blendProp);
+const blendPixel = tag => expectOk(['--image', blendShot(tag), 'image.pixel', '--x', '32', '--y', '32']);
+const nearRgb = (p, r, g, b) => p && Math.abs(p.r - r) <= 4 && Math.abs(p.g - g) <= 4 && Math.abs(p.b - b) <= 4;
+check(nearRgb(blendPixel(0), 255, 0, 0), 'alpha mode composites over the backdrop', blendPixel(0));
+check(nearRgb(blendPixel(1), 255, 0, 128), 'additive mode adds the sprite to the backdrop', blendPixel(1));
+check(nearRgb(blendPixel(2), 128, 0, 0), 'multiply mode scales the backdrop by the sprite', blendPixel(2));
+
 // ---------------------------------------------------------------------------
 console.log('cli: sprite 2D rendering quality');
 // ---------------------------------------------------------------------------
