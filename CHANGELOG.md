@@ -2,6 +2,15 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.11] - 2026-11-18
+
+### Rendering: point lights cast shadows through six cube faces
+- **A point light still lit straight through props.** 0.2.10 gave spot lights a perspective map, but a bare lamp, a campfire or an explosion has no cone to fit: its `castShadows` flag (on by default) was collected and then ignored by both shading paths, so a wall between the lamp and the floor never darkened anything.
+- **Six 90-degree perspective maps per point light.** `FitPerspShadows` (the shared front end, renamed from `FitSpotShadows`) now fills one array of perspective maps in both kinds: a spot contributes one matched to its outer cone, a point light contributes six, one per cube face (`+X, -X, +Y, -Y, +Z, -Z`), each at 90 degrees with a 2% margin so the 3x3 taps of a corner fragment stay inside the layer. Near is 0.05 and far is the light's `range` for both. Every light stamps its first slot (`GpuLight::shadowSlot`); a point light's faces are the six entries that follow it.
+- **A fragment picks its face by direction.** The face is the dominant axis of `P - lightPos`, positive before negative. `PointFace` on the CPU and the three comparisons in `mesh.frag` implement the same rule, so the reference and the GPU read the same layer for the same pixel. Spot and point maps share the count, the depth conversion and the layer base (`cascadeCount + slot`), so a scene with no directional light and a scene with an empty cascade exercise the same arithmetic.
+- **Limits and memory are explicit.** Up to four spots (`kMaxSpotShadows`) and two point lights (`kMaxPointShadows`) cast per frame, for sixteen perspective layers; the light past a limit logs one warning instead of disappearing silently. The layers share the cascade map size, which is what the existing shadow array already allocates.
+- **Tests.** `TestPointShadowsAcrossBackends` puts one occluder under a point light and four around it, so the shadow region spans the +X, -X, +Z, -Z and -Y faces, renders with shadows on and off on both backends, and requires more than 200 darkened pixels on the reference, at least 20 on each side of the frame, a nonzero `shadowedPixels` stat, and GPU agreement within a third of the count and four pixels of the centroid. It runs twice: with no cascades, and behind an intensity-0 sun that still allocates one. Mutations: taking the point branch out of the software shading fails eleven checks, pinning the shader's face to zero fails eight, and making the CPU's `PointFace` always return zero fails eight. The smoke suite builds the same scene through the addon's reflection API and checks the light count and the stat. CLI 540 checks unchanged.
+
 ## [0.2.10] - 2026-11-18
 
 ### Rendering: spot lights cast shadows through their own perspective map

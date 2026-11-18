@@ -235,7 +235,9 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.2.10**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+Cairn is at version **0.2.11**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+
+**What 0.2.11 changes.** Point lights cast shadows. Spot lights got a cone map in 0.2.10, but a bare lamp or a campfire has no cone to fit, so its `castShadows` setting lit straight through walls. A point light now casts through six 90-degree perspective maps, one per cube face, stored in the same layers as the spot and cascade maps; a fragment picks the face its direction from the light falls in. Up to two point lights and four spots cast per frame, both `castShadows` and `receiveShadows` gate it, and `shadowedPixels` counts point occlusion like the other kinds. A cross-backend test places occluders around the light so several faces are exercised, and runs with and without a cascade in front of the perspective layers.
 
 **What 0.2.10 changes.** Spot lights cast shadows. Only the primary directional light had a shadow map, so a flashlight, a lamp or a stage spot lit straight through props and walls. Each shadow-casting spot light now gets a perspective map fitted to its outer cone, rendered into the same depth array the cascades use (spot layers follow the cascade layers), and sampled with a bias converted for perspective depth on both backends. Up to four spots cast per frame, `castShadows` and `receiveShadows` gate it, and `shadowedPixels` counts spot occlusion like directional occlusion. A cross-backend test renders the same spot-lit scene with and without an empty cascade in front of the spot layer, so the layer indexing is pinned as well as the picture.
 

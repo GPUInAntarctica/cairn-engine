@@ -419,6 +419,36 @@ engine.setComponentProp(spot, 'Light', 'castShadows', false);
 const spotNoCast = engine.renderGameFrame();
 check(spotNoCast.shadowedPixels === 0, 'castShadows off leaves the spot unshadowed');
 
+// Point shadows: six cube faces share the perspective-map array with spots,
+// and the fragment picks the face its direction from the light falls in. This
+// scene puts occluders on both sides so the frame exercises more than one face.
+engine.newScene('PointShadows');
+engine.setViewCamera({ position: [0, 18, 18], yaw: 0, pitch: -45 });
+const pointGround = engine.createPrimitive('Cube', 'PointGround', 0);
+engine.setComponentProp(pointGround, 'Transform', 'position', [0, -0.5, 0]);
+engine.setComponentProp(pointGround, 'Transform', 'scale', [40, 1, 40]);
+engine.setComponentProp(pointGround, 'MeshRenderer', 'receiveShadows', true);
+for (const [i, x, z] of [[0, 0, 0], [1, 7, 0], [2, -7, 0], [3, 0, 7], [4, 0, -7]]) {
+  const box = engine.createPrimitive('Cube', `PointBox${i}`, 0);
+  engine.setComponentProp(box, 'Transform', 'position', [x, 0.7, z]);
+  engine.setComponentProp(box, 'Transform', 'scale', [1.4, 1.4, 1.4]);
+  engine.setComponentProp(box, 'MeshRenderer', 'receiveShadows', false);
+}
+const point = engine.createEntity('Point', 0);
+check(engine.addComponent(point, 'Light'), 'add a point light');
+engine.setComponentProp(point, 'Transform', 'position', [0, 4, 0]);
+engine.setComponentProp(point, 'Light', 'type', 1);
+engine.setComponentProp(point, 'Light', 'intensity', 3.0);
+engine.setComponentProp(point, 'Light', 'range', 40.0);
+engine.setComponentProp(point, 'Light', 'castShadows', true);
+engine.setSceneSetting('ambient', [0.18, 0.18, 0.21, 1]);
+const pointFrame = engine.renderGameFrame();
+check(pointFrame.lightCount === 1, 'the point light is collected');
+check(pointFrame.shadowedPixels > 0, `the point shadow darkens pixels (${pointFrame.shadowedPixels})`);
+engine.setComponentProp(point, 'Light', 'castShadows', false);
+const pointNoCast = engine.renderGameFrame();
+check(pointNoCast.shadowedPixels === 0, 'castShadows off leaves the point light unshadowed');
+
 fs.rmSync(projectDir, { recursive: true, force: true });
 
 if (failures === 0) {

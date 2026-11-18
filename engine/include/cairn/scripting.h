@@ -326,7 +326,7 @@ public:
     float range = 15.0f;        // point and spot lights
     float spotAngle = 45.0f;    // outer cone, degrees
     float spotInnerAngle = 25.0f;  // inner (full intensity) cone, degrees
-    bool castShadows = true;    // directional (cascades) and spot (perspective map)
+    bool castShadows = true;    // directional, spot and point lights all cast
     float shadowBias = 0.02f;   // depth offset, fraction of the cascade depth
 
     const char* TypeName() const override { return "Light"; }

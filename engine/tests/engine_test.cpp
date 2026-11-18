@@ -1191,6 +1191,131 @@ static void TestSpotShadowsAcrossBackends() {
     }
 }
 
+// A point light casts through six perspective faces, one per cube axis. The
+// scene puts occluders on both sides of the light, so the shadow region spans
+// the +X, -X, +Z, -Z and -Y faces: a backend that always read one face would
+// miss (or move) most of it. Rendered once without cascades and once behind
+// an empty cascade, the same as the spot test.
+static void TestPointShadowsAcrossBackends() {
+    const int w = 200, h = 150;
+    struct Shot {
+        std::vector<uint8_t> color;
+        std::string backend;
+        int shadowed = 0;
+    };
+    auto render = [&](int backend, int cascades, bool cast) {
+        Engine engine;
+        engine.SetViewportSize(w, h);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.shadows = cascades;
+        scene.shadowResolution = 512;
+        scene.ambient = Color(0.18f, 0.18f, 0.21f, 1.0f);
+        scene.background = Color(0, 0, 0, 1);
+
+        GameObject* ground = scene.CreateEntity("Ground");
+        ground->transform().scale = Vec3(40, 1, 40);
+        auto* groundMr = ground->AddComponent<MeshRenderer>();
+        groundMr->mesh = MeshRenderer::MeshSource::Plane;
+        groundMr->albedoColor = Color(0.8f, 0.8f, 0.8f, 1.0f);
+        groundMr->receiveShadows = true;
+
+        // One occluder under the light and four around it. Only the ground
+        // receives, so the mask is the cast shadow rather than self-shadowing.
+        const Vec3 positions[5] = {Vec3(0, 0.7f, 0), Vec3(7, 0.7f, 0), Vec3(-7, 0.7f, 0),
+                                    Vec3(0, 0.7f, 7), Vec3(0, 0.7f, -7)};
+        for (int i = 0; i < 5; ++i) {
+            GameObject* box = scene.CreateEntity("Box");
+            box->transform().position = positions[i];
+            box->transform().scale = Vec3(1.4f, 1.4f, 1.4f);
+            auto* boxMr = box->AddComponent<MeshRenderer>();
+            boxMr->receiveShadows = false;
+        }
+
+        if (cascades > 0) {
+            GameObject* sun = scene.CreateEntity("EmptySun");
+            sun->transform().SetEulerDegrees(Vec3(-55, -130, 0));
+            auto* sl = sun->AddComponent<LightComponent>();
+            sl->type = LightComponent::LightType::Directional;
+            sl->castShadows = true;
+            sl->intensity = 0.0f;
+        }
+
+        GameObject* lamp = scene.CreateEntity("Point");
+        lamp->transform().position = Vec3(0, 4, 0);
+        auto* light = lamp->AddComponent<LightComponent>();
+        light->type = LightComponent::LightType::Point;
+        light->castShadows = cast;
+        light->intensity = 3.0f;
+        light->range = 40.0f;
+
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 18, 18);
+        cam->transform().SetEulerDegrees(Vec3(-45, 0, 0));
+        auto* camera = cam->AddComponent<CameraComponent>();
+        camera->skyEnabled = false;
+        camera->clearColor = Color(0, 0, 0, 1);
+
+        RenderStats stats = engine.RenderGameFrame();
+        Shot shot;
+        shot.color = engine.frame().color;
+        shot.backend = stats.backend;
+        shot.shadowed = stats.shadowedPixels;
+        return shot;
+    };
+    struct Mask {
+        int count = 0;
+        double cx = -1, cy = -1;
+        int left = 0, right = 0, top = 0, bottom = 0;
+    };
+    auto shadowMask = [&](const std::vector<uint8_t>& on, const std::vector<uint8_t>& off) {
+        Mask m;
+        double sx = 0, sy = 0;
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const size_t i = ((size_t)y * w + x) * 4;
+                int d = 0;
+                for (int c = 0; c < 3; ++c)
+                    d = std::max(d, std::abs((int)on[i + c] - (int)off[i + c]));
+                if (d > 8) {
+                    ++m.count;
+                    sx += x;
+                    sy += y;
+                    if (x < w / 2) ++m.left; else ++m.right;
+                    if (y < h / 2) ++m.top; else ++m.bottom;
+                }
+            }
+        }
+        m.cx = m.count ? sx / m.count : -1.0;
+        m.cy = m.count ? sy / m.count : -1.0;
+        return m;
+    };
+
+    for (int cascades : {0, 1}) {
+        const auto cpuOn = render(2, cascades, true);
+        const auto cpuOff = render(2, cascades, false);
+        CHECK(cpuOn.backend == "software");
+        const Mask cpu = shadowMask(cpuOn.color, cpuOff.color);
+        CHECK(cpu.count > 200);            // the reference draws the cast shadow
+        CHECK(cpu.left > 20 && cpu.right > 20);   // occluders on both sides
+        CHECK(cpuOn.shadowed > 0);
+        if (cascades == 0) CHECK(cpuOff.shadowed == 0);
+
+        const auto gpuOn = render(1, cascades, true);
+        if (gpuOn.backend == "vulkan") {
+            const auto gpuOff = render(1, cascades, false);
+            const Mask gpu = shadowMask(gpuOn.color, gpuOff.color);
+            CHECK(gpu.count > 200);
+            CHECK(gpu.left > 20 && gpu.right > 20);
+            CHECK(gpuOn.shadowed > 0);
+            CHECK(std::abs(gpu.count - cpu.count) < cpu.count / 3);
+            CHECK(std::abs(gpu.cx - cpu.cx) < 4.0);
+            CHECK(std::abs(gpu.cy - cpu.cy) < 4.0);
+        }
+    }
+}
+
 // `RenderStats::shadowedPixels` is part of the CLI's frame result and of the
 // profiler, so it must describe the same thing whichever backend drew the
 // frame. The software path counts a pixel when its shadow lookup comes back
@@ -5419,6 +5544,7 @@ int main() {
     TestShadows();
     TestShadowsAcrossBackends();
     TestSpotShadowsAcrossBackends();
+    TestPointShadowsAcrossBackends();
     TestShadowedPixelCount();
     TestVulkanReadbackMemory();
     TestVulkanReadbackSeesLatestFrame();

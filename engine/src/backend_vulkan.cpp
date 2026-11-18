@@ -70,10 +70,11 @@ struct ShadowUbo {
     float toLight[4];
     // Spot maps occupy array layers after the cascades; their projection is
     // perspective, so the depth bias uses depthScale / w^2.
-    float spotMatrix[kMaxSpotShadows][16];
-    float spotParams[kMaxSpotShadows][4];  // x depthScale, y texel world units
+    float perspMatrix[kMaxPerspShadows][16];
+    float perspParams[kMaxPerspShadows][4];  // x depthScale, y texel world units
 };
-static_assert(sizeof(ShadowUbo) == 4 * 64 + 5 * 16 + kMaxSpotShadows * 64 + kMaxSpotShadows * 16,
+static_assert(sizeof(ShadowUbo) ==
+                  4 * 64 + 5 * 16 + kMaxPerspShadows * 64 + kMaxPerspShadows * 16,
               "ShadowUBO layout must match mesh.frag");
 
 struct DrawUbo {
@@ -1269,12 +1270,13 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
     Impl::Image& depthRead = I.depthResolve;
 
     // ---- shadow maps -------------------------------------------------------
-    // Cascades first, then one perspective layer per spot light: the fragment
-    // stage indexes a spot's layer as cascadeCount + slot.
+    // Cascades first, then the perspective layers (a spot's one map or a point
+    // light's six faces): the fragment stage indexes them as cascadeCount +
+    // slot.
     int cascades = std::clamp(list.cascadeCount, 0, kMaxCascades);
-    int spots = std::clamp(list.spotShadowCount, 0, kMaxSpotShadows);
+    int persp = std::clamp(list.perspShadowCount, 0, kMaxPerspShadows);
     const int cascadeSize = std::clamp(list.cascadeSize, 256, 4096);
-    const int shadowLayers = cascades + spots;
+    const int shadowLayers = cascades + persp;
     if (shadowLayers > 0) {
         const bool need = I.shadowMap.handle == VK_NULL_HANDLE || I.shadowMap.w != cascadeSize ||
                           I.shadowMap.layers != shadowLayers;
@@ -1285,14 +1287,14 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
                                    VK_IMAGE_USAGE_SAMPLED_BIT,
                                &I.shadowMap)) {
                 cascades = 0;
-                spots = 0;
+                persp = 0;
             }
         }
     }
-    const bool shadows = (cascades + spots) > 0 && I.shadowMap.handle != VK_NULL_HANDLE;
+    const bool shadows = (cascades + persp) > 0 && I.shadowMap.handle != VK_NULL_HANDLE;
     if (!shadows) {
         cascades = 0;
-        spots = 0;
+        persp = 0;
     }
 
     // ---- mesh + texture residency -----------------------------------------
@@ -1527,14 +1529,14 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         s.params[0] = (float)count;
         s.params[1] = list.shadowStrength;
         s.params[2] = (float)cascadeSize;
-        s.params[3] = (float)spots;
+        s.params[3] = (float)persp;
         s.toLight[0] = list.shadowToLight.x;
         s.toLight[1] = list.shadowToLight.y;
         s.toLight[2] = list.shadowToLight.z;
-        for (int i = 0; i < spots; ++i) {
-            std::memcpy(s.spotMatrix[i], list.spotShadows[i].matrix.m, sizeof(s.spotMatrix[i]));
-            s.spotParams[i][0] = list.spotShadows[i].depthScale;
-            s.spotParams[i][1] = list.spotShadows[i].texel;
+        for (int i = 0; i < persp; ++i) {
+            std::memcpy(s.perspMatrix[i], list.perspShadows[i].matrix.m, sizeof(s.perspMatrix[i]));
+            s.perspParams[i][0] = list.perspShadows[i].depthScale;
+            s.perspParams[i][1] = list.perspShadows[i].texel;
         }
         std::memcpy(I.shadowUbo.mapped, &s, sizeof(s));
     }
@@ -1919,11 +1921,11 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
         VkRect2D cascadeScissor{{0, 0}, {static_cast<uint32_t>(cascadeSize),
                                           static_cast<uint32_t>(cascadeSize)}};
         const uint32_t firstCaster = opaqueCount + item2DCount;
-        for (int c = 0; c < cascades + spots; ++c) {
-            // Cascades come first, then the spot layers; each pass is one layer
-            // with its own projection, pushed as a constant.
+        for (int c = 0; c < cascades + persp; ++c) {
+            // Cascades come first, then the perspective layers; each pass is
+            // one layer with its own projection, pushed as a constant.
             const Mat4& shadowMatrix =
-                c < cascades ? list.cascadeMatrix[c] : list.spotShadows[c - cascades].matrix;
+                c < cascades ? list.cascadeMatrix[c] : list.perspShadows[c - cascades].matrix;
             // The array is left readable by the main pass; move the layer back
             // to a depth attachment for this frame's pass.
             I.Transition(cmd, I.shadowMap, VK_IMAGE_ASPECT_DEPTH_BIT,

@@ -43,10 +43,12 @@ layout(std140, set = 0, binding = 2) uniform ShadowUBO {
     vec4 cascadeSplits;   // far boundary of each cascade (view depth)
     vec4 cascadeRange;    // ortho world depth span per cascade
     vec4 cascadeTexel;    // world units per shadow texel
-    vec4 shadowParams;    // x cascade count, y strength, z map size, w spot count
+    vec4 shadowParams;    // x cascade count, y strength, z map size, w perspective count
     vec4 shadowToLight;   // xyz towards the shadow-casting light
-    mat4 spotMatrix[4];   // one perspective projection per shadowing spot
-    vec4 spotParams[4];   // x depthScale (near*far/(far-near)), y texel world units
+    // Spot cones and point cube faces share this run: a spot owns one entry, a
+    // point light six consecutive ones. The CPU's FitPerspShadows fills them.
+    mat4 perspMatrix[16];
+    vec4 perspParams[16]; // x depthScale (near*far/(far-near)), y texel world units
 } shadow;
 
 layout(set = 0, binding = 3) uniform sampler2DArray shadowMaps;
@@ -334,19 +336,20 @@ float sampleShadow(vec3 P, float viewDepth, float ndotl) {
     return 1.0 - (1.0 - lit) * shadow.shadowParams.y;
 }
 
-// Spot maps live in the same array after the cascades. The projection is
-// perspective, so the authored world-space bias becomes depth units as
-// depthScale / w^2; SampleSpotShadow on the software path uses the same
-// expression, which is what keeps both pictures on the same pixels.
-float sampleSpotShadow(int slot, vec3 P, float ndotl) {
+// Perspective maps (spot cones and point cube faces) live in the same array
+// after the cascades. The projection is perspective, so the authored
+// world-space bias becomes depth units as depthScale / w^2; SamplePerspShadow
+// on the software path uses the same expression, which is what keeps both
+// pictures on the same pixels.
+float samplePerspShadow(int slot, vec3 P, float ndotl) {
     if (slot < 0 || slot >= int(shadow.shadowParams.w)) return 1.0;
-    vec4 clip = shadow.spotMatrix[slot] * vec4(P, 1.0);
+    vec4 clip = shadow.perspMatrix[slot] * vec4(P, 1.0);
     if (clip.w <= 1e-4) return 1.0;
     vec3 ndc = clip.xyz / clip.w;
     if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z > 1.0 || ndc.z < -1.0) return 1.0;
 
-    float worldBias = shadow.spotParams[slot].y * (1.5 + 2.0 * (1.0 - clamp(ndotl, 0.0, 1.0)));
-    float bias = shadow.spotParams[slot].x * worldBias / (clip.w * clip.w);
+    float worldBias = shadow.perspParams[slot].y * (1.5 + 2.0 * (1.0 - clamp(ndotl, 0.0, 1.0)));
+    float bias = shadow.perspParams[slot].x * worldBias / (clip.w * clip.w);
     float refDepth = ndc.z * 0.5 + 0.5;
     float size = shadow.shadowParams.z;
     float fx = (ndc.x * 0.5 + 0.5) * size;
@@ -451,11 +454,25 @@ void main() {
             float shadowTerm = 1.0;
             if (lights[i].posType.w < 0.5) {
                 shadowTerm = shadowFactor;
-            } else if (lights[i].posType.w > 1.5 && lights[i].cone.z >= 0.0 && draw.flags.y > 0.5) {
-                // Spot maps cover the outer cone only; LightFalloff already
-                // rejected everything the map cannot reach.
-                float spotNdotL = max(dot(geomN, -lights[i].dirInten.xyz), 0.0);
-                shadowTerm = sampleSpotShadow(int(lights[i].cone.z), P, spotNdotL);
+            } else if (lights[i].cone.z >= 0.0 && draw.flags.y > 0.5) {
+                int slot = int(lights[i].cone.z);
+                if (lights[i].posType.w > 1.5) {
+                    // Spot maps cover the outer cone only; LightFalloff already
+                    // rejected everything the map cannot reach.
+                    shadowTerm = samplePerspShadow(slot, P, max(dot(geomN, L), 0.0));
+                } else {
+                    // Point light: pick the cube face the fragment's direction
+                    // falls in. The six faces follow the light's first slot, so
+                    // the face index is a layer offset. Dominant axis, positive
+                    // before negative - the rule PointFace uses on the CPU.
+                    vec3 d = P - lights[i].posType.xyz;
+                    vec3 ad = abs(d);
+                    int face;
+                    if (ad.x >= ad.y && ad.x >= ad.z) face = d.x >= 0.0 ? 0 : 1;
+                    else if (ad.y >= ad.z) face = d.y >= 0.0 ? 2 : 3;
+                    else face = d.z >= 0.0 ? 4 : 5;
+                    shadowTerm = samplePerspShadow(slot + face, P, max(dot(geomN, L), 0.0));
+                }
                 if (shadowTerm < 0.98) atomicAdd(shadowCounter.shadowedPixels, 1u);
             }
             float s = lights[i].dirInten.w * atten * shadowTerm * NdotL;

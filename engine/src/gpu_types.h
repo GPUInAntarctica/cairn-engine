@@ -16,6 +16,15 @@ namespace Cairn {
 static constexpr int kMaxLights = 16;          // lights evaluated per pixel
 static constexpr int kMaxCascades = 4;         // directional shadow cascades
 static constexpr int kMaxSpotShadows = 4;      // spot lights with a perspective shadow map
+// A point light is shadowed through six 90-degree perspective maps (one per
+// cube face) instead of a cube sampler, so the software path can rasterize
+// them with the same code as spots. Both kinds share one array of perspective
+// maps: spot layers first, then one run of six per point light. The shader
+// indexes them after the cascades as cascadeCount + slot, which keeps the
+// layer arithmetic identical for both.
+static constexpr int kMaxPointShadows = 2;     // point lights with six faces each
+static constexpr int kMaxPerspShadows = kMaxSpotShadows + 6 * kMaxPointShadows;
+static_assert(kMaxPerspShadows == 16, "mesh.frag sizes its perspective arrays to 16");
 
 // Material state for one draw. The software rasterizer reads it directly and
 // the Vulkan backend packs it into a UBO; fields must stay POD.
@@ -61,9 +70,10 @@ struct GpuLight {
     float cosInner = -1.0f;
     bool castShadows = false;
     float shadowBias = 0.02f;
-    // Index into FrameDrawList::spotShadows, or -1 when this light has no
-    // shadow map this frame. A spot light only casts while `castShadows` is on
-    // and the frame has a free slot.
+    // First index into FrameDrawList::perspShadows, or -1 when this light has
+    // no shadow map this frame. A spot light owns one entry; a point light
+    // owns six consecutive entries (the cube faces) starting here. The light
+    // only casts while `castShadows` is on and the frame has room for it.
     int shadowSlot = -1;
 };
 
@@ -102,18 +112,20 @@ struct FrameDrawList {
     float shadowStrength = 0.85f;
     Vec3 shadowToLight{0, 1, 0};
 
-    // Spot shadows: one perspective map per shadowing spot light, fitted by
-    // the same shared code that fits the cascades. The projection is matched to
-    // the light's outer cone, so a shadow only exists where the light reaches.
-    struct SpotShadow {
+    // Perspective shadow maps. A spot light contributes one, fitted to its
+    // outer cone, so a shadow only exists where the light reaches. A point
+    // light contributes six, one per cube face, which together cover the
+    // sphere; a fragment picks the face its direction from the light falls
+    // in. Fitted by the same shared code that fits the cascades.
+    struct PerspShadow {
         Mat4 matrix;
         // near*far/(far-near): converts a world-space bias into the [0,1] depth
         // the map stores, at distance w along the light's axis.
         float depthScale = 1.0f;
         float texel = 0.01f;   // world units per texel at mid range
     };
-    int spotShadowCount = 0;
-    SpotShadow spotShadows[kMaxSpotShadows];
+    int perspShadowCount = 0;
+    PerspShadow perspShadows[kMaxPerspShadows];
 
     struct OpaqueDraw {
         std::shared_ptr<Mesh> mesh;   // keeps the mesh alive until submit
