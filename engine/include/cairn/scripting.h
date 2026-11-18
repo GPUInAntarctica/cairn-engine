@@ -12,7 +12,9 @@
 #include "log.h"   // CAIRN_PRINTF
 #include "math.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <map>
 #include <new>
 #include <string>
 #include <type_traits>
@@ -447,6 +449,15 @@ public:
 // quad while the new one comes in, so a change of state can cross-fade instead
 // of cutting. Without it the cut is immediate, as before.
 //
+// `blendTree` is the continuous alternative to that state machine: a 1D tree
+// {"param","entries"} where entries are {"at","clip"} thresholds. The value of
+// `params[param]` picks the two clips it sits between and the weight between
+// them, so idle/walk/run blend smoothly instead of cutting at a threshold. All
+// clips named by the tree play at once, each with its own frame advancing by
+// play time; only the rendered weight follows the parameter. A tree takes
+// precedence over `clip` and `transitions` while it is set, and reuses the same
+// two-quad crossfade path the renderer already draws for a `fade` transition.
+//
 // A clip can also write a parameter as it plays, with `events`: entries of
 // {"at", "set"} fire when the cell `at` is entered and write the object `set`
 // into the parameters. "at" counts the clip's own cells, with -1 for its last
@@ -485,6 +496,14 @@ public:
     Json params = Json::MakeObject();
     Json transitions = Json::MakeArray();
 
+    // A 1D blend tree: {"param": "speed", "entries": [{"at": 0, "clip": "idle"},
+    // {"at": 4, "clip": "run"}]}. `param` names a numeric entry in `params`;
+    // `entries` are (threshold, clip) points on that parameter's axis. The
+    // value selects the two bracketing clips and the linear weight between
+    // them. Set to anything other than a well-formed tree to use the ordinary
+    // clip/transitions path again.
+    Json blendTree = Json::MakeObject();
+
     // Cells of the clip that write something when they are entered:
     // [{"at", "set"}], where `at` counts the clip's own cells (-1 means its
     // last) and `set` is an object of parameters to write. This is how a clip
@@ -522,6 +541,19 @@ public:
     int previousCell = 0;
     float fadeElapsed = 0.0f;
     float fadeLength = 0.0f;
+
+    // Per-clip play state inside a 1D blend tree, keyed by clip name. Every
+    // clip the tree names advances by the same dt on its own clock, the way a
+    // Unity blend tree samples each motion at its own time position; the
+    // parameter only decides how the rendered poses are weighted. Runtime
+    // state, never a reflected field, so a scene file describes the tree and
+    // the frame stays a pure function of the dt and parameter sequence.
+    struct ClipState {
+        int frame = 0;
+        float frameTime = 0.0f;
+        float stateTime = 0.0f;
+    };
+    std::map<std::string, ClipState> blendStates;
 
     // Weight of the new clip during a crossfade; 1 when there is none.
     float FadeWeight() const {
@@ -565,9 +597,11 @@ public:
         return std::string();
     }
 
-    // The animation to play now: the clip `clip` names, key by key over the
-    // component's own fields, or just those fields when it names nothing.
-    Clip ActiveClip() const {
+    // Resolve one named clip key by key over the component's own fields, or
+    // just those fields when the name is empty or absent. Shared by the active
+    // clip and by a blend tree's outgoing/incoming clips so all three use the
+    // same per-key rules.
+    Clip ResolveClip(const std::string& name) const {
         Clip c;
         c.columns = columns;
         c.rows = rows;
@@ -578,7 +612,7 @@ public:
         c.loop = loop;
         c.durations = durations;
         c.events = events;
-        const Json* e = FindClip(clip);
+        const Json* e = FindClip(name);
         if (!e) return c;
         // at() is null for a key the entry leaves out, and each accessor takes
         // the resolved value as its default.
@@ -597,6 +631,9 @@ public:
         if ((*e)["events"].isArray()) c.events = (*e)["events"];
         return c;
     }
+
+    // The animation to play now: the clip `clip` names.
+    Clip ActiveClip() const { return ResolveClip(clip); }
 
     // --- clip arithmetic, on a resolved clip -------------------------------
     static int CellCountOf(const Clip& c) {
@@ -703,11 +740,141 @@ public:
         FireEvents(frame);
     }
 
+    // --- 1D blend tree ------------------------------------------------------
+    // A usable point is an object with a numeric `at` and a named `clip`;
+    // anything else in the entries array is skipped rather than guessed at.
+    static bool IsBlendEntry(const Json& e) {
+        return e.isObject() && e["at"].isNumber() && !e["clip"].asString().empty();
+    }
+
+    // A tree is active only when it has a parameter and at least one usable
+    // point. Anything else leaves the ordinary clip/transitions path in charge.
+    bool BlendTreeActive() const {
+        if (!blendTree.isObject() || blendTree["param"].asString().empty()) return false;
+        const Json& es = blendTree["entries"];
+        if (!es.isArray()) return false;
+        for (const Json& e : es.arrayItems()) if (IsBlendEntry(e)) return true;
+        return false;
+    }
+
+    // The tree's (threshold, clip) points in ascending threshold order. Sorting
+    // a copy means the order in the scene file cannot change which clips a
+    // value blends, and a stable sort keeps the first of two equal thresholds.
+    void BlendPoints(std::vector<std::pair<float, std::string>>* out) const {
+        out->clear();
+        const Json& es = blendTree["entries"];
+        if (!es.isArray()) return;
+        for (const Json& e : es.arrayItems()) {
+            if (IsBlendEntry(e))
+                out->push_back({(float)e["at"].asNumber(), e["clip"].asString()});
+        }
+        std::stable_sort(out->begin(), out->end(),
+                         [](const std::pair<float, std::string>& a,
+                            const std::pair<float, std::string>& b) { return a.first < b.first; });
+    }
+
+    // State of a named clip, created at its own first cell the first time the
+    // tree names it. Blend clips are always playing: no entry event fires on
+    // creation, only when a step actually enters another cell.
+    ClipState& BlendState(const std::string& name, const Clip& c) {
+        auto it = blendStates.find(name);
+        if (it == blendStates.end()) {
+            ClipState fresh;
+            fresh.frame = FirstCellOf(c);
+            it = blendStates.emplace(name, fresh).first;
+        }
+        return it->second;
+    }
+
+    // Advance one clip of the tree by dt, stepping cells one at a time exactly
+    // as AdvanceAnimation does for a single clip. Each clip keeps its own frame
+    // and clock, so walking and running never reset each other's pose.
+    void AdvanceClipState(const std::string& name, const Clip& c, float dt) {
+        ClipState& st = BlendState(name, c);
+        st.stateTime += dt;
+        if (!playing) return;
+        const int count = FrameCountOf(c);
+        const float length = LengthOf(c);
+        if (!(length > 0.0f) || count <= 1) return;
+        st.frameTime += dt;
+        if (st.frameTime > length) st.frameTime = length;
+        for (int guard = 0; guard <= count; guard++) {
+            const float sec = CellSeconds(c, ClampClipOf(c, st.frame));
+            if (!(sec > 0.0f) || st.frameTime < sec) break;
+            st.frameTime -= sec;
+            st.frame = StepCellOf(c, st.frame, 1);
+            FireEventsFor(st.frame, c);
+        }
+    }
+
+    // Publish the state of one clip alone: no second quad, full opacity.
+    void SetBlendSingle(const std::string& name) {
+        const ClipState& st = blendStates.at(name);
+        clip = activeClip = name;
+        frame = st.frame;
+        frameTime = st.frameTime;
+        stateTime = st.stateTime;
+        fading = false;
+        fadeLength = fadeElapsed = 0.0f;
+    }
+
+    // Evaluate the tree: advance every clip it names, then publish the two
+    // bracketing clips into the same slots a `fade` transition uses. The renderer
+    // draws the outgoing quad first at full alpha and the active quad on top
+    // with FadeWeight(), which here is exactly the parameter's weight t.
+    void AdvanceBlendTree(float dt) {
+        std::vector<std::pair<float, std::string>> pts;
+        BlendPoints(&pts);
+        if (pts.empty()) return;
+        // A clip named by two thresholds is one motion, not two: advance it
+        // once so both points sample the same frame.
+        std::vector<std::string> names;
+        for (const auto& p : pts) {
+            if (std::find(names.begin(), names.end(), p.second) == names.end())
+                names.push_back(p.second);
+        }
+        for (const std::string& name : names) AdvanceClipState(name, ResolveClip(name), dt);
+
+        const std::string param = blendTree["param"].asString("");
+        float v = 0.0f;
+        if (params.isObject()) {
+            const Json* j = params.find(param);
+            if (j && j->isNumber()) v = (float)j->asNumber();
+        }
+        // Outside the thresholds the tree holds the nearest end clip at full
+        // weight; between two thresholds it blends them linearly.
+        if (v <= pts.front().first) { SetBlendSingle(pts.front().second); return; }
+        if (v >= pts.back().first) { SetBlendSingle(pts.back().second); return; }
+        size_t i = 0;
+        while (i + 1 < pts.size() && pts[i + 1].first <= v) ++i;
+        const std::string& lo = pts[i].second;
+        const std::string& hi = pts[i + 1].second;
+        if (lo == hi) { SetBlendSingle(lo); return; }
+        const float span = pts[i + 1].first - pts[i].first;
+        const float t = span > 0.0f ? Clamp((v - pts[i].first) / span, 0.0f, 1.0f) : 0.0f;
+
+        const ClipState& hs = blendStates.at(hi);
+        clip = activeClip = hi;
+        frame = hs.frame;
+        frameTime = hs.frameTime;
+        stateTime = hs.stateTime;
+        const ClipState& ls = blendStates.at(lo);
+        previous = ResolveClip(lo);
+        previousCell = ls.frame;
+        fading = true;
+        fadeLength = 1.0f;
+        fadeElapsed = t;   // FadeWeight() == clamp(t, 0, 1) == t
+    }
+
     // Advance by `dt` seconds of play time. A stall longer than one full cycle
     // is capped at a cycle: wrapping or clamping makes the rest a no-op, and it
     // keeps the loop below bounded. Cells are stepped one at a time, because
     // each of them has its own time and a long `dt` can pass through several.
     void AdvanceAnimation(float dt) {
+        if (BlendTreeActive()) {
+            AdvanceBlendTree(dt);
+            return;
+        }
         if (clip != activeClip) {
             // A manual clip change is a hard cut; only a transition with a
             // positive `fade` starts a crossfade.
@@ -742,18 +909,25 @@ public:
         }
     }
 
-    void StepFrames(int n) {
-        const Clip c = ActiveClip();
+    // Advance one cell index within a clip, wrapping or clamping the way the
+    // clip asks. Shared by the ordinary animation and by every clip of a
+    // 1D blend tree, so both advance a frame by the same rule.
+    static int StepCellOf(const Clip& c, int from, int n) {
         const int first = FirstCellOf(c);
         const int count = FrameCountOf(c);
-        int f = ClampClipOf(c, frame) - first + n;
+        int f = ClampClipOf(c, from) - first + n;
         if (c.loop) f = ((f % count) + count) % count;
         else f = f < 0 ? 0 : (f > count - 1 ? count - 1 : f);
-        frame = first + f;
+        return first + f;
+    }
+
+    void StepFrames(int n) {
+        const Clip c = ActiveClip();
+        frame = StepCellOf(c, frame, n);
         // A step over several cells fires the events of the cell it lands on;
         // the engine's own stepping goes one cell at a time, so it fires every
         // cell it passes through.
-        FireEvents(frame);
+        FireEventsFor(frame, c);
     }
 
     // --- parameters and transitions ----------------------------------------
@@ -767,8 +941,11 @@ public:
     // is the only thing that fires an event, so the same walk over the same
     // clip writes the same values; an entry with no `at`, no `set`, or an `at`
     // that is not a number is skipped rather than guessed at.
-    void FireEvents(int cell) {
-        const Clip c = ActiveClip();
+    void FireEvents(int cell) { FireEventsFor(cell, ActiveClip()); }
+
+    // The same walk for an explicit clip: a blend tree advances several clips
+    // at once and each fires its own cell's events into the shared parameters.
+    void FireEventsFor(int cell, const Clip& c) {
         if (!c.events.isArray()) return;
         for (const Json& e : c.events.arrayItems()) {
             if (!e.isObject() || !e["set"].isObject() || !e["at"].isNumber()) continue;
@@ -836,6 +1013,10 @@ public:
     // its `to`. Returns the state entered, or "" when nothing fired. The order
     // of the table is the priority, which is what makes it deterministic.
     std::string EvaluateTransitions() {
+        // A blend tree owns the clips while it is set: its weight comes from a
+        // parameter, not from a state-machine cut. The table stays in the scene
+        // file, ready to take over as soon as the tree is cleared.
+        if (BlendTreeActive()) return std::string();
         if (!transitions.isArray()) return std::string();
         for (const Json& t : transitions.arrayItems()) {
             if (!t.isObject()) continue;

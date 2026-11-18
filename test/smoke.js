@@ -535,6 +535,50 @@ check(distance(end, idle) > 40, 'the finished fade shows the incoming clip');
 check(distance(half, idle) > 12 && distance(half, idle) < distance(end, idle),
     'the halfway frame is between the two clips');
 
+// A 1D blend tree blends two named clips by a numeric parameter instead of
+// cutting on a transition. Set it through the addon's reflection API - the JSON
+// field marshalling is part of the contract - and read the frame back: the
+// parameter, not elapsed time, decides the picture. The two clips point at the
+// red and green sheets the crossfade test just wrote.
+engine.newScene('BlendTree');
+engine.setViewCamera({ position: [0, 0, 8], yaw: 0, pitch: 0 });
+const btSprite = engine.createEntity('BTSprite', 0);
+check(engine.addComponent(btSprite, 'SpriteRenderer'), 'add a sprite renderer for the blend tree');
+check(engine.addComponent(btSprite, 'SpriteAnimator'), 'add an animator for the blend tree');
+engine.setComponentProp(btSprite, 'Transform', 'scale', [100, 100, 1]);
+engine.setComponentProp(btSprite, 'SpriteAnimator', 'columns', 2);
+engine.setComponentProp(btSprite, 'SpriteAnimator', 'rows', 2);
+engine.setComponentProp(btSprite, 'SpriteAnimator', 'fps', 1);
+engine.setComponentProp(btSprite, 'SpriteAnimator', 'clips', [
+  { name: 'idle', firstFrame: 0, lastFrame: 0, texturePath: 'Assets/Textures/idleFade.png' },
+  { name: 'run', firstFrame: 0, lastFrame: 0, texturePath: 'Assets/Textures/runFade.png' },
+]);
+engine.setComponentProp(btSprite, 'SpriteAnimator', 'blendTree', {
+  param: 'speed',
+  entries: [ { at: 0, clip: 'idle' }, { at: 4, clip: 'run' } ],
+});
+engine.setComponentProp(btSprite, 'SpriteAnimator', 'params', { speed: 0 });
+engine.play();
+const btShot = path.join(projectDir, 'bt.png');
+const sampleBT = speed => {
+  engine.setComponentProp(btSprite, 'SpriteAnimator', 'params', { speed });
+  engine.update(0.0);
+  engine.renderGameFrame();
+  engine.saveFramePNG(btShot);
+  const img = imaging.loadImage(btShot);
+  const p = imaging.samplePixel(img.layers[0].data, img.width, img.height, 240, 135);
+  return [p.r, p.g, p.b];
+};
+const btLow = sampleBT(0);
+const btHigh = sampleBT(4);
+const btMid = sampleBT(2);
+check(btLow[0] > btLow[1] + 40, 'speed at the low end shows the red idle clip', btLow);
+check(btHigh[1] > btHigh[0] + 40, 'speed at the high end shows the green run clip', btHigh);
+check(distance(btMid, btLow) > 20 && distance(btMid, btHigh) > 20,
+    'a midpoint blends the two clips', btMid);
+check(JSON.stringify(sampleBT(0)) === JSON.stringify(btLow),
+    'the frame is a pure function of the parameter');
+
 fs.rmSync(projectDir, { recursive: true, force: true });
 
 if (failures === 0) {

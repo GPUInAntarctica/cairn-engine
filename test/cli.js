@@ -2145,6 +2145,70 @@ check(jsonProps.includes('params') && jsonProps.includes('transitions'),
     'component.schema reports the parameters and the table as json props', jsonProps);
 
 // ---------------------------------------------------------------------------
+console.log('cli: 1D blend tree (a parameter blends two clips continuously)');
+// ---------------------------------------------------------------------------
+// The continuous counterpart of the state machine above: `blendTree` names a
+// numeric parameter and (threshold, clip) points. The red and green frames of
+// the sheet are two named clips; speed picks the pair and the weight between
+// them, so the centre pixel is a pure function of speed rather than a cut at a
+// threshold. Every `runtime.step` re-evaluates the tree from the parameter.
+const treeShot = tag => path.join(scratch, `tree-${tag}.png`);
+const treeTree = { param: 'speed', entries: [
+    { at: 0, clip: 'idle' }, { at: 4, clip: 'run' },
+] };
+const treeSteps = [
+    { command: 'image.new', args: { width: 32, height: 32, background: 'transparent' } },
+    { command: 'image.draw.rect', args: { x: 0, y: 0, width: 16, height: 16, filled: true, color: '#ff0000' } },
+    { command: 'image.draw.rect', args: { x: 16, y: 0, width: 16, height: 16, filled: true, color: '#00ff00' } },
+    { command: 'image.save', args: { out: 'Assets/Sprites/tree.png' } },
+    { command: 'scene.new', args: { name: 'BlendTree' } },
+    { command: 'scene.settings.set', args: { key: 'renderBackend', value: 'software' } },
+    { command: 'scene.settings.set', args: { key: 'ambient', value: [1, 1, 1, 1] } },
+    { command: 'scene.settings.set', args: { key: 'tonemap', value: 'none' } },
+    ...atlasCam(1),
+    { command: 'entity.create', args: { name: 'Sprite' }, id: 'sp' },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteRenderer', props: {
+        texturePath: 'Assets/Sprites/tree.png', pixelsPerUnit: 16, pixelPerfect: true } } },
+    { command: 'component.add', args: { id: '$ref:sp', type: 'SpriteAnimator', props: {
+        columns: 2, rows: 2, fps: 1,
+        clips: [ { name: 'idle', firstFrame: 0, lastFrame: 0 },
+                 { name: 'run', firstFrame: 1, lastFrame: 1 } ],
+        blendTree: treeTree, params: { speed: 0 } } } },
+    { command: 'runtime.play' },
+];
+for (const speed of [0, 4, 2, 1, 3, -3, 9]) {
+    treeSteps.push(
+        { command: 'component.setProps', args: { id: '$ref:sp', type: 'SpriteAnimator',
+            props: { params: { speed } } } },
+        { command: 'runtime.step' },
+        { command: 'render.screenshot',
+            args: { out: treeShot(speed), mode: 'game', width: 64, height: 64 }, id: `t${speed}` },
+    );
+}
+const treeRun = runProjectBatch(writeBatch('blend-tree.jsonl', [
+    ...treeSteps,
+    { command: 'component.get', args: { id: '$ref:sp', type: 'SpriteAnimator' }, id: 'read' },
+]));
+check(treeRun.lines.every(l => l.ok !== false), 'the blend tree batch runs clean',
+    treeRun.stdout + treeRun.stderr);
+const treePx = speed => expectOk(['--image', treeShot(speed), 'image.pixel', '--x', '32', '--y', '32']);
+const nearPx = (p, r, g, b) => p && Math.abs(p.r - r) <= 10 && Math.abs(p.g - g) <= 10 && Math.abs(p.b - b) <= 10;
+check(nearPx(treePx(0), 255, 0, 0), 'speed at the first threshold draws that clip alone', treePx(0));
+check(nearPx(treePx(4), 0, 255, 0), 'speed at the last threshold draws that clip alone', treePx(4));
+check(nearPx(treePx(2), 128, 128, 0), 'a midpoint blends the two clips evenly', treePx(2));
+check(nearPx(treePx(1), 191, 64, 0), 'a quarter of the way favours the lower clip', treePx(1));
+check(nearPx(treePx(3), 64, 191, 0), 'three quarters favours the upper clip', treePx(3));
+check(nearPx(treePx(-3), 255, 0, 0), 'below the first threshold clamps to it', treePx(-3));
+check(nearPx(treePx(9), 0, 255, 0), 'above the last threshold clamps to it', treePx(9));
+const treeRead = treeRun.step('read').result.props;
+check(JSON.stringify(treeRead.blendTree) === JSON.stringify(treeTree),
+    'the tree round-trips through component.get', treeRead.blendTree);
+const treeSchema = expectOk(['component.schema', 'SpriteAnimator']);
+const treeProp = treeSchema.components[0].schema.find(p => p.name === 'blendTree');
+check(treeProp && treeProp.kind === 'json',
+    'component.schema reports the blend tree as a json prop', treeProp);
+
+// ---------------------------------------------------------------------------
 console.log('cli: per-cell frame times (each cell of a clip has its own time)');
 // ---------------------------------------------------------------------------
 // One rate for a whole animation cannot say that a wind-up is slow and the

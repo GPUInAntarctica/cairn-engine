@@ -2,6 +2,15 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.17] - 2026-11-18
+
+### 2D: a 1D blend tree for continuous, parameter-driven animation
+
+- **Transitions could only cut or cross-fade on a state change.** A walk-to-run speed change snapped between two clips (or needed a script rewriting `uvRect` each tick); `fade` smoothed a discrete change, but a continuous parameter had no way to express idle/walk/run as one motion. Unity's 1D blend tree weights several motions by a parameter; without it the 2D animator stays a set of discrete states rather than the smooth locomotion a character controller drives.
+- **`SpriteAnimator.blendTree` is a reflected JSON field.** `{"param":"speed","entries":[{"at":0,"clip":"idle"},{"at":4,"clip":"run"}]}` names a numeric entry in `params` and the (threshold, clip) points on its axis. The value selects the two bracketing clips and the linear weight between them; below/above the ends the nearest clip holds at full weight. Points are sorted by threshold so the JSON order cannot change the result, and a tree is active only when it has a parameter and at least one usable point — otherwise the ordinary `clip`/`transitions` path is unchanged. While set, a tree takes precedence over `clip` and the transition table, and it serializes and shows up in `component.schema` like any other JSON field.
+- **All named clips play at once, each on its own clock.** `AdvanceClipState` steps every clip the tree names by the same `dt`, sharing the single-clip cell/frame arithmetic (`StepCellOf`, `FireEventsFor`) so a clip keeps its frame wherever it sits in the weight. The renderer's existing two-quad `fade` path draws the lower clip fully and the upper one with the parameter's weight (`fadeLength=1`, `fadeElapsed=t`), so the hardware blend factors and the software `BlendRgb` produce `lower*(1-t)+upper*t` on both backends without a new rendering path.
+- **Tests.** `TestSpriteBlendTree` samples the centre pixel on both backends at both thresholds, two interior weights and both out-of-range clamps; it replays the same parameter sequence on a fresh scene for determinism, checks two multi-frame clips step independently, and that an always-firing transition stays inert under a tree. `test/cli.js` pins the same weight curve through `image.pixel` plus `component.schema` / `component.get` (CLI 583 checks); `test/smoke.js` sets the tree through the addon's reflection API and reads the frame back. Mutations: ignoring the parameter fails 14 engine / 5 CLI checks and 2 smoke checks; never stepping clip frames fails 4 engine checks; letting transitions fire under a tree fails 10; inverting the weight fails 4.
+
 ## [0.2.16] - 2026-11-18
 
 ### 2D: sprites can composite with alpha, additive or multiply

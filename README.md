@@ -235,7 +235,9 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.2.16**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+Cairn is at version **0.2.17**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+
+**What 0.2.17 changes.** `SpriteAnimator.blendTree` brings Unity-style 1D animation blending to 2D: a numeric parameter such as speed weights idle, walk and run continuously instead of cutting between states. Every clip named by the tree advances on its own clock while the render weight follows the parameter, and the renderer's existing crossfade path blends the two poses with identical pixels on both backends.
 
 **What 0.2.16 changes.** Sprites can choose how they join the frame: `SpriteRenderer.blendMode` adds Alpha (the existing src-over), Additive and Multiply compositing, with tint alpha meaning the same thing on all three. The Vulkan backend binds the matching blend pipeline per sprite in draw order and the software path uses the same arithmetic, so glows, light pools and darkening overlays can be authored as data. Cross-backend and CLI pixel checks pin the modes.
 

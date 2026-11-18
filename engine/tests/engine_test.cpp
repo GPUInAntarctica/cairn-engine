@@ -1394,6 +1394,149 @@ static void TestSpriteCrossfade() {
     }
 }
 
+// A 1D blend tree is the continuous counterpart of a state machine: a numeric
+// parameter picks two named clips and the weight between them, so idle/walk/run
+// cross-fade by speed instead of cutting at a threshold. All named clips keep
+// their own frame advancing by play time; only the rendered weight follows the
+// parameter. The renderer's existing two-quad crossfade path draws the lower
+// clip fully and the upper one with the parameter's weight, on both backends.
+static void TestSpriteBlendTree() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-blend-tree").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/frames.bmp";
+    // cell 0 red, cell 1 green, cell 2 blue, cell 3 white
+    WriteTestBmpSheet(dir + "/" + tex, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 16, 16);
+
+    auto clipEntry = [](const char* name, int first, int last) {
+        Json e = Json::MakeObject();
+        e.set("name", Json(name));
+        e.set("firstFrame", Json(first));
+        e.set("lastFrame", Json(last));
+        return e;
+    };
+    auto point = [](double at, const char* name) {
+        Json e = Json::MakeObject();
+        e.set("at", Json(at));
+        e.set("clip", Json(name));
+        return e;
+    };
+
+    // Build a fresh scene; the returned animator stays valid for the engine's
+    // lifetime (the scene owns its components).
+    auto build = [&](Engine* engine, int backend, bool multiFrame) -> SpriteAnimator* {
+        engine->SetProjectRoot(dir);
+        engine->SetViewportSize(128, 128);
+        Scene& scene = engine->scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.postFxaa = false;
+        scene.ambient = Color(1, 1, 1, 1);
+        scene.tonemap = 0;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 8);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 2.0f;
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+        GameObject* go = scene.CreateEntity("Sprite");
+        auto* sr = go->AddComponent<SpriteRenderer>();
+        sr->texturePath = tex;
+        sr->pixelPerfect = true;
+        sr->pixelsPerUnit = 4.0f;
+        auto* anim = go->AddComponent<SpriteAnimator>();
+        anim->columns = 2;
+        anim->rows = 2;
+        anim->fps = 1.0f;   // one second per cell, so dt steps are easy to read
+        Json clips = Json::MakeArray();
+        if (multiFrame) {
+            // walk: red, green; sprint: blue, white - two frames each so their
+            // clocks can be checked independently.
+            clips.push(clipEntry("walk", 0, 1));
+            clips.push(clipEntry("sprint", 2, 3));
+        } else {
+            clips.push(clipEntry("idle", 0, 0));   // red
+            clips.push(clipEntry("run", 1, 1));    // green
+        }
+        anim->clips = std::move(clips);
+        Json tree = Json::MakeObject();
+        tree.set("param", Json("speed"));
+        Json entries = Json::MakeArray();
+        entries.push(point(0, multiFrame ? "walk" : "idle"));
+        entries.push(point(4, multiFrame ? "sprint" : "run"));
+        tree.set("entries", std::move(entries));
+        anim->blendTree = std::move(tree);
+        anim->params = Json::MakeObject();
+        anim->params.set("speed", Json(0.0));
+        engine->Play();
+        return anim;
+    };
+
+    auto pixel = [](Engine& engine) {
+        engine.RenderGameFrame();
+        const auto& fb = engine.frame().color;
+        const size_t i = ((size_t)64 * 128 + 64) * 4;
+        return std::array<int, 3>{(int)fb[i], (int)fb[i + 1], (int)fb[i + 2]};
+    };
+    auto near = [](const std::array<int, 3>& c, int r, int g, int b) {
+        return std::abs(c[0] - r) <= 8 && std::abs(c[1] - g) <= 8 && std::abs(c[2] - b) <= 8;
+    };
+    // Set the parameter, sync the tree to the renderer slots with a zero-length
+    // tick, then sample the centre pixel (the current cell's own quad).
+    auto at = [&](Engine& engine, SpriteAnimator* anim, float speed) {
+        anim->params.set("speed", Json(speed));
+        engine.Update(0.0f);
+        return pixel(engine);
+    };
+
+    for (const int backend : {2, 1}) {
+        if (backend == 1 && !VulkanBackendAvailable()) continue;
+
+        // Weight curve: below the first threshold, at both ends, and at two
+        // interior values whose blends separate 25% from 75%.
+        Engine engine;
+        auto* anim = build(&engine, backend, false);
+        CHECK(near(at(engine, anim, 0.0f), 255, 0, 0));     // idle alone
+        CHECK(near(at(engine, anim, 4.0f), 0, 255, 0));     // run alone
+        CHECK(near(at(engine, anim, 2.0f), 128, 128, 0));   // half and half
+        CHECK(near(at(engine, anim, 1.0f), 191, 64, 0));    // a quarter of run
+        CHECK(near(at(engine, anim, 3.0f), 64, 191, 0));    // three quarters
+        CHECK(near(at(engine, anim, -3.0f), 255, 0, 0));    // clamp below the first
+        CHECK(near(at(engine, anim, 9.0f), 0, 255, 0));     // clamp above the last
+
+        // The same parameter sequence on a fresh scene is the same picture:
+        // the weight is a function of the parameter, not of wall-clock time.
+        Engine replay;
+        auto* replayAnim = build(&replay, backend, false);
+        CHECK(at(engine, anim, 2.5f) == at(replay, replayAnim, 2.5f));
+
+        // Independent clocks: after one second both named clips have stepped
+        // once, even though only one is drawn at a time. Reading each clip in
+        // isolation shows its own frame, not the other's.
+        Engine stepper;
+        auto* sa = build(&stepper, backend, true);
+        // A transition that would always cut to sprint must be ignored while
+        // the tree is set: the tree, not the state machine, owns the clips.
+        Json always = Json::MakeObject();
+        always.set("from", Json("*"));
+        always.set("to", Json("sprint"));
+        Json trans = Json::MakeArray();
+        trans.push(std::move(always));
+        sa->transitions = std::move(trans);
+        CHECK(near(at(stepper, sa, 0.0f), 255, 0, 0));      // walk frame 0, red
+        sa->params.set("speed", Json(0.0));
+        stepper.Update(1.0f);                               // both clips step once
+        CHECK(sa->clip == "walk");                          // no transition fired
+        CHECK(near(at(stepper, sa, 0.0f), 0, 255, 0));      // walk frame 1, green
+        CHECK(near(at(stepper, sa, 4.0f), 255, 255, 255));  // sprint frame 1, white
+        stepper.Update(1.0f);                               // both wrap/step again
+        CHECK(near(at(stepper, sa, 0.0f), 255, 0, 0));      // walk back to red
+        CHECK(near(at(stepper, sa, 4.0f), 0, 0, 255));      // sprint back to blue
+    }
+}
+
 // A scene with more lights than the per-pixel budget used to lose every light
 // past the sixteenth in scene order, including the only one that was turned on:
 // a 20-lamp stage lit black once the active lamp happened to be last. The cap
@@ -5899,6 +6042,7 @@ int main() {
     TestLightLimitAcrossBackends();
     TestSpriteCrossfade();
     TestSpriteBlendModes();
+    TestSpriteBlendTree();
     TestShadowedPixelCount();
     TestVulkanReadbackMemory();
     TestVulkanReadbackSeesLatestFrame();

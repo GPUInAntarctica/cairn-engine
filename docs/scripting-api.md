@@ -320,6 +320,25 @@ anim->params.set("moving", Json(true));      // a script, the inspector, or:
 - **Each tick advances the frame and then runs the table**, so an exit time sees the clip that just finished, and the state that tick enters is the cell the frame shows — its first. Writing `clip` by hand is still a manual override, and a state entered by the machine is drawn before any of its own ticks have run.
 - **`params` is replaced wholesale** by `component.setProps`, like the clip table: send the whole bag, not one key.
 
+### Blending by a parameter (1D blend tree)
+
+For locomotion, a discrete state machine cuts: walk and run are separate states and a speed change snaps between them. `blendTree` is the continuous alternative — a numeric parameter weights several named clips at once, like a Unity 1D blend tree:
+
+```json
+"blendTree": { "param": "speed", "entries": [
+    { "at": 0, "clip": "idle" },
+    { "at": 2, "clip": "walk" },
+    { "at": 5, "clip": "run" }
+] },
+"params": { "speed": 3.5 }
+```
+
+- **A point is `{"at", "clip"}` on the parameter's axis.** Points are sorted by `at`, so their order in the scene file cannot change the result; a point with a non-numeric `at` or an empty `clip` is skipped. A tree is active only with a `param` and at least one usable point — otherwise the ordinary `clip` and `transitions` path is unchanged.
+- **The value picks two clips and a weight.** Between two thresholds the lower and upper clips are blended linearly: at `3.5` above, walk (at 2) and run (at 5) are shown at 50% each. At or beyond either end the nearest single clip holds at full weight. The tree is a pure function of the parameter, so the same value always draws the same weighted pose.
+- **Every named clip plays at once**, each with its own frame advancing by `Update(dt)`, so the walk and run poses are always current and only the rendered weight changes. Clips can name their own sheets and cells just as a transition clip can.
+- **The tree takes precedence over `clip` and `transitions`** while it is set: the transition table stays in the scene file and resumes as soon as the tree is cleared (e.g. set `blendTree` to `{}`). The blend reuses the same two-quad crossfade path `fade` uses, so both backends composite the weighted poses identically.
+- **`blendTree` is a JSON field**, round-tripping through the scene file, `component.add` / `component.setProps` / `component.get`, `component.schema` and the inspector like the clip and transition tables.
+
 ### Telling the outside when a frame arrives
 
 An animation usually has to say something part-way through: the wind-up has ended and a hitbox may open, the strike has landed, the clip is back to idle. Counting frames in a script to guess that is exactly the thing the machine was built to avoid, so a clip carries `events` — `[{"at", "set"}]` — and writes a parameter when a named cell is entered.
