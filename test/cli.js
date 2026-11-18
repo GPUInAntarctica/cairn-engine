@@ -1069,6 +1069,54 @@ check(spans && spans.rowSpans.length === 40 && spans.colSpans.length === 40
     && spans.rowSpans[5] === null && Array.isArray(spans.rowSpans[20]),
     'image.info --spans reports per-row/column extents', spans && { r0: spans.rowSpans[5], r20: spans.rowSpans[20] });
 
+// The default 1px brush used to miss the pixel grid entirely: stampDisc measured
+// from pixel corners, so a disc of radius 0.5 centred on an integer coordinate
+// covered none of the four surrounding pixels. A horizontal line, a diagonal
+// endpoint and a single brush dab are the three user-visible shapes it broke.
+const lineBatch = writeBatch('image-line.jsonl', [
+    { command: 'image.new', args: { width: 16, height: 8, background: 'transparent' }, id: 'newH' },
+    { command: 'image.draw.line', args: { x1: 0, y1: 4, x2: 7, y2: 4, color: '#ff0000' }, id: 'horizontal' },
+    { command: 'image.pixel', args: { x: 4, y: 4 }, id: 'hMid' },
+    { command: 'image.pixel', args: { x: 4, y: 3 }, id: 'hAbove' },
+    { command: 'image.pixel', args: { x: 8, y: 4 }, id: 'hPast' },
+    { command: 'image.info', args: {}, id: 'hInfo' },
+    { command: 'image.new', args: { width: 16, height: 8, background: 'transparent' } },
+    { command: 'image.draw.line', args: { x1: 0, y1: 0, x2: 7, y2: 7, color: '#ff0000' } },
+    { command: 'image.pixel', args: { x: 7, y: 7 }, id: 'dEnd' },
+    { command: 'image.info', args: {}, id: 'dInfo' },
+    { command: 'image.new', args: { width: 16, height: 8, background: 'transparent' } },
+    { command: 'image.draw.brush', args: { x: 4, y: 4, brush: 1, color: '#ff0000' }, id: 'brush' },
+    { command: 'image.pixel', args: { x: 4, y: 4 }, id: 'brushPixel' },
+    { command: 'image.new', args: { width: 16, height: 8, background: 'transparent' } },
+    { command: 'image.draw.brush', args: { x: 4, y: 4, brush: 3, color: '#ff0000' } },
+    { command: 'image.draw.brush', args: { x: 4, y: 4, brush: 1, erase: true }, id: 'erase' },
+    { command: 'image.pixel', args: { x: 4, y: 4 }, id: 'eraseCentre' },
+    { command: 'image.pixel', args: { x: 4, y: 5 }, id: 'eraseNeighbour' },
+]);
+const lines = runBatch(lineBatch);
+check(lines.lines.filter(l => l.id).length === 13 && lines.lines.every(l => l.ok !== false),
+    'image line/brush batch runs clean', lines.stdout + lines.stderr);
+check(lines.byId.hMid && lines.byId.hMid.result.hex === '#ff0000'
+    && lines.byId.hAbove && lines.byId.hAbove.result.a === 0
+    && lines.byId.hPast && lines.byId.hPast.result.a === 0,
+    'a default-width line paints its own row and stops at its endpoint',
+    [lines.byId.hMid, lines.byId.hAbove, lines.byId.hPast]);
+check(lines.byId.hInfo && lines.byId.hInfo.result.stats.opaquePixels === 8
+    && JSON.stringify(lines.byId.hInfo.result.stats.bounds) === '{"x":0,"y":4,"width":8,"height":1}',
+    'image.info sees an eight-pixel horizontal line', lines.byId.hInfo && lines.byId.hInfo.result.stats);
+check(lines.byId.dEnd && lines.byId.dEnd.result.hex === '#ff0000'
+    && lines.byId.dInfo && lines.byId.dInfo.result.stats.opaquePixels === 8,
+    'a default-width diagonal reaches its last pixel',
+    [lines.byId.dEnd, lines.byId.dInfo && lines.byId.dInfo.result.stats]);
+check(lines.byId.brush && lines.byId.brush.result.pixels === 1
+    && lines.byId.brushPixel && lines.byId.brushPixel.result.hex === '#ff0000',
+    'image.draw.brush --brush 1 paints one pixel',
+    [lines.byId.brush, lines.byId.brushPixel]);
+check(lines.byId.eraseCentre && lines.byId.eraseCentre.result.a === 0
+    && lines.byId.eraseNeighbour && lines.byId.eraseNeighbour.result.hex === '#ff0000',
+    'image.draw.brush --erase --brush 1 removes one pixel',
+    [lines.byId.eraseCentre, lines.byId.eraseNeighbour]);
+
 // An open polyline is not closed; the same points with the default `closed`
 // paint the closing edge. Sampling one pixel on that edge is the A/B proof.
 const pathBatch = path.join(scratch, 'image-path.jsonl');

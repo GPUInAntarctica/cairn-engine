@@ -235,7 +235,9 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.2.12**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+Cairn is at version **0.2.13**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+
+**What 0.2.13 changes.** A 1px brush painted nothing: line and brush stamps used integer coordinates while the raster core measured coverage from pixel corners, so a radius of 0.5 never reached a pixel and a 45-degree line came out dotted. Integer coordinates now name pixels in both the stamp and the eraser, so `--brush 1` draws exactly the pixel you address and every shape tool in the editor and the CLI agrees. Direct raster checks and CLI pixel-readback checks pin the convention.
 
 **What 0.2.12 changes.** A minified sRGB texture used to come out a different shade on the two backends: the CPU chain averaged in linear light while the GPU upload averaged encoded bytes, so a black/white checker first coarse level held 113 on the reference and 128 on the GPU and a shrunken quad differed by up to 26 levels. Both paths now call one `DownsampleTexel2x2` filter that decodes, averages and re-encodes sRGB colour, and a non-`pixelPerfect` cross-backend test pins the picture along with the CPU filter itself.
 

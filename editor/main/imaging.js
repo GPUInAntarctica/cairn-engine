@@ -230,7 +230,11 @@ function stampDisc(data, w, h, cx, cy, radius, rgba, alpha, hardness) {
     const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(h - 1, Math.ceil(cy + r));
     for (let y = y0; y <= y1; ++y) {
         for (let x = x0; x <= x1; ++x) {
-            const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
+            // Integer coordinates name pixels: a 1px brush centred on (4,4)
+            // covers exactly that pixel, not the four around it. The old
+            // pixel-corner offset made every such stamp miss entirely when
+            // r == 0.5, so a default-width line drew nothing.
+            const d = Math.hypot(x - cx, y - cy);
             if (d > r) continue;
             const falloff = inner >= r ? 1 : 1 - (d - inner) / (r - inner);
             blendPixel(data, w, h, x, y, rgba, alpha * clamp(falloff, 0, 1));
@@ -244,7 +248,9 @@ function stampEraser(data, w, h, cx, cy, radius, alpha) {
     const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(h - 1, Math.ceil(cy + r));
     for (let y = y0; y <= y1; ++y) {
         for (let x = x0; x <= x1; ++x) {
-            if (Math.hypot(x + 0.5 - cx, y + 0.5 - cy) > r) continue;
+            // Same pixel-index convention as stampDisc: erase what a brush
+            // at the same coordinates would have painted.
+            if (Math.hypot(x - cx, y - cy) > r) continue;
             erasePixel(data, w, h, x, y, alpha);
         }
     }

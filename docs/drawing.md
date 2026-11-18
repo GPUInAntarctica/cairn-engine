@@ -296,13 +296,12 @@ animation.
 
 ## Gotchas
 
-- **`image.draw.line` needs `--brush 2` or more.** `strokeLine` stamps discs of radius
-  `width / 2` and `stampDisc` skips any pixel whose centre is farther than that radius
-  from the stamp centre, so the default 1 px brush covers a pixel only when a stamp
-  lands exactly on its centre: a horizontal or vertical line between integer
-  coordinates paints *nothing*, and a 45° line comes out dotted and misses its last
-  pixel. Draw 1 px geometry with `image.draw.rect` (`--height 1`) instead. The coverage
-  model is recorded as a candidate in [docs/roadmap.md](roadmap.md).
+- **Integer coordinates name pixels.** `image.draw.line` and `image.draw.brush` work at
+  the default `--brush 1`: a horizontal or vertical line between integer coordinates
+  paints exactly the pixels it passes through, and a 45° line reaches its last pixel.
+  Before 0.2.13 the raster core measured coverage from pixel corners and the 0.5 radius
+  never reached a pixel. Use `image.draw.rect --height 1` when you want filled 1 px
+  geometry rather than a stamp.
 
 - **Coordinates are pixels, `(0,0)` is top-left.** `image.pixel` reports exactly
   the `x, y` you asked for; `--cx/--cy` of a shape is in the same space.

@@ -9,6 +9,7 @@
 const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
+const imaging = require('../editor/main/imaging.js');
 
 let failures = 0;
 function check(cond, label) {
@@ -147,6 +148,50 @@ async function main() {
     const cubeBottom = cube.position[1] - cube.scale[1] / 2;
     check(near(groundTop, 0), 'the 3D template ground has its top at y = 0');
     check(near(cubeBottom, groundTop), 'the 3D template cube rests on the ground');
+
+    console.log('editor imaging: integer brush coordinates');
+    const red = [1, 0, 0];
+    const blank = () => new Uint8Array(16 * 8 * 4);
+    const alphaAt = (data, x, y) => data[(y * 16 + x) * 4 + 3];
+    const painted = data => {
+        let n = 0;
+        for (let i = 3; i < data.length; i += 4) if (data[i]) n++;
+        return n;
+    };
+
+    const dot = blank();
+    imaging.stampDisc(dot, 16, 8, 4, 4, 0.5, red, 1, 1);
+    check(painted(dot) === 1 && alphaAt(dot, 4, 4) === 255,
+        'a 1px brush paints exactly the pixel named by its coordinates');
+
+    const horizontal = blank();
+    imaging.strokeLine(horizontal, 16, 8, 0, 4, 7, 4, red, 1, 1);
+    let horizontalRows = [];
+    for (let y = 0; y < 8; ++y) {
+        let n = 0;
+        for (let x = 0; x < 16; ++x) if (alphaAt(horizontal, x, y)) n++;
+        if (n) horizontalRows.push([y, n]);
+    }
+    check(JSON.stringify(horizontalRows) === '[[4,8]]',
+        'the default-width line paints one row between its endpoints', horizontalRows);
+
+    const diagonal = blank();
+    imaging.strokeLine(diagonal, 16, 8, 0, 0, 7, 7, red, 1, 1);
+    check(painted(diagonal) === 8 && alphaAt(diagonal, 7, 7) === 255,
+        'a 1px diagonal keeps all eight pixels including its endpoint');
+
+    const wide = blank();
+    imaging.strokeLine(wide, 16, 8, 0, 4, 7, 4, red, 1, 3);
+    const wideRows = [3, 4, 5].every(y => [0, 4, 7].every(x => alphaAt(wide, x, y) === 255));
+    check(wideRows && !alphaAt(wide, 4, 2) && !alphaAt(wide, 4, 6),
+        'a 3px line covers three whole rows and no more');
+
+    const erased = blank();
+    imaging.stampDisc(erased, 16, 8, 4, 4, 2, red, 1, 1);
+    const beforeErase = painted(erased);
+    imaging.stampEraser(erased, 16, 8, 4, 4, 0.5, 1);
+    check(alphaAt(erased, 4, 4) === 0 && painted(erased) === beforeErase - 1,
+        'a 1px eraser removes exactly the pixel a 1px brush would paint');
 
     console.log(failures ? `\n${failures} failure(s)` : '\neditor transform maths: all checks passed');
     process.exit(failures ? 1 : 0);

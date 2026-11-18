@@ -2,6 +2,13 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.13] - 2026-11-18
+
+### Imaging: a 1px brush paints the pixel it addresses
+- **The default brush width drew nothing.** `strokeLine` stamps discs of radius `width / 2` at integer coordinates, but `stampDisc` tested `hypot(x + 0.5 - cx, y + 0.5 - cy) > r`, measuring from pixel corners. At the default `width = 1` the radius is 0.5 and every pixel corner is farther than that from an integer stamp centre, so `image.draw.line --x1 0 --y1 4 --x2 7 --y2 4` left the document empty, a 45-degree line came out dotted and missed its last pixel, and `image.draw.brush --brush 1` reported one stamp while painting none. The panel's 1px marks had been routed through `imaging.fillRect` as a workaround.
+- **Integer coordinates name pixels.** `stampDisc` and `stampEraser` now measure from the pixel index (`x - cx`, `y - cy`) instead of the pixel corner, so a stamp of radius 0.5 centres on exactly one pixel, radius 1.5 covers three, and an eraser removes what the same brush would have painted. The fix is in the shared raster core, so the editor canvas, `image.draw.line`, `image.draw.rect` outlines, `image.draw.path` and `image.draw.brush` all agree; no command or argument schema changed.
+- **Tests.** Five direct checks in `test/editor.js` pin the coverage model (single dab, horizontal row, diagonal endpoint, three-row wide line, eraser round trip) and six end-to-end checks in `test/cli.js` read the pixels back through `image.pixel` / `image.info`. Mutations: reverting `stampDisc` fails four editor and four CLI checks; reverting `stampEraser` fails one of each. CLI 546 checks total, engine/build/smoke unchanged.
+
 ## [0.2.12] - 2026-11-18
 
 ### Rendering: both mip chains use the same sRGB box filter
