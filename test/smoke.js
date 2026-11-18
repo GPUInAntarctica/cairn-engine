@@ -449,6 +449,33 @@ engine.setComponentProp(point, 'Light', 'castShadows', false);
 const pointNoCast = engine.renderGameFrame();
 check(pointNoCast.shadowedPixels === 0, 'castShadows off leaves the point light unshadowed');
 
+// The per-pixel light budget moved from 16 to 32. Through the addon's
+// reflection API the collected count must match, including a lamp placed past
+// the old cap and the one-past-the-new-cap warning.
+engine.newScene('LightBudget');
+let lampsAdded = true;
+for (let i = 0; i < 20; ++i) {
+    const lamp = engine.createEntity(`Lamp${i}`, 0);
+    lampsAdded = lampsAdded && engine.addComponent(lamp, 'Light');
+    engine.setComponentProp(lamp, 'Light', 'type', 1);
+    engine.setComponentProp(lamp, 'Light', 'intensity', i === 19 ? 2.0 : 0.0);
+    engine.setComponentProp(lamp, 'Light', 'range', 50.0);
+    engine.setComponentProp(lamp, 'Light', 'castShadows', false);
+}
+check(lampsAdded, 'add twenty lights through the reflection API');
+check(engine.renderGameFrame().lightCount === 20, 'the twentieth lamp is collected');
+for (let i = 20; i < 33; ++i) {
+    const lamp = engine.createEntity(`Lamp${i}`, 0);
+    lampsAdded = lampsAdded && engine.addComponent(lamp, 'Light');
+    engine.setComponentProp(lamp, 'Light', 'type', 1);
+    engine.setComponentProp(lamp, 'Light', 'castShadows', false);
+}
+check(lampsAdded && engine.renderGameFrame().lightCount === 32, 'the budget stops at 32 lamps');
+engine.pollLogs();
+engine.renderGameFrame();
+check(engine.pollLogs().filter(l => l.text.includes('light limit (32) reached')).length === 1,
+    'one warning names the light budget');
+
 fs.rmSync(projectDir, { recursive: true, force: true });
 
 if (failures === 0) {

@@ -52,7 +52,7 @@ struct FrameUbo {
 static_assert(sizeof(FrameUbo) == 256, "FrameUBO layout must match mesh.vert");
 
 struct LightsUbo {
-    float light[16][16];  // 4 vec4 per light
+    float light[kMaxLights][16];  // 4 vec4 per light
     // mesh.frag declares `int lightCount`, so this slot holds an int. Writing
     // a float here would be read back as a bit pattern: 1.0f is 1065353216,
     // and the shader's light loop then runs a billion times off the end of the
@@ -60,7 +60,8 @@ struct LightsUbo {
     int32_t count = 0;
     float pad[3];
 };
-static_assert(sizeof(LightsUbo) == 16 * 64 + 16, "LightsUBO layout must match mesh.frag");
+static_assert(sizeof(LightsUbo) == kMaxLights * 64 + 16,
+              "LightsUBO layout must match mesh.frag");
 
 struct ShadowUbo {
     float matrix[4][16];

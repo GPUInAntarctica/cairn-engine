@@ -13,7 +13,7 @@
 
 namespace Cairn {
 
-static constexpr int kMaxLights = 16;          // lights evaluated per pixel
+static constexpr int kMaxLights = 32;          // lights evaluated per pixel
 static constexpr int kMaxCascades = 4;         // directional shadow cascades
 static constexpr int kMaxSpotShadows = 4;      // spot lights with a perspective shadow map
 // A point light is shadowed through six 90-degree perspective maps (one per

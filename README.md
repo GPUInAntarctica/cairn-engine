@@ -235,7 +235,9 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.2.13**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+Cairn is at version **0.2.14**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+
+**What 0.2.14 changes.** A scene could only use sixteen real-time lights per frame: a lamp after the sixteenth in scene order was silently dropped, so a stage whose only active light was last rendered dark. The budget is now 32 across the CPU gather, the Vulkan uniform block and both fragment shaders; scenes with fewer lights cost the same as before, and the 33rd still gets one warning. Cross-backend and addon tests pin the new limit.
 
 **What 0.2.13 changes.** A 1px brush painted nothing: line and brush stamps used integer coordinates while the raster core measured coverage from pixel corners, so a radius of 0.5 never reached a pixel and a 45-degree line came out dotted. Integer coordinates now name pixels in both the stamp and the eraser, so `--brush 1` draws exactly the pixel you address and every shape tool in the editor and the CLI agrees. Direct raster checks and CLI pixel-readback checks pin the convention.
 

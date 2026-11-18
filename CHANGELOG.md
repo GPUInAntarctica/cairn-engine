@@ -2,6 +2,13 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.14] - 2026-11-18
+
+### Rendering: 32 real-time lights per frame
+- **A lamp past the sixteenth light in scene order lit nothing.** The per-pixel budget was 16: `CollectLights` stopped after sixteen enabled lights with one warning and dropped the rest, so a stage with twenty lamps whose only active one was last rendered as if the stage were dark. That is a visible failure, not just a lower number than Unity offers; the cap was mirrored in the CPU gather, the Vulkan `LightsUbo`, and both fragment shaders, so raising it meant changing all four together or the UBO would no longer match the shader layout.
+- **The budget is now 32.** `kMaxLights` is 32, `LightsUbo` is `float light[kMaxLights][16]` with its `static_assert` derived from the same constant, and `mesh.frag` / `sprite.frag` both declare `Light lights[32]`. The per-frame light loop still runs to `lightCount`, so a scene with two lights costs what it always did; only scenes that use the extra slots pay for them. Shadow-caster limits are untouched (one cascaded sun, four spots, two point lights), and the 33rd light is still dropped with a single warning that now names 32.
+- **Tests.** `TestLightLimitAcrossBackends` builds one quad and N point lights that all occupy the same spot, with only the last one carrying intensity, then renders with 16, 17 and 32 lights on both backends. Each case requires `RenderStats.lightCount` to match the scene and the lit pixel to be bright; 33 lights must report 32, leave the pixel dark and log `light limit (32) reached` exactly once. The smoke suite drives the same overflow through the addon's reflection API and checks the count and warning there too. Mutations: hard-coding the gather limit back to 16 fails twelve checks; shrinking only the shader arrays to 16 breaks the UBO/shader contract and fails 38 GPU checks. CLI 546 checks unchanged.
+
 ## [0.2.13] - 2026-11-18
 
 ### Imaging: a 1px brush paints the pixel it addresses

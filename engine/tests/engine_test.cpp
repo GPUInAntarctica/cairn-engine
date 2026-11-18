@@ -1207,6 +1207,88 @@ static void TestSpotShadowsAcrossBackends() {
     }
 }
 
+// A scene with more lights than the per-pixel budget used to lose every light
+// past the sixteenth in scene order, including the only one that was turned on:
+// a 20-lamp stage lit black once the active lamp happened to be last. The cap
+// is now 32, mirrored in the CPU gather, both fragment shaders and the UBO, so
+// a light at index 16 or 31 still contributes and only the 33rd is dropped -
+// with one warning that names the new limit. Both backends read the same list.
+static void TestLightLimitAcrossBackends() {
+    const int w = 64, h = 48;
+    struct Shot {
+        int count = 0;
+        int brightness = 0;
+        std::string backend;
+    };
+    auto render = [&](int backend, int lamps, int litIndex) {
+        Engine engine;
+        engine.SetViewportSize(w, h);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        scene.ambient = Color(0, 0, 0, 1);
+        scene.background = Color(0, 0, 0, 1);
+
+        GameObject* quad = scene.CreateEntity("Quad");
+        quad->transform().rotation = Quat::FromEulerDegrees(Vec3(0, 180, 0));  // Mesh::Quad() faces -Z
+        auto* mr = quad->AddComponent<MeshRenderer>();
+        mr->mesh = MeshRenderer::MeshSource::Quad;
+        mr->albedoColor = Color(1, 1, 1, 1);
+        mr->unlit = false;
+
+        // All lamps sit at the same spot so the lit pixel does not depend on
+        // which index is active; only the active one carries intensity.
+        for (int i = 0; i < lamps; ++i) {
+            GameObject* lamp = scene.CreateEntity("Lamp");
+            lamp->transform().position = Vec3(0, 0, 3);
+            auto* light = lamp->AddComponent<LightComponent>();
+            light->type = LightComponent::LightType::Point;
+            light->intensity = (i == litIndex) ? 2.0f : 0.0f;
+            light->range = 50.0f;
+            light->castShadows = false;
+        }
+
+        engine.viewCamera().position = Vec3(0, 0, 8);
+        engine.viewCamera().yaw = 0.0f;
+        engine.viewCamera().pitch = 0.0f;
+        RenderStats stats = engine.RenderEditorFrame();
+        const auto& fb = engine.frame().color;
+        Shot out;
+        out.count = stats.lightCount;
+        out.brightness = fb[((size_t)(h / 2) * w + w / 2) * 4];
+        out.backend = stats.backend ? stats.backend : "";
+        return out;
+    };
+
+    for (const int lamps : {16, 17, 32}) {
+        const Shot cpu = render(2, lamps, lamps - 1);
+        CHECK(cpu.count == lamps);
+        CHECK(cpu.brightness > 10);
+        if (!VulkanBackendAvailable()) continue;
+        const Shot gpu = render(1, lamps, lamps - 1);
+        CHECK(gpu.count == lamps);
+        CHECK(gpu.brightness > 10);
+        CHECK(cpu.brightness * 3 > gpu.brightness && gpu.brightness * 3 > cpu.brightness);
+    }
+
+    // One past the cap: the 33rd lamp is ignored, the first 32 are collected,
+    // and the limit is reported once instead of dropping the lamp in silence.
+    const auto history = Log::Poll(0, 2048);
+    const uint64_t after = history.empty() ? 0 : history.back().id;
+    const Shot overflow = render(2, 33, 32);
+    CHECK(overflow.count == 32);
+    CHECK(overflow.brightness < 10);
+    int warnings = 0;
+    for (const LogEntry& e : Log::Poll(after, 32))
+        if (e.text.find("light limit (32) reached") != std::string::npos) warnings++;
+    CHECK(warnings == 1);
+    if (VulkanBackendAvailable()) {
+        const Shot gpuOverflow = render(1, 33, 32);
+        CHECK(gpuOverflow.count == 32 && gpuOverflow.brightness < 10);
+    }
+}
+
 // A point light casts through six perspective faces, one per cube axis. The
 // scene puts occluders on both sides of the light, so the shadow region spans
 // the +X, -X, +Z, -Z and -Y faces: a backend that always read one face would
@@ -5627,6 +5709,7 @@ int main() {
     TestShadowsAcrossBackends();
     TestSpotShadowsAcrossBackends();
     TestPointShadowsAcrossBackends();
+    TestLightLimitAcrossBackends();
     TestShadowedPixelCount();
     TestVulkanReadbackMemory();
     TestVulkanReadbackSeesLatestFrame();

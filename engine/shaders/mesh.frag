@@ -34,7 +34,7 @@ struct Light {
     vec4 cone;       // x cosOuter, y cosInner
 };
 layout(std140, set = 0, binding = 1) uniform LightsUBO {
-    Light lights[16];
+    Light lights[32];  // kMaxLights in gpu_types.h
     int lightCount;
 };
 
