@@ -78,10 +78,11 @@
 | 0.2.9 | 可用性：脚本异常被接住并报出来，而不是拖垮编辑器 | 玩法脚本编译成共享库、和插件同进程运行，而引擎调用脚本回调时没有任何边界：一次 `throw` 会穿过引擎进入 N-API。实测模板工程的 `Rotator::OnStart` 抛 `std::runtime_error` 后，无头编辑器在 120 秒超时里一直没有退出，stderr 只有 `terminate called after throwing an instance of 'std::runtime_error'` 与 `what(): script boom from OnStart`；CLI 批次则以信号 6 / 退出码 134 中止，只写出半截 JSONL，错误无从读取。现在 `engine/src/script_guard.h` 的 `GuardScript` 把每次脚本调用包进 `try`/`catch`，`std::exception` 记成 `script <Class>::<Method> threw: <message>`，其他类型的抛出记成 `<Class>::<Method> threw an unknown exception`，随后照常跑下一帧；它覆盖 `create`、`DescribeProps`、`OnStart`、`OnUpdate`、`FixedUpdate`、`OnTriggerEnter/Exit`、`OnCollisionEnter/Stay/Exit` 与 `OnDestroy`，也就是引擎调用脚本代码的全部入口。编辑器控制台改为每帧读取引擎日志（此前只在播放时读取），编辑期的库加载失败与缺失脚本类不再被藏住；编译失败会自动切到控制台页签，并同时列出 warning 与 error（此前只复制 error）；控制台不是当前页签时，新错误在页签上累计红色角标。CLI 因为不再中止，批次能走到 `runtime.logs`，用 `cairn runtime.logs --level error` 读回类名、回调与消息；同一个五步批次（`scene.load`、`script.build`、`runtime.play`、`runtime.update`、`runtime.logs`）从退出 134 变为退出 0 且每一步都有结果。`TestScriptExceptionIsContained` 用 `std::runtime_error`、整数抛出和一次正常调用钉住边界（两条日志 + 后续调用照常执行）；smoke 编译会抛异常的脚本、进入播放、推进五帧，确认播放状态、渲染与后续帧都存活且两次异常都被记录；CLI 套件在子进程里跑上述批次，拒绝非零退出、失败步骤或缺失的错误行，CLI 534 → 540 项 |
 | 0.2.10 | 渲染质量：聚光灯的透视阴影图（此前只有方向光能投影） | 只有主方向光有阴影：0.2.1 把级联拟合到视锥后，`castShadows` 在聚光灯上仍只是一个被收集、又被两条着色路径忽略的字段。手电筒、台灯或舞台灯因此会直接穿过道具与墙。`FitSpotShadows` 在共享前端里按每盏投影聚光灯的 `position`/`direction` 与外锥（`2 * acos(cosOuter)`，留 2% 余量让 3x3 PCF 的取样留在图内）拟合透视 `viewProj`，近平面 0.05、远平面取灯自己的 `range`；槽位写回灯光（`GpuLight::shadowSlot`），两条着色循环在遍历灯光时直接找到自己的图。每帧最多四盏聚光灯投影（`kMaxSpotShadows`），第五盏只记一次日志而不是悄悄丢掉。软件阴影 pass 用同一段保存/恢复状态的循环画级联与聚光图；Vulkan 后端把聚光图追加到已有的 `sampler2DArray`（层号 `cascadeCount + slot`），着色器用灯自己的矩阵取样，因此“有级联/无级联”两种配置走的是同一段代码、只是层基不同。偏置按透视换算：级联用 `1/range` 把世界偏置变深度，而透视深度是 `far/(far-near) - near*far/((far-near)*w)`，世界偏置因此是 `near*far/(far-near) / w^2` 个深度单位；`SampleSpotShadow` 与 `mesh.frag` 的 `sampleSpotShadow` 用同一个表达式，两张图才落在同样的像素上。`receiveShadows` 两条路径都真正门控取样；`shadowedPixels` 现在也统计聚光遮挡（同一 `shadowFactor < 0.98` 判据）。`TestSpotShadowsAcrossBackends` 在两条后端上渲染地板、遮挡物与聚光灯，开关阴影，要求参考图在遮挡物下方暗掉 120 像素以上、关掉 `castShadows` 后统计归零（或在空级联前差值归零）、`receiveShadows = false` 时整帧逐字节相同、GPU 阴影区域的大小与质心与参考一致；测试跑两遍——无级联，以及一盏强度 0 但仍分配级联的太阳放在聚光层之前——这样“忘记层基”的偏移会被抓住。变异：去掉软件取样失败 6 项，去掉着色器取样失败 8 项，层号漏加级联数失败 3 项 GPU 比较。smoke 用插件的反射接口搭同一场景，检查灯光计数与 `shadowedPixels`。CLI 540 项不变 |
 | 0.2.11 | 渲染质量：点光源的六面透视阴影图（此前只有方向光与聚光灯能投影） | 0.2.10 给聚光灯配了贴合外锥的透视阴影图，但裸灯、篝火或爆炸没有锥体可拟合：它们默认打开的 `castShadows` 被收集后又被两条着色路径忽略，灯与地板之间的墙不会让任何东西变暗。`FitPerspShadows`（共享前端，由 `FitSpotShadows` 泛化而来）现在同时填充两种透视图：聚光灯贡献一张贴合外锥的图，点光源贡献六张——`+X/-X/+Y/-Y/+Z/-Z` 六个立方体面，每张 90° 再留 2% 余量，让角落片元的 3x3 取样仍落在图层内；两者近平面都是 0.05、远平面都取灯自己的 `range`。每盏灯把自己的首个槽位写回 `GpuLight::shadowSlot`，点光源的六个面就是紧随其后的六个条目。片元按 `P - lightPos` 的主导轴选面（正方向优先于负方向）：CPU 的 `PointFace` 与 `mesh.frag` 里的三次比较是同一条规则，参考图与 GPU 才会为同一个像素读同一层。聚光图与点光图共用计数、深度换算与层基（`cascadeCount + slot`），因此“没有方向光”和“空级联在前”两种场景走的是同一段算术。上限明确：每帧最多四盏聚光灯（`kMaxSpotShadows`）与两盏点光源（`kMaxPointShadows`），共十六张透视图；超出上限的灯只记一次日志，不会悄悄消失。图层与级联共用同一分辨率，正是现有阴影数组已经分配的尺寸。`TestPointShadowsAcrossBackends` 在点光源正下方放一个遮挡物、四周再放四个，让阴影区域横跨 +X、-X、+Z、-Z 与 -Y 五个面；两条后端各渲染开/关阴影，要求参考图暗掉 200 像素以上、画面左右各至少 20 像素、`shadowedPixels` 非零，GPU 的计数误差小于三分之一、质心误差小于四像素；测试跑两遍——无级联，以及一盏强度 0 但仍分配级联的太阳在透视层之前。变异：去掉软件点光分支失败 11 项，把着色器选面钉死为 0 失败 8 项，让 CPU 的 `PointFace` 恒返回 0 失败 8 项。smoke 用插件反射接口搭同一场景，检查灯光计数与统计项。CLI 540 项不变 |
+| 0.2.12 | 渲染质量：两条 mip 链用同一个 sRGB 盒式滤波（此前被缩小的贴图在 GPU 上偏亮） | `Texture::GenerateMipmaps` 按 `cairn/texture.h` 的契约把 sRGB 贴图的 2×2 先解码到线性、平均、再编码，而 Vulkan 上传路径用同一段暂存内存重建粗层时直接平均编码后的字节。黑白棋盘格的第 1 层因此在参考图上是 113、在 GPU 上是 128；同一张 64×64 棋盘画成 16×16 像素的 unlit 四边形时，两条后端在平坦表面上相差最多 26 级。任何被缩小的 sRGB 表面（非 `pixelPerfect` 精灵、远处网格面）都受影响，此前的跨后端比对只覆盖不采 mip 的 `pixelPerfect` 与几何边缘，所以没有用例会红。`engine/src/texture_mip.h` 的 `DownsampleTexel2x2` 现在是滤波器唯一定义：sRGB 三通道解码、平均、重新编码，alpha 保持线性，线性贴图直接平均字节；`GenerateMipmaps` 与上传路径都调它，公开契约与依赖都不变。`TestMipChainMatchesAcrossBackends` 把棋盘画成 16 像素的 unlit 四边形，要求 8×8 块内逐通道相差不超过 2 级，并排除“背景比背景”的假通过；`TestTextureMips` 直接钉住 CPU 链，黑白 2×2 的第 1 层采样值必须在 0.12–0.20（线性平均采样回约 0.17，字节平均约 0.22）。变异：上传路径改回字节平均失败 192 项，CPU 链改回字节平均失败同样 192 项外加采样带。CLI 540 项不变 |
 
 每个版本的细节与验证记录见 [CHANGELOG](../CHANGELOG.md)。
 
-## 当前优先级（0.2.11 之后）
+## 当前优先级（0.2.12 之后）
 
 定的三条主线，按此排序：
 
@@ -722,16 +723,23 @@
 
 **下一步候选（按价值排序）**
 
-- **GPU 的 mip 链与 CPU 的 mip 链内容不同（已定位，未修）。** `Texture::GenerateMipmaps` 对
-  sRGB 贴图的 2×2 均值是“解码到线性 → 平均 → 重新编码”（`engine/src/texture.cpp:150`），
-  而 `backend_vulkan.cpp` 在向 GPU 上传时用同一段暂存内存重建粗层，直接对编码后的字节求均值
-  （注释写的是“the same 2x2 box the CPU sampler uses”，那只对线性贴图成立）。黑白棋盘格的
-  第 N 层因此在 CPU 上是 188、在 GPU 上是 128；深色与亮色的混合差距更大。影响面是任何被缩小的
-  sRGB 表面（非 `pixelPerfect` 的精灵、远处的网格面），而两条后端的像素比对目前只覆盖
-  `pixelPerfect`（不采 mip）与几何边缘，所以没有用例会红。改法有两条：把 CPU 的链整体传给 GPU
-  （`Texture` 的链是私有的，要先给出访问器，等于动 `cairn/texture.h` 的契约），或者在上传时
-  按同样的“解码/平均/编码”重建。后者不动契约，代价是每个 sRGB 贴图上传时多几次 `SrgbToLinearFast`
-  调用；无论走哪条，都要先补一条**非 `pixelPerfect`、被缩小**的跨后端用例（今天会红）。
+- **GPU 的 mip 链与 CPU 的 mip 链内容不同（0.2.12 已修）。** `Texture::GenerateMipmaps` 对 sRGB
+  贴图的 2×2 均值是“解码到线性 → 平均 → 重新编码”（`cairn/texture.h` 里的契约），而
+  `backend_vulkan.cpp` 在向 GPU 上传时用同一段暂存内存重建粗层，直接对编码后的字节求均值。
+  黑白棋盘格的第 1 层因此在参考图上是 113、在 GPU 上是 128；把同一张 64×64 棋盘画成
+  16×16 像素的 unlit 四边形，两条后端在同一块平坦表面上相差最多 26 级。任何被缩小的 sRGB
+  表面（非 `pixelPerfect` 的精灵、远处的网格面）都受影响，而此前的跨后端比对只覆盖
+  `pixelPerfect`（不采 mip）与几何边缘，所以没有用例会红。
+- **两条链现在调用同一个函数。** `engine/src/texture_mip.h` 的 `DownsampleTexel2x2` 是 2×2
+  盒式滤波的唯一定义：sRGB 贴图先解码三通道、再平均、再编码，alpha 保持线性；线性贴图直接
+  平均字节。`GenerateMipmaps` 与上传路径都调它，滤波器不可能只在一条链上漂移。不动
+  `cairn/texture.h` 的契约，也不增加依赖：CPU 链仍是私有的，GPU 粗层仍在暂存内存里重建。
+- **回归用例。** `TestMipChainMatchesAcrossBackends` 把 64×64 棋盘以 0.3 世界单位（16 像素）
+  画在 unlit 四边形上，要求 8×8 像素块内两条后端逐通道相差不超过 2 级，并要求参考图不是
+  黑屏，否则“背景比背景”会假通过。`TestTextureMips` 直接钉住 CPU 链：黑白 2×2 的第 1 层
+  采样值必须在 0.12–0.20 之间——线性平均 0.5 编码成 113、采样回来约 0.17，按字节平均会存
+  128、采样回约 0.22。变异：上传路径改回字节平均失败 192 项，CPU 链改回字节平均失败同样
+  192 项外加这条采样带。
 - **GPU 上 2D 精灵的贴图采样与软件不一致。** 已在 0.2.0 关闭：根因是编辑器帧的网格线段顶点
   盖掉了 2D 顶点，与贴图、mip 和采样器都无关（关掉 `pixelPerfect`、`msaa 1`、`shadows 0` 仍差，
   是因为线段照旧在写）。复现口径保留在 0.1.34 / 0.1.35 的记录里，回归用例是

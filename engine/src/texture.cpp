@@ -1,5 +1,7 @@
 #include "cairn/texture.h"
 
+#include "texture_mip.h"
+
 #include "cairn/log.h"
 #include "cairn/math.h"
 
@@ -146,17 +148,10 @@ void Texture::GenerateMipmaps() {
                 const uint8_t* c = &src[((size_t)y1 * w + x0) * 4];
                 const uint8_t* d = &src[((size_t)y1 * w + x1) * 4];
                 uint8_t* o = &dst[((size_t)y * nw + x) * 4];
-                for (int k = 0; k < 4; ++k) {
-                    if (srgb_ && k < 3) {
-                        // Averaging gamma-encoded values darkens the result, so
-                        // decode, average, re-encode.
-                        const float lin = (SrgbToLinearFast(a[k] / 255.0f) + SrgbToLinearFast(b[k] / 255.0f) +
-                                           SrgbToLinearFast(c[k] / 255.0f) + SrgbToLinearFast(d[k] / 255.0f)) * 0.25f;
-                        o[k] = (uint8_t)std::clamp(LinearToSrgbFast(lin) * 255.0f + 0.5f, 0.0f, 255.0f);
-                    } else {
-                        o[k] = (uint8_t)((a[k] + b[k] + c[k] + d[k] + 2) / 4);
-                    }
-                }
+                // Averaging gamma-encoded values darkens the result, so sRGB
+                // textures decode, average and re-encode. The GPU upload path
+                // calls the same function for its coarse levels.
+                DownsampleTexel2x2(a, b, c, d, srgb_, o);
             }
         }
         levels_.push_back(std::move(dst));

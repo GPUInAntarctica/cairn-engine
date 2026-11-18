@@ -491,6 +491,22 @@ static void TestTextureMips() {
         CHECK(c[0] > 0.99f && c[1] < 0.01f);
     }
 
+    // An sRGB chain averages in linear light, not in encoded bytes. A black /
+    // white 2x2 decodes to 0, 1, 1, 0 and averages to 0.5, which the encoder
+    // stores as 113 and the sampler reads back as ~0.17. Averaging the encoded
+    // bytes instead stores 128 and reads back as ~0.22, a quarter brighter;
+    // the band sits between the two, so a chain that stops decoding fails here
+    // without pinning the exact sRGB approximation.
+    auto bw = std::make_shared<Texture>(2, 2);
+    bw->setSRGB(true);
+    const uint8_t block[16] = {0, 0, 0, 255, 255, 255, 255, 255,
+                               255, 255, 255, 255, 0, 0, 0, 255};
+    std::memcpy(bw->pixels(), block, sizeof(block));
+    bw->GenerateMipmaps();
+    float greyLinear[4];
+    bw->SampleLod(0.5f, 0.5f, 1.0f, Texture::Wrap::Clamp, Texture::Filter::Nearest, greyLinear);
+    CHECK(greyLinear[0] > 0.12f && greyLinear[0] < 0.20f);
+
     // Non-power-of-two textures still produce a full chain.
     auto odd = Texture::Solid(5, 10, 20, 30);
     odd->GenerateMipmaps();
@@ -2221,6 +2237,72 @@ static void TestSpriteEdgeAntialiasing() {
     }
     CHECK(seam == 0);    // no seam across the quad's diagonal
     CHECK(soft > 0);     // the silhouette is still antialiased
+}
+
+// A minified sRGB texture must have the same mip chain on both backends. The
+// CPU chain decodes to linear before averaging (that is what GenerateMipmaps
+// documents), while the GPU upload path used to average the encoded bytes: a
+// black/white checker's first level was 188 on the reference and 128 on the
+// GPU. A 64x64 checker drawn at 16x16 pixels asks for level 2, where every
+// level from 1 up is the same flat mid grey, so the comparison does not depend
+// on the exact LOD either backend derives.
+static void TestMipChainMatchesAcrossBackends() {
+    const std::string dir = (std::filesystem::temp_directory_path() / "cairn-test-mipchain").string();
+    std::filesystem::create_directories(dir + "/Assets/Textures");
+    const std::string tex = "Assets/Textures/checker.bmp";
+    WriteTestBmpChecker(dir + "/" + tex, 64, 64, 0, 0, 0, 255, 255, 255);
+
+    auto render = [&](int backend) {
+        Engine engine;
+        engine.SetProjectRoot(dir);
+        engine.SetViewportSize(160, 120);
+        Scene& scene = engine.scene();
+        scene.renderBackend = backend;
+        scene.msaa = 1;
+        scene.shadows = 0;
+        GameObject* cam = scene.CreateEntity("Main");
+        cam->tag = "MainCamera";
+        cam->transform().position = Vec3(0, 0, 5);
+        auto* cc = cam->AddComponent<CameraComponent>();
+        cc->orthographic = true;
+        cc->orthographicSize = 1.5f;   // 3 world units across 160 px
+        cc->clearColor = Color(0, 0, 0, 1);
+        cc->skyEnabled = false;
+
+        GameObject* quad = scene.CreateEntity("Quad");
+        quad->transform().rotation = Quat::FromEulerDegrees(Vec3(0, 180, 0));  // Mesh::Quad() faces -Z
+        quad->transform().scale = Vec3(0.3f, 0.3f, 1.0f);    // 1 unit -> 16 px
+        auto* mr = quad->AddComponent<MeshRenderer>();
+        mr->mesh = MeshRenderer::MeshSource::Quad;
+        mr->albedoTexturePath = tex;
+        mr->unlit = true;
+        RenderStats stats = engine.RenderGameFrame();
+        return std::make_pair(engine.frame().color, std::string(stats.backend ? stats.backend : ""));
+    };
+
+    const auto cpu = render(2);
+    CHECK(cpu.second == "software");
+    if (!VulkanBackendAvailable()) return;
+    const auto gpu = render(1);
+    if (gpu.second != "vulkan") return;
+
+    const auto& a = cpu.first;
+    const auto& b = gpu.first;
+    for (int y = 56; y < 64; ++y) {
+        for (int x = 76; x < 84; ++x) {
+            const size_t i = ((size_t)y * 160 + x) * 4;
+            for (int c = 0; c < 3; ++c) {
+                const int d = std::abs((int)a[i + c] - (int)b[i + c]);
+                CHECK(d <= 2);
+            }
+        }
+    }
+    // The quad must actually be on screen; comparing background against
+    // background would agree trivially. The absolute value is tonemapped, so
+    // only "not black" is asserted here - the exact linear-space average is
+    // pinned by TestTextureMips.
+    const size_t centre = ((size_t)60 * 160 + 80) * 4;
+    CHECK(a[centre] > 5);
 }
 
 // Sprites in a frame that also carries lines. The editor grid arrives as debug
@@ -5558,6 +5640,7 @@ int main() {
     TestSortingOrder();
     TestSpriteQuality();
     TestSpriteEdgeAntialiasing();
+    TestMipChainMatchesAcrossBackends();
     TestEditorFrameSprites();
     TestSpriteOrientation();
     TestSpriteNormalOrientation();

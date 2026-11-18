@@ -22,6 +22,7 @@
 #include <utility>
 
 #include "shaders_spirv.h"
+#include "texture_mip.h"
 #include "vulkan_memory.h"
 
 namespace Cairn {
@@ -1733,7 +1734,7 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
             uint8_t* dst = static_cast<uint8_t*>(staging.mapped);
             std::memcpy(dst, tex->pixels(), (size_t)tex->width() * tex->height() * 4);
             // Texture keeps its chain private; rebuild the coarse levels here
-            // with the same 2x2 box the CPU sampler uses, so both backends see
+            // with the same filter the CPU chain uses, so both backends see
             // identical mip content.
             for (int l = 1; l < levels; ++l) {
                 const int sw = tex->levelWidth(l - 1), sh = tex->levelHeight(l - 1);
@@ -1742,17 +1743,16 @@ void VulkanBackend::RenderFrame(const FrameDrawList& list, FrameTarget* target, 
                 uint8_t* out = dst + levelOffset[l];
                 for (int y = 0; y < dh; ++y) {
                     for (int x = 0; x < dw; ++x) {
-                        int acc[4] = {0, 0, 0, 0};
-                        for (int sy = 0; sy < 2; ++sy) {
-                            for (int sx = 0; sx < 2; ++sx) {
-                                const uint8_t* s =
-                                    src + ((size_t)std::min(y * 2 + sy, sh - 1) * sw +
-                                           std::min(x * 2 + sx, sw - 1)) * 4;
-                                for (int c = 0; c < 4; ++c) acc[c] += s[c];
-                            }
-                        }
+                        const auto at = [&](int px, int py) {
+                            return src + ((size_t)std::min(py, sh - 1) * sw +
+                                          std::min(px, sw - 1)) * 4;
+                        };
                         uint8_t* d = out + ((size_t)y * dw + x) * 4;
-                        for (int c = 0; c < 4; ++c) d[c] = (uint8_t)((acc[c] + 2) >> 2);
+                        // Same 2x2 box and the same sRGB decode/encode as
+                        // Texture::GenerateMipmaps: one filter, two callers.
+                        DownsampleTexel2x2(at(x * 2, y * 2), at(x * 2 + 1, y * 2),
+                                           at(x * 2, y * 2 + 1), at(x * 2 + 1, y * 2 + 1),
+                                           tex->isSRGB(), d);
                     }
                 }
             }

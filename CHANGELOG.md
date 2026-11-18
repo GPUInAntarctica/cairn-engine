@@ -2,6 +2,13 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.12] - 2026-11-18
+
+### Rendering: both mip chains use the same sRGB box filter
+- **A minified sRGB texture drew a different shade on the GPU.** `Texture::GenerateMipmaps` builds the CPU chain by decoding the 2x2 block to linear light, averaging and re-encoding (the documented contract in `cairn/texture.h`), while the Vulkan upload path rebuilt its coarse levels by averaging the encoded bytes. For a black/white checker the first coarse level held 113 on the reference and 128 on the GPU; drawn unlit at one sixteenth of its source size, the two backends differed by up to 26 levels on a flat surface. Every minified sRGB surface was affected - non-`pixelPerfect` sprites and distant mesh faces - and no cross-backend test exercised a shrunken texture, so the mismatch had no red test.
+- **One filter definition, two callers.** `engine/src/texture_mip.h` now holds `DownsampleTexel2x2`: three colour channels decode, average and re-encode for an sRGB texture, alpha stays linear, and a linear texture averages its bytes. `GenerateMipmaps` and the upload staging rebuild call the same function, so the chains cannot drift without changing it in one place. No public contract changed: the CPU chain stays private and the upload keeps rebuilding its levels at staging time, which means no new accessors and no new dependency.
+- **Tests.** `TestMipChainMatchesAcrossBackends` draws a 64x64 checker as a 16x16-pixel unlit quad and requires every channel of every pixel in the 8x8 block to agree within 2 levels; it also checks the reference is not simply background, so a missing texture cannot pass by comparing black to black. `TestTextureMips` pins the CPU filter directly: level 1 of a black/white 2x2 samples between 0.12 and 0.20 - linear 0.5 encodes to 113 and reads back near 0.17, while a byte average stores 128 and reads back near 0.22. Mutations: restoring byte averaging in the upload fails 192 pixel checks, and restoring it in the CPU chain fails the same 192 plus the CPU band; both are reverted and the suite is green. CLI 540 checks unchanged.
+
 ## [0.2.11] - 2026-11-18
 
 ### Rendering: point lights cast shadows through six cube faces
