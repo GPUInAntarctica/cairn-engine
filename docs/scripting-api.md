@@ -186,6 +186,17 @@ Debug::LogWarning(...); Debug::LogError(...);
 Debug::DrawLine(from, to, color);        // one-frame viewport line
 ```
 
+## Errors
+
+Scripts run in the host process, so the engine wraps every callback it calls
+(`OnStart`, `OnUpdate`, `FixedUpdate`, collision/trigger events, `OnDestroy` and
+the inspector's `DescribeProps`) and catches exceptions there. A thrown
+`std::exception` or any other value is logged as
+`script <Class>::<Method> threw: <message>` and the frame continues; it does not
+unwind into the editor or CLI. Those lines appear in the editor console (the
+Console tab shows an error count when the panel is not visible) and can be read
+from a batch with `cairn runtime.logs --level error`.
+
 ## Audio
 
 `Audio::Play("Assets/Audio/jump.wav")` — queues a WAV clip; the host decodes and plays it (volume/pitch optional).

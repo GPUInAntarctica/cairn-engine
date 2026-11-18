@@ -5,6 +5,7 @@
 #include "cairn/texture.h"
 #include "cairn/physics.h"
 #include "scene_internal.h"
+#include "script_guard.h"
 #include "material_shader.h"
 #include "shader_library.h"
 
@@ -23,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <set>
+#include <stdexcept>
 
 using namespace Cairn;
 
@@ -902,6 +904,32 @@ static void TestScripts() {
     CHECK(meta.properties.size() == 2);
     CHECK(meta.properties[0].name == "speed");
     delete probe;
+}
+
+// A gameplay script runs in the host process, so an exception escaping back
+// into the engine terminates the editor or CLI instead of reporting the fault.
+// GuardScript is the boundary every script callback goes through; it has to
+// swallow both std::exception and foreign throws while logging which class and
+// callback failed, and the frame after it must still run.
+static void TestScriptExceptionIsContained() {
+    auto history = Log::Poll(0, 2048);
+    const uint64_t after = history.empty() ? 0 : history.back().id;
+
+    bool ran = false;
+    GuardScript("Thrower", "OnStart", [] { throw std::runtime_error("boom"); });
+    GuardScript("Thrower", "OnUpdate", [] { throw 42; });
+    GuardScript("Thrower", "OnStart", [&] { ran = true; });
+
+    const auto entries = Log::Poll(after, 16);
+    bool sawRuntime = false, sawUnknown = false;
+    for (const LogEntry& e : entries) {
+        if (e.text.find("script Thrower::OnStart threw: boom") != std::string::npos) sawRuntime = true;
+        if (e.text.find("script Thrower::OnUpdate threw an unknown exception") != std::string::npos) sawUnknown = true;
+    }
+    CHECK(ran);
+    CHECK(entries.size() == 2);
+    CHECK(sawRuntime);
+    CHECK(sawUnknown);
 }
 
 // Every primitive mesh must be wound counter-clockwise seen from outside:
@@ -5289,6 +5317,7 @@ int main() {
     TestParentedPhysics();
     TestTriggerAndEnabled();
     TestScripts();
+    TestScriptExceptionIsContained();
     TestPbrMaterials();
     TestMaterialShaderCompiler();
     TestMaterialShaderLibrary();

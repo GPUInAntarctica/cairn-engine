@@ -90,7 +90,24 @@ export function mountEditor(root, prefs) {
     function activateBottom(which) {
         for (const [id, el] of Object.entries(bottomPages)) el.classList.toggle('active', id === which);
         editor.activeBottom = which;
+        consolePanel.setActive(which === 'console');
         renderBottomTabs();
+        updateConsoleBadge();
+    }
+    function updateConsoleBadge() {
+        const tab = bottomStrip.querySelector('.tab[data-id="console"]');
+        if (!tab) return;
+        let badge = tab.querySelector('.tab-badge');
+        if (!consolePanel.unseenErrors) {
+            if (badge) badge.remove();
+            return;
+        }
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'tab-badge';
+            tab.appendChild(badge);
+        }
+        badge.textContent = String(consolePanel.unseenErrors);
     }
     function renderBottomTabs() {
         bottomStrip.innerHTML = '';
@@ -105,6 +122,7 @@ export function mountEditor(root, prefs) {
                 `<span class="tab-label">${escapeHtml(t(id === 'console' ? 'panel.console' : 'panel.content'))}</span>`;
             bottomStrip.appendChild(tab);
         }
+        updateConsoleBadge();
     }
     bottomStrip.addEventListener('click', ev => {
         const tab = ev.target.closest('.tab');
@@ -137,13 +155,19 @@ export function mountEditor(root, prefs) {
             status(t('status.buildOk', { ms: r.durationMs }));
         } else {
             status(t('status.buildFailed'));
+            const diagnostics = r.diagnostics || [];
             for (const [, page] of tabHost.pages) {
-                if (page.codeEditor) page.codeEditor.applyDiagnostics(r.diagnostics);
+                if (page.codeEditor) page.codeEditor.applyDiagnostics(diagnostics);
             }
-            consolePanel.entries.push(...r.diagnostics
-                .filter(d => d.severity === 'error')
-                .map(d => ({ level: 'error', text: `${d.file}:${d.line}: ${d.message}`, time: new Date() })));
+            for (const d of diagnostics) {
+                const where = d.file ? `${d.file}:${d.line}: ` : '';
+                consolePanel.add(d.severity === 'warning' ? 'warning' : 'error', where + d.message);
+            }
             consolePanel.render();
+            // Unity puts the compiler output in front of the user instead of
+            // leaving it behind a tab; a failed build is not something to
+            // discover later from the status bar.
+            activateBottom('console');
             return;
         }
         // A script class only exists in the process once the library that
@@ -554,7 +578,11 @@ export function mountEditor(root, prefs) {
 
         viewport.frame(dt);
         if (editor.playing && !editor.paused) engineInstance().update(dt);
-        if (editor.playing) consolePanel.pump();
+        // Engine logs are drained every frame, not only while playing: a
+        // library that fails to load or a script class the scene names but
+        // nobody registered is an editing-time error too.
+        consolePanel.pump();
+        updateConsoleBadge();
         lastStats = viewport.lastRenderStats || lastStats;
         viewport.updateStats(lastStats, lastFps, viewport.showStats ? engineInstance().profile() : null);
         statusbar.update(statusState());

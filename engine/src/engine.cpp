@@ -4,6 +4,7 @@
 #include "cairn/jobs.h"
 #include "cairn/profiler.h"
 #include "scene_internal.h"
+#include "script_guard.h"
 #include "script_host.h"
 #include "shader_library.h"
 
@@ -502,9 +503,12 @@ bool Engine::LoadScriptLibrary(const std::string& absolutePath, std::string* err
     for (const ScriptClassRecord& r : scriptHost_->Records()) {
         ScriptClassInfo info;
         info.name = r.name ? r.name : "";
-        if (Component* probe = r.create()) {
+        Component* probe = nullptr;
+        GuardScript(info.name, "create", [&] { probe = r.create(); });
+        if (probe) {
             ScriptMeta meta;
-            probe->DescribeProps(meta);
+            GuardScript(info.name, "DescribeProps",
+                        [&] { probe->DescribeProps(meta); });
             for (const ScriptProperty& p : meta.properties) {
                 info.props.push_back({p.name, (int)p.type, p.defaultValue});
             }
@@ -538,7 +542,10 @@ void Engine::StartScripts() {
             if (c->TypeId() != ComponentTypeId::Script) continue;
             auto* sc = static_cast<ScriptComponent*>(c);
             if (sc->scriptClass.empty()) continue;
-            Component* inst = scriptHost_ ? scriptHost_->Create(sc->scriptClass) : nullptr;
+            Component* inst = nullptr;
+            GuardScript(sc->scriptClass, "create", [&] {
+                inst = scriptHost_ ? scriptHost_->Create(sc->scriptClass) : nullptr;
+            });
             if (!inst) {
                 Log::Error("script class not found: %s (build scripts first)", sc->scriptClass.c_str());
                 continue;
@@ -554,7 +561,8 @@ void Engine::StartScripts() {
         for (Component* c : go->GetComponentList()) {
             if (c->TypeId() != ComponentTypeId::Script) continue;
             auto* sc = static_cast<ScriptComponent*>(c);
-            if (sc->instance && sc->enabled) sc->instance->OnStart();
+            if (sc->instance && sc->enabled)
+                GuardScript(sc->scriptClass, "OnStart", [&] { sc->instance->OnStart(); });
         }
     }
 }
@@ -634,7 +642,9 @@ void Engine::Update(float dt) {
                     for (Component* c : go->GetComponentList()) {
                         if (c->TypeId() != ComponentTypeId::Script) continue;
                         auto* sc = static_cast<ScriptComponent*>(c);
-                        if (sc->instance && sc->enabled) sc->instance->FixedUpdate(fixed);
+                        if (sc->instance && sc->enabled)
+                            GuardScript(sc->scriptClass, "FixedUpdate",
+                                        [&] { sc->instance->FixedUpdate(fixed); });
                     }
                 }
             }
@@ -653,7 +663,9 @@ void Engine::Update(float dt) {
                 for (Component* c : go->GetComponentList()) {
                     if (c->TypeId() != ComponentTypeId::Script) continue;
                     auto* sc = static_cast<ScriptComponent*>(c);
-                    if (sc->instance && sc->enabled) sc->instance->OnUpdate(scaled);
+                    if (sc->instance && sc->enabled)
+                        GuardScript(sc->scriptClass, "OnUpdate",
+                                    [&] { sc->instance->OnUpdate(scaled); });
                 }
             }
         }

@@ -10,6 +10,7 @@
 #include "cairn/log.h"
 #include "cairn/mesh.h"
 #include "scene_internal.h"
+#include "script_guard.h"
 
 #include <algorithm>
 #include <cmath>
@@ -680,8 +681,10 @@ void NotifyTrigger(const Shape& self, const Shape& other, bool entered) {
         if (c->TypeId() != ComponentTypeId::Script || !c->enabled) continue;
         auto* sc = static_cast<ScriptComponent*>(c);
         if (sc->instance) {
-            if (entered) sc->instance->OnTriggerEnter(other.comp);
-            else sc->instance->OnTriggerExit(other.comp);
+            const char* method = entered ? "OnTriggerEnter" : "OnTriggerExit";
+            GuardScript(sc->scriptClass, method,
+                        [&] { entered ? sc->instance->OnTriggerEnter(other.comp)
+                                      : sc->instance->OnTriggerExit(other.comp); });
         }
     }
 }
@@ -693,9 +696,18 @@ void NotifyCollision(Component* receiver, const Shape& self, const Shape& other,
         auto* sc = static_cast<ScriptComponent*>(c);
         if (!sc->instance) continue;
         switch (phase) {
-            case CollisionPhase::Enter: sc->instance->OnCollisionEnter(other.comp); break;
-            case CollisionPhase::Stay: sc->instance->OnCollisionStay(other.comp); break;
-            case CollisionPhase::Exit: sc->instance->OnCollisionExit(other.comp); break;
+            case CollisionPhase::Enter:
+                GuardScript(sc->scriptClass, "OnCollisionEnter",
+                            [&] { sc->instance->OnCollisionEnter(other.comp); });
+                break;
+            case CollisionPhase::Stay:
+                GuardScript(sc->scriptClass, "OnCollisionStay",
+                            [&] { sc->instance->OnCollisionStay(other.comp); });
+                break;
+            case CollisionPhase::Exit:
+                GuardScript(sc->scriptClass, "OnCollisionExit",
+                            [&] { sc->instance->OnCollisionExit(other.comp); });
+                break;
         }
     }
     (void)receiver;

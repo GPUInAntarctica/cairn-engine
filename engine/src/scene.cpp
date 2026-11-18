@@ -1,4 +1,5 @@
 #include "scene_internal.h"
+#include "script_guard.h"
 
 #include <algorithm>
 #include <cstring>
@@ -167,7 +168,7 @@ bool GameObject::RemoveComponentByName(const std::string& typeName) {
 
 void ScriptComponent::DestroyInstance() {
     if (!instance) return;
-    instance->OnDestroy();
+    GuardScript(scriptClass, "OnDestroy", [&] { instance->OnDestroy(); });
     delete instance;
     instance = nullptr;
 }

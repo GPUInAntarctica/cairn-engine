@@ -2404,6 +2404,48 @@ check(exported && fs.existsSync(path.join(exported.dir, 'Library', 'GameScripts.
     'exported player carries the compiled scripts');
 
 // ---------------------------------------------------------------------------
+console.log('cli: script exceptions are contained and readable');
+// ---------------------------------------------------------------------------
+// A throwing script used to unwind through the addon and abort the whole CLI
+// process (exit 134), with the exception text on stderr and no JSON result.
+// The engine boundary logs it instead, so the batch completes and the error
+// comes back through runtime.logs like any other diagnostic.
+const throwProject = path.join(scratch, 'Throw');
+expectOk(['project.create', '--name', 'Throw', '--parent', scratch, '--template', 'project-3d']);
+fs.writeFileSync(path.join(throwProject, 'Assets', 'Scripts', 'Rotator.cpp'), `
+#include <cairn/cairn.h>
+#include <stdexcept>
+using namespace Cairn;
+class Rotator : public Component {
+public:
+    void OnStart() override { throw std::runtime_error("boom from OnStart"); }
+    void OnUpdate(float) override { throw std::runtime_error("boom from OnUpdate"); }
+    void DescribeProps(ScriptMeta& m) override { m.Add("speed", PropType::Float, 90.0f); }
+};
+CAIRN_SCRIPT(Rotator)
+`);
+const throwBatch = writeBatch('throw.jsonl', [
+    { command: 'scene.load', args: { file: 'Assets/Scenes/Main.cscene' } },
+    { command: 'script.build', args: {} },
+    { command: 'runtime.play' },
+    { command: 'runtime.update', args: { frames: 5 } },
+    { command: 'runtime.logs', args: { level: 'error' } },
+]);
+const throwRun = spawnSync(process.execPath, [cli, '--project', throwProject, 'exec.run', '--file', throwBatch],
+    { encoding: 'utf8', cwd: scratch });
+const throwLines = throwRun.stdout.trim().split('\n').map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+check(throwRun.status === 0, 'a script exception does not abort the CLI process', throwRun.stderr);
+check(throwLines.filter(l => l.ok === false).length === 0, 'every batch step completes after the throw', throwRun.stdout);
+const throwUpdates = throwLines.filter(l => l.command === 'runtime.update');
+check(throwUpdates.length === 1 && throwUpdates[0].result.frames === 5,
+    'frames keep advancing after the script throws', throwUpdates[0]);
+const throwLogs = (throwLines.find(l => l.command === 'runtime.logs') || {}).result || [];
+check(throwLogs.some(e => e.level === 'error' && /Rotator::OnStart threw: boom from OnStart/.test(e.text)),
+    'runtime.logs returns the OnStart exception', throwLogs);
+check(throwLogs.some(e => e.level === 'error' && /Rotator::OnUpdate threw: boom from OnUpdate/.test(e.text)),
+    'runtime.logs returns the OnUpdate exception', throwLogs);
+
+// ---------------------------------------------------------------------------
 fs.rmSync(scratch, { recursive: true, force: true });
 
 console.log(`cli: ${checks - failures}/${checks} checks passed`);

@@ -409,6 +409,19 @@ button.tab { font-family: var(--ui); background: transparent; border: 0; border-
 .tab-icon { display: flex; color: var(--tx-faint); }
 .tab.active .tab-icon { color: var(--ac); }
 .tab-label { overflow: hidden; text-overflow: ellipsis; }
+/* Unseen console errors: a count beside the label, not a whole-tab colour
+   change, so the strip keeps its single accent for the active tab. */
+.tab-badge {
+    min-width: 16px;
+    height: 16px;
+    padding: 0 var(--sp-1);
+    border-radius: 8px;
+    background: var(--st-err);
+    color: #fff;
+    font-size: var(--fs-11);
+    line-height: 16px;
+    text-align: center;
+}
 .tab .close {
     width: 14px;
     height: 14px;

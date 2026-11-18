@@ -235,7 +235,9 @@ docs/           Documentation
 
 ## Status
 
-Cairn is at version **0.2.8.1**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+Cairn is at version **0.2.9**. The 2D pipeline runs end to end, the editor and the CLI drive one engine, and the rendering faults that had made the two backends disagree were found in the code and fixed rather than written around.
+
+**What 0.2.9 changes.** A gameplay script that throws no longer takes the editor or the CLI down with it. Scripts run in the host process, so an exception used to unwind through the addon: the editor stopped responding and a CLI batch aborted with exit 134 before it could report anything. Every callback the engine makes into a script (start, update, fixed update, collision/trigger events, destroy, inspector metadata and construction) now runs through a boundary that logs `script <Class>::<Method> threw: <message>` and continues the frame. The editor drains the engine log every frame, opens the Console tab when a build fails, shows warnings as well as errors, and puts an error-count badge on the tab when the console is not visible; the same lines come back from `cairn runtime.logs --level error` after a contained throw. The engine and CLI suites cover a throwing `OnStart`/`OnUpdate` end to end.
 
 **What 0.2.8.1 changes.** Destroying an entity that still had cached physics contacts no longer crashes the next physics step. `Scene::DestroyEntityNow` now removes any `physicsPairs` entries referencing components in the destroyed subtree before those components are freed, preventing the exit/notification path from dereferencing dangling pointers.
 
@@ -264,7 +266,7 @@ Cairn is at version **0.2.8.1**. The 2D pipeline runs end to end, the editor and
 
 **What the 0.1 series built, and what 0.2.x keeps.** The 2D pipeline is complete on both backends: slicing, pixel-perfect sampling, sprite animation with named clips, per-cell timing, animation events, clips that name their own sheet, a state machine driven by parameters and transitions, and a 2D panel that draws the sheet, its slicing and its timeline. Gameplay scripts compile from the editor or the CLI and load without a build when nothing moved. Physics runs with capsule and character controllers, joints, sleeping and continuous collision. `cairn` exposes all of it as structured JSON, and `image.*` closes the loop that lets an agent draw an asset, render it and read the pixels back.
 
-The software rasterizer remains the reference implementation and is what the test suite pins, so a picture difference between the backends is a GPU-side bug rather than an accepted one: the engine unit tests, the build-staging test (29 checks), the viewport transform maths (54 checks), the sheet model (`test/sheet.js`, 79 checks), the end-to-end smoke test and the CLI suite (534 checks) pass, renderer work is checked on both paths, and the GPU path is additionally run under the Khronos validation layers. See the [CHANGELOG](CHANGELOG.md) for the full history and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+The software rasterizer remains the reference implementation and is what the test suite pins, so a picture difference between the backends is a GPU-side bug rather than an accepted one: the engine unit tests, the build-staging test (29 checks), the viewport transform maths (54 checks), the sheet model (`test/sheet.js`, 79 checks), the end-to-end smoke test and the CLI suite (540 checks) pass, renderer work is checked on both paths, and the GPU path is additionally run under the Khronos validation layers. See the [CHANGELOG](CHANGELOG.md) for the full history and [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 

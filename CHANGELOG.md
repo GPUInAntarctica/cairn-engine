@@ -2,6 +2,15 @@
 
 All notable changes to Cairn Engine are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.2.9] - 2026-11-18
+
+### Scripts: an exception is reported instead of taking the host down
+- **A script that throws terminated the editor and the CLI.** Gameplay code is compiled into a shared library and runs in the same process as the addon, and every callback was invoked directly. A `throw` unwound through the engine into N-API: the editor stopped responding (the headless harness had to be killed at its 120 s timeout, with `terminate called after throwing an instance of 'std::runtime_error'` and `what(): script boom from OnStart` on stderr) and a CLI batch aborted with signal 6 / exit 134, leaving one truncated JSONL step and no way to read the fault. Reproduced with a template project whose `Rotator::OnStart` throws.
+- **Every callback now has a containment boundary.** `engine/src/script_guard.h` provides `GuardScript`, which runs one script call in a `try`/`catch`, logs `script <Class>::<Method> threw: <message>` for a `std::exception` and `<Class>::<Method> threw an unknown exception` for foreign throws, and lets the frame continue. It wraps `create`, `DescribeProps`, `OnStart`, `OnUpdate`, `FixedUpdate`, `OnTriggerEnter/Exit`, `OnCollisionEnter/Stay/Exit` and `OnDestroy`, which are all the points the engine calls script code.
+- **The editor shows the failure like Unity.** The console now drains the engine log every frame instead of only during play, so library-load and missing-class errors that happen while editing are not hidden. A failed build opens the Console tab automatically and lists warnings as well as errors (previously only errors were copied); while the console is not the active tab, unseen errors raise a red count badge on it. The status bar already named the failed build; the detail is now in front of the user rather than behind a tab.
+- **The CLI can read the same errors.** Because the exception is contained, a batch reaches its `runtime.logs` step; `cairn runtime.logs --level error` returns the class, callback and message. A five-step batch (`scene.load`, `script.build`, `runtime.play`, `runtime.update`, `runtime.logs`) now exits 0 with every step complete, where it previously aborted at play.
+- **Tests.** `TestScriptExceptionIsContained` calls `GuardScript` with a `std::runtime_error` and an integer throw, then with a normal call, and requires two logged entries and the later call to run. The smoke suite compiles a throwing script, enters play, advances five frames and checks that play mode, rendering and later frames survive while both `OnStart` and `OnUpdate` exceptions are logged. The CLI suite runs the batch above in a child process and rejects a non-zero exit, any failed step, or a missing error line. Build 29, CLI **540 checks**.
+
 ## [0.2.8.1] - 2026-10-30
 
 ### Physics: destroy no longer leaves dangling contacts

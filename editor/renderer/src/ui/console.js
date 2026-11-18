@@ -33,6 +33,8 @@ export class ConsolePanel {
         });
         pageEl.querySelector('button').addEventListener('click', () => this.clear());
         this.autoScroll = true;
+        this.active = false;
+        this.unseenErrors = 0;
         this.list.addEventListener('scroll', () => {
             // Re-arm from either edge: scrolling back to the bottom turns
             // auto-scroll back on, which the previous one-way test could not do.
@@ -46,19 +48,34 @@ export class ConsolePanel {
         const logs = engineInstance().pollLogs();
         if (!logs.length) return;
         for (const l of logs) {
-            const last = this.entries[this.entries.length - 1];
-            const text = l.text;
-            // Collapse at push time. Counting during render stored the tally on
-            // the previous row, so a run of identical lines printed x2, x3, x4
-            // down the list instead of one row reading x5.
-            if (last && last.text === text && last.level === l.level && last.count) {
-                last.count++;
-                last.time = new Date();
-                continue;
-            }
-            this.entries.push({ level: LEVELS[l.level] || 'info', text, time: new Date(), count: 0 });
+            this.add(LEVELS[l.level] || 'info', l.text);
         }
+        this.render();
+    }
+
+    // Adds one row. Errors that arrive while the panel is not the active
+    // bottom tab raise the unseen counter the tab strip renders as a badge,
+    // so a script failure cannot pass unnoticed behind the Content Browser.
+    add(level, text) {
+        const last = this.entries[this.entries.length - 1];
+        if (last && last.text === text && last.level === level && last.count) {
+            last.count++;
+            last.time = new Date();
+            return;
+        }
+        this.entries.push({ level, text, time: new Date(), count: 0 });
+        if (level === 'error' && !this.active) this.unseenErrors++;
         if (this.entries.length > MAX_ENTRIES) this.entries.splice(0, this.entries.length - MAX_ENTRIES);
+    }
+
+    setActive(active) {
+        this.active = active;
+        if (active) this.unseenErrors = 0;
+    }
+
+    clear() {
+        this.entries = [];
+        this.unseenErrors = 0;
         this.render();
     }
 
@@ -85,8 +102,6 @@ export class ConsolePanel {
         this.list.innerHTML = rows.join('');
         if (this.autoScroll) this.list.scrollTop = this.list.scrollHeight;
     }
-
-    clear() { this.entries = []; this.render(); }
 }
 
 function hhmss(d) {

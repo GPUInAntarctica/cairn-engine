@@ -353,6 +353,42 @@ check(engine.getWorldPosition(999999) === null, 'a missing entity has no world p
 check(engine.setWorldPosition(999999, 0, 0, 0) === false,
     'setting a world position on a missing entity reports failure');
 
+// A C++ exception thrown by a script must be reported, not allowed to unwind
+// into the host: the addon is the same process as the editor and the CLI, so an
+// escaping exception terminates them instead of showing the fault.
+const throwerSrc = writeScript('Thrower.cpp', `
+#include <cairn/cairn.h>
+#include <stdexcept>
+using namespace Cairn;
+class Thrower : public Component {
+public:
+    void OnStart() override { throw std::runtime_error("start boom"); }
+    void OnUpdate(float) override { throw std::runtime_error("update boom"); }
+    void DescribeProps(ScriptMeta&) override {}
+};
+CAIRN_SCRIPT(Thrower)
+`);
+build = compileScripts([throwerSrc], libPath);
+check(build.ok, 'compiles a throwing script\n' + (build.ok ? '' : build.error));
+load = engine.loadScriptLibrary(libPath);
+check(load.ok && load.classes.some(c => c.name === 'Thrower'), 'loads the throwing script');
+engine.newScene('Throws');
+const throwEntity = engine.createEntity('ThrowTarget', 0);
+engine.addComponent(throwEntity, 'Script');
+engine.setComponentProp(throwEntity, 'Script', 'class', 'Thrower');
+engine.pollLogs();
+engine.play();
+const throwingFrame = engine.renderGameFrame();
+for (let i = 0; i < 5; ++i) { engine.update(1 / 60); engine.renderGameFrame(); engine.endFrameInput(); }
+const throwLogs = engine.pollLogs();
+check(engine.isPlaying(), 'a throwing OnStart leaves play mode running');
+check(throwingFrame && typeof throwingFrame.drawCalls === 'number', 'the frame after a throw still renders');
+check(throwLogs.some(l => l.text.includes('Thrower::OnStart threw: start boom')),
+    'the OnStart exception is logged with its class and method');
+check(throwLogs.some(l => l.text.includes('Thrower::OnUpdate threw: update boom')),
+    'the OnUpdate exception is logged and does not stop later frames');
+engine.stop();
+
 fs.rmSync(projectDir, { recursive: true, force: true });
 
 if (failures === 0) {
